@@ -51,3 +51,6 @@ io_eff(CID(Hvf.unix_connect), hvf_unavailable);
 io_eff(CID(Hvf.vsock_listen), hvf_unavailable);
 io_eff(CID(Hvf.vsock_accept), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.vsock_base), () => "");
+io_eff(CID(Hvf.fb_init), () => 1);
+io_eff(CID(Hvf.fb_dump), hvf_unavailable);
+io_eff(CID(Hvf.fb_present), (w) => io_tup(w, { $: CID(Nil) }));

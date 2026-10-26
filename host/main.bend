@@ -8,6 +8,8 @@ import ../src/vmm/snapshot.bend as Snap
 import ../src/net/nat.bend as Nt
 import ../src/arm64/psci.bend as Ps
 import ../src/virtio/device.bend as D
+import ../src/virtio/input.bend as In
+import ../src/dev/keymap.bend as Km
 import ../src/boot/image.bend as I
 import ../src/boot/dtb.bend as T
 import ./hvf.bend as H
@@ -27,57 +29,80 @@ import ./fs.bend as Fs
 #        bend-vmm --payload file.bin      (bare metal: entered at RAM base)
 
 type Opts is Data:
-  Opts{kernel: String, initrd: String, payload: String, cmdline: String, mem: U32, cpus: U32, disk: String, share: String, restore: String, control: String, vsock: String}
+  Opts{kernel: String, initrd: String, payload: String, cmdline: String, mem: U32, cpus: U32, disk: String, share: String, restore: String, control: String, vsock: String, display: String}
 
 def Opts.default() -> Opts:
-  Opts{"", "", "", "console=ttyAMA0 earlycon=pl011,0x9000000", 512, 1, "", "", "", "", ""}
+  Opts{"", "", "", "console=ttyAMA0 earlycon=pl011,0x9000000", 512, 1, "", "", "", "", "", ""}
 
 def Opts.mem(o: Opts) -> U32:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp}:
       m
 
 def Opts.disk(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp}:
       d
 
 def Opts.kernel(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp}:
       k
 
 def Opts.share(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp}:
       sh
 
 def Opts.restore(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp}:
       rs
 
 def Opts.control(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp}:
       ct
 
 def Opts.cpus(o: Opts) -> U32:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp}:
       n
 
 def Opts.vsock(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp}:
       vk
+
+def Opts.display(o: Opts) -> String:
+  match o:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp}:
+      dp
+
+# "WxH" as a display; None for "" or anything malformed.
+def display_of.mk(w: Maybe<&2, U32>, h: Maybe<&2, U32>) -> Maybe<&2, T.Display>:
+  match w h:
+    case Some{x} Some{y}:
+      Some{T.Display{x, y}}
+    case _ _:
+      None{}
+
+def display_of.go(ws: List<&2, String>) -> Maybe<&2, T.Display>:
+  match ws:
+    case Con{w, Con{h, Nil{}}}:
+      display_of.mk(U32.read(w), U32.read(h))
+    case _:
+      None{}
+
+def display_of(spec: String) -> Maybe<&2, T.Display>:
+  display_of.go(String.split(spec, 'x'))
 
 def Opts.num(s: String, d: U32) -> U32:
   Maybe.default(&2, U32, U32.read(s), d)
 
 def Opts.set(+flag: String, +v: String, o: Opts) -> Opts:
   match o:
-    case Opts{k, i, p, c, +m, +n, d, sh, rs, ct, vk}:
+    case Opts{k, i, p, c, +m, +n, d, sh, rs, ct, vk, dp}:
       Opts{
         Bool.pick(String, String.eq(flag, "--kernel"), v, k),
         Bool.pick(String, String.eq(flag, "--initrd"), v, i),
@@ -89,7 +114,8 @@ def Opts.set(+flag: String, +v: String, o: Opts) -> Opts:
         Bool.pick(String, String.eq(flag, "--share"), v, sh),
         Bool.pick(String, String.eq(flag, "--restore"), v, rs),
         Bool.pick(String, String.eq(flag, "--control"), v, ct),
-        Bool.pick(String, String.eq(flag, "--vsock"), v, vk)
+        Bool.pick(String, String.eq(flag, "--vsock"), v, vk),
+        Bool.pick(String, String.eq(flag, "--display"), v, dp)
       }
 
 def Opts.parse(args: List<String>, o: Opts) -> Opts:
@@ -388,6 +414,31 @@ def resume_if(was_running: Bool) -> IO(Unit):
 def reply_rc(+rc: U32, ok: String) -> String:
   Bool.pick(String, U32.is_zero(rc), ok, "error " ++ U32.show(rc))
 
+# A keyboard or pointer report into the machine (M.Machine.hid).
+@unsafe def display.hid(+mc: Chan(M.Machine), +done: Chan(U32), ev: In.Hid) -> IO(Unit):
+  do IO<Unit>:
+    m0 : M.Machine <- take(mc)
+    m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.hid(m0, ev))
+    put(mc, m1)
+
+@unsafe def type_keys(+mc: Chan(M.Machine), +done: Chan(U32), evs: +List<In.Hid>) -> IO(Unit):
+  match evs:
+    case Nil{}:
+      IO.pure(Unit, Unit{})
+    case Con{ev, rest}:
+      do IO<Unit>:
+        display.hid(mc, done, ev)
+        type_keys(mc, done, rest)
+
+@unsafe def command.dump(is_dump: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +verb: String, arg: String) -> IO(String):
+  match is_dump:
+    case True{}:
+      do IO<String>:
+        +rc : U32 <- H.Hvf.fb_dump(arg)
+        return reply_rc(rc, "saved")
+    case False{}:
+      command.run(String.eq(verb, "pause"), String.eq(verb, "resume"), String.eq(verb, "snapshot"), String.eq(verb, "status"), String.eq(verb, "quit"), mc, done, arg)
+
 @unsafe def command.run(is_pause: Bool, is_resume: Bool, is_snap: Bool, is_status: Bool, is_quit: Bool, +mc: Chan(M.Machine), +done: Chan(U32), arg: String) -> IO(String):
   match is_pause is_resume is_snap is_status is_quit:
     case True{} _ _ _ _:
@@ -411,14 +462,60 @@ def reply_rc(+rc: U32, ok: String) -> String:
         _ : Result<&1, &1, U32, Unit> <- Chan.send(U32, done, 0)
         return "bye"
     case False{} False{} False{} False{} False{}:
-      IO.pure(String, "unknown command (pause, resume, snapshot PATH, status, quit)")
+      IO.pure(String, "unknown command (pause, resume, snapshot PATH, screendump PATH, type TEXT, pointer X Y, status, quit)")
+
+# The tablet report of "X Y" (0..32767 each): a move.
+def pointer_of.mk(x: Maybe<&2, U32>, y: Maybe<&2, U32>) -> Maybe<&2, In.Hid>:
+  match x y:
+    case Some{a} Some{b}:
+      Some{In.HidMove{a, b}}
+    case _ _:
+      None{}
+
+def pointer_of.go(ws: List<&2, String>) -> Maybe<&2, In.Hid>:
+  match ws:
+    case Con{x, Con{y, Nil{}}}:
+      pointer_of.mk(U32.read(x), U32.read(y))
+    case _:
+      None{}
+
+def pointer_of(arg: String) -> Maybe<&2, In.Hid>:
+  pointer_of.go(String.split(arg, ' '))
+
+@unsafe def command.pointer.go(ev: Maybe<&2, In.Hid>, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(String):
+  match ev:
+    case None{}:
+      IO.pure(String, "usage: pointer X Y (0..32767)")
+    case Some{h}:
+      do IO<String>:
+        display.hid(mc, done, h)
+        return "moved"
+
+# pointer X Y: moves the virtio tablet to (X, Y) on its 0..32767 scale.
+@unsafe def command.pointer(is_pointer: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +verb: String, arg: String) -> IO(String):
+  match is_pointer:
+    case True{}:
+      command.pointer.go(pointer_of(arg), mc, done)
+    case False{}:
+      command.dump(String.eq(verb, "screendump"), mc, done, verb, arg)
+
+# type TEXT: types TEXT on the virtio keyboard (Km.Keymap.typing; \n is
+# Return).
+@unsafe def command.type(is_type: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +verb: String, arg: String) -> IO(String):
+  match is_type:
+    case True{}:
+      do IO<String>:
+        type_keys(mc, done, Km.Keymap.typing(B.Bytes.of_string(arg), False{}))
+        return "typed"
+    case False{}:
+      command.pointer(String.eq(verb, "pointer"), mc, done, verb, arg)
 
 # One command line: a verb and an optional argument.
 @unsafe def command(+mc: Chan(M.Machine), +done: Chan(U32), +line: String) -> IO(String):
   +parts = String.split(String.trim(line), ' ')
   +verb = Maybe.default(&2, String, List.head(&2, String, parts), "")
   +arg = String.join(List.drop(&2, String, parts, 1n), " ")
-  command.run(String.eq(verb, "pause"), String.eq(verb, "resume"), String.eq(verb, "snapshot"), String.eq(verb, "status"), String.eq(verb, "quit"), mc, done, arg)
+  command.type(String.eq(verb, "type"), mc, done, verb, arg)
 
 @unsafe def ctl_loop.got(stop: Bool, +mc: Chan(M.Machine), +done: Chan(U32), bs: +List<U32>) -> IO(Unit):
   match stop:
@@ -563,6 +660,96 @@ def vkey(+conn: U32) -> U32:
     +ws : +List<U32> <- H.Hvf.vsock_accept()
     vs_accept_loop.got(List.is_empty(&2, U32, ws), mc, done, ws)
 
+# The display: Bend's Window shows the guest's framebuffer (host/hvf.c,
+# Hvf.fb_present). The first frame goes through Window.frame (Bend's own
+# renderer), the rest are blitted straight from guest memory. Keys go to the
+# virtio keyboard (as Linux key codes, Km.Keymap.linux), the pointer and its
+# buttons to the virtio tablet; closing the window stops the VM. The window
+# is w x h points, one per framebuffer pixel.
+# A window coordinate (0..size-1) on the tablet's 0..32767 scale.
+def display.scale(+v: U32, +size: U32) -> U32:
+  ((v * 32767 : U32) / Bool.pick(U32, U32.is_lt(size, 2), 1, (size - 1 : U32)) : U32)
+
+@unsafe def display.events(+mc: Chan(M.Machine), +done: Chan(U32), +w: U32, +h: U32, evs: List<Event>) -> IO(Bool):
+  match evs:
+    case Nil{}:
+      IO.pure(Bool, False{})
+    case Con{ev, rest}:
+      match ev:
+        case Close{}:
+          do IO<Bool>:
+            _ : Result<&1, &1, U32, Unit> <- Chan.send(U32, done, 0)
+            return True{}
+        case Key{code, down}:
+          do IO<Bool>:
+            display.hid(mc, done, In.HidKey{Km.Keymap.linux(code), down})
+            display.events(mc, done, w, h, rest)
+        case Mouse{x, y, b, down}:
+          do IO<Bool>:
+            display.hid(mc, done, In.HidMove{display.scale(x, w), display.scale(y, h)})
+            display.hid(mc, done, In.HidButton{b, down})
+            display.events(mc, done, w, h, rest)
+        case Move{x, y}:
+          do IO<Bool>:
+            display.hid(mc, done, In.HidMove{display.scale(x, w), display.scale(y, h)})
+            display.events(mc, done, w, h, rest)
+        case _:
+          display.events(mc, done, w, h, rest)
+
+@unsafe def display.loop(+mc: Chan(M.Machine), +done: Chan(U32), +w: U32, +h: U32, win: Window) -> IO(Unit):
+  do IO<Unit>:
+    r : Window & List<Event> <- H.Hvf.fb_present(win)
+    display.next(mc, done, w, h, r)
+
+@unsafe def display.next(+mc: Chan(M.Machine), +done: Chan(U32), +w: U32, +h: U32, r: Window & List<Event>) -> IO(Unit):
+  match r:
+    case (win, evs):
+      do IO<Unit>:
+        closed : Bool <- display.events(mc, done, w, h, evs)
+        display.again(closed, mc, done, w, h, win)
+
+@unsafe def display.again(closed: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +w: U32, +h: U32, win: Window) -> IO(Unit):
+  match closed:
+    case True{}:
+      Window.close(win)
+    case False{}:
+      do IO<Unit>:
+        IO.sleep(16)
+        display.loop(mc, done, w, h, win)
+
+@unsafe def display.first(+mc: Chan(M.Machine), +done: Chan(U32), +w: U32, +h: U32, r: Window & Image & List<Event>) -> IO(Unit):
+  match r:
+    case (win, (img, evs)):
+      display.loop(mc, done, w, h, win)
+
+@unsafe def display.opened(+mc: Chan(M.Machine), +done: Chan(U32), +w: U32, +h: U32, r: Result<&1, &1, U32 & String, Window>) -> IO(Unit):
+  match r:
+    case Fail{(code, why)}:
+      IO.print_err("bend-vmm: no display window: " ++ why)
+    case Done{win}:
+      do IO<Unit>:
+        first : Window & Image & List<Event> <- Window.frame(win, Pix{0})
+        display.first(mc, done, w, h, first)
+
+@unsafe def display.start(d: Maybe<&2, T.Display>, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+  match d:
+    case None{}:
+      IO.pure(Unit, Unit{})
+    case Some{T.Display{+w, +h}}:
+      do IO<Unit>:
+        r : Result<&1, &1, U32 & String, Window> <- Window.open("bend-vmm", w, h)
+        IO.spawn(Unit, display.opened(mc, done, w, h, r))
+
+# Maps the framebuffer when --display asks for one.
+def display.map(d: Maybe<&2, T.Display>) -> IO(Unit):
+  match d:
+    case None{}:
+      IO.pure(Unit, Unit{})
+    case Some{T.Display{w, h}}:
+      do IO<Unit>:
+        +rc : U32 <- H.Hvf.fb_init(w, h)
+        die_if(U32.is_ne(rc, 0), "cannot map the framebuffer (" ++ U32.show(rc) ++ ")")
+
 # Bytes typed on the host console go to the UART: this loop parks on stdin
 # and hands each chunk to the machine. An idle guest may never exit (the GIC
 # and timer live in Hypervisor.framework), so input cannot wait for exits.
@@ -688,14 +875,22 @@ def devices.vsock(none: Bool, path: String) -> IO(+List<D.DevKind>):
         die_if(U32.is_ne(rc, 0), "cannot listen on the vsock socket (" ++ U32.show(rc) ++ ")")
         return [D.VsockKind{U.U64{0, 3}}]
 
+# --display: a virtio keyboard and tablet for the window.
+def devices.input(none: Bool) -> +List<D.DevKind>:
+  match none:
+    case True{}:
+      []
+    case False{}:
+      [D.InputKind{False{}}, D.InputKind{True{}}]
+
 def devices(o: Opts) -> IO(+List<D.DevKind>):
   match o:
-    case Opts{k, i, p, c, m, n, +d, +sh, rs, ct, +vk}:
+    case Opts{k, i, p, c, m, n, +d, +sh, rs, ct, +vk, dp}:
       do IO<+List<D.DevKind>>:
         +disks : +List<D.DevKind> <- devices.disk(String.is_empty(d), d)
         +shares : +List<D.DevKind> <- devices.share(String.is_empty(sh), sh)
         +socks : +List<D.DevKind> <- devices.vsock(String.is_empty(vk), vk)
-        return List.append(&2, D.DevKind, base_devices(), List.append(&2, D.DevKind, disks, List.append(&2, D.DevKind, shares, socks)))
+        return List.append(&2, D.DevKind, base_devices(), List.append(&2, D.DevKind, disks, List.append(&2, D.DevKind, shares, List.append(&2, D.DevKind, socks, devices.input(String.is_empty(dp))))))
 
 def initrd_of(present: Bool, start: U.U64, end: U.U64) -> Maybe<&2, T.Initrd>:
   match present:
@@ -717,10 +912,10 @@ def no_image() -> I.ImageInfo:
 # Writes the DTB and the initrd where the layout says; answers (entry, dtb).
 def boot_linux.lay(lay: I.Layout, o: Opts, +ilen: U32, nslots: Nat) -> IO(U.U64 & U.U64):
   match lay o:
-    case I.Layout{kernel, kend, +dtb, +rd, rd_end} Opts{k, initrd, p, cmdline, +mem, cpus, d, sh, rs, ct, vk}:
+    case I.Layout{kernel, kend, +dtb, +rd, rd_end} Opts{k, initrd, p, cmdline, +mem, cpus, d, sh, rs, ct, vk, dp}:
       +has_rd = U32.is_ne(ilen, 0)
       do IO<U.U64 & U.U64>:
-        cfg : T.DtbCfg = T.DtbCfg{U32.to_nat(cpus), ram_bytes(mem), cmdline, initrd_of(has_rd, rd, rd_end), nslots}
+        cfg : T.DtbCfg = T.DtbCfg{U32.to_nat(cpus), ram_bytes(mem), cmdline, initrd_of(has_rd, rd, rd_end), nslots, display_of(dp)}
         rc : U32 <- H.Host.write(dtb, T.Dtb.build(cfg))
         die_if(U32.is_ne(rc, 0), "writing the DTB")
         got : U32 <- place_initrd(has_rd, initrd, rd)
@@ -738,7 +933,7 @@ def boot_linux.placed(placed: Maybe<&2, I.Layout>, o: Opts, ilen: U32, nslots: N
 # 3.17), then places the DTB and initrd after it.
 def boot_linux(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
   match o:
-    case Opts{kernel, +initrd, p, c, +mem, cpus, d, sh, rs, ct, vk}:
+    case Opts{kernel, +initrd, p, c, +mem, cpus, d, sh, rs, ct, vk, dp}:
       do IO<U.U64 & U.U64>:
         +klen : U32 <- H.Host.load(kernel, ram())
         die_if(U32.is_eq(klen, err()), "cannot load the kernel")
@@ -752,10 +947,10 @@ def boot_linux(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
 # A bare-metal payload runs from the start of RAM, with the DTB 64 MiB in.
 def boot_payload(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
   match o:
-    case Opts{k, i, payload, cmdline, +mem, cpus, d, sh, rs, ct, vk}:
+    case Opts{k, i, payload, cmdline, +mem, cpus, d, sh, rs, ct, vk, dp}:
       +dtb = U.U64.add_u32(ram(), 67108864)
       do IO<U.U64 & U.U64>:
-        cfg : T.DtbCfg = T.DtbCfg{U32.to_nat(cpus), ram_bytes(mem), cmdline, None{}, nslots}
+        cfg : T.DtbCfg = T.DtbCfg{U32.to_nat(cpus), ram_bytes(mem), cmdline, None{}, nslots, display_of(dp)}
         n : U32 <- H.Host.load(payload, ram())
         die_if(U32.is_eq(n, err()), "cannot load the payload")
         _ : U32 <- H.Host.write(dtb, T.Dtb.build(cfg))
@@ -797,9 +992,10 @@ def stopped(+code: U32) -> IO(Unit):
 
 # Runs a machine: the vCPU loops of the given CPUs, console input and the
 # control socket; ends when a vCPU stops the VM.
-@unsafe def run_machine(+mc: Chan(M.Machine), +done: Chan(U32), +ctl: String, cpus: +List<U32>) -> IO(Unit):
+@unsafe def run_machine(+mc: Chan(M.Machine), +done: Chan(U32), +ctl: String, disp: String, cpus: +List<U32>) -> IO(Unit):
   do IO<Unit>:
     spawn_cpus(mc, done, cpus)
+    display.start(display_of(disp), mc, done)
     IO.spawn(Unit, input_loop(mc, done))
     IO.spawn(Unit, vs_accept_loop(mc, done))
     control(String.is_empty(ctl), ctl, mc, done)
@@ -816,7 +1012,7 @@ def stopped(+code: U32) -> IO(Unit):
         IO.spawn(Unit, vcpu_loop(c, mc, done))
         spawn_cpus(mc, done, rest)
 
-@unsafe def start.go(cpus: U32, ctl: String, kinds: +List<D.DevKind>, pc: U.U64, dtb: U.U64) -> IO(Unit):
+@unsafe def start.go(cpus: U32, ctl: String, disp: String, kinds: +List<D.DevKind>, pc: U.U64, dtb: U.U64) -> IO(Unit):
   do IO<Unit>:
     rc : U32 <- H.Host.vcpu_create(0)
     die_if(U32.is_ne(rc, 0), "cannot create vCPU 0")
@@ -824,14 +1020,14 @@ def stopped(+code: U32) -> IO(Unit):
     +mc : Chan(M.Machine) <- Chan.new(M.Machine, 1)
     put(mc, M.Machine.new(U32.to_nat(cpus), kinds))
     +done : Chan(U32) <- Chan.new(U32, 4)
-    run_machine(mc, done, ctl, [0])
+    run_machine(mc, done, ctl, disp, [0])
 
 @unsafe def start(o: Opts, kinds: +List<D.DevKind>, entry: U.U64 & U.U64) -> IO(Unit):
   match o:
-    case Opts{k, i, p, c, m, cpus, d, sh, rs, ct, vk}:
+    case Opts{k, i, p, c, m, cpus, d, sh, rs, ct, vk, dp}:
       match entry:
         case (pc, dtb):
-          start.go(cpus, ct, kinds, pc, dtb)
+          start.go(cpus, ct, dp, kinds, pc, dtb)
 
 # Restore
 # =======
@@ -873,7 +1069,7 @@ def psci_on(m: M.Machine) -> +List<Bool>:
     case False{}:
       IO.pure(U32, 0)
 
-@unsafe def restore.machine(got: Maybe<&2, M.Machine>, o: Opts, kinds: +List<D.DevKind>) -> IO(Unit):
+@unsafe def restore.machine(got: Maybe<&2, M.Machine>, +o: Opts, kinds: +List<D.DevKind>) -> IO(Unit):
   match got:
     case None{}:
       IO.die(Unit, 1, "bend-vmm: the snapshot's machine state does not decode")
@@ -888,12 +1084,12 @@ def psci_on(m: M.Machine) -> +List<Bool>:
         put(mc, m2)
         +done : Chan(U32) <- Chan.new(U32, 4)
         IO.print_err("bend-vmm: restored")
-        run_machine(mc, done, Opts.control(o), cpus)
+        run_machine(mc, done, Opts.control(o), Opts.display(o), cpus)
 
 # Options for a restore: the snapshot's own, plus this run's --control.
 def restore.opts(saved: List<String>, now: Opts) -> Opts:
   match now:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp}:
       Opts.set("--control", ct, Opts.parse(List.drop(&1, String, saved, 1n), Opts.default()))
 
 @unsafe def restore(path: String, now: Opts) -> IO(Unit):
@@ -904,6 +1100,7 @@ def restore.opts(saved: List<String>, now: Opts) -> Opts:
     +o : Opts = restore.opts(saved, now)
     +vm : U32 <- H.Host.vm_init(Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), ram())
     die_if(U32.is_ne(vm, 0), "cannot create the VM (step " ++ U32.show(vm) ++ ")")
+    display.map(display_of(Opts.display(o)))
     +kinds : +List<D.DevKind> <- devices(o)
     ws : +List<U32> <- H.Hvf.snap_machine()
     restore.machine(Snap.Snap.decode(ws), o, kinds)
@@ -912,6 +1109,7 @@ def restore.opts(saved: List<String>, now: Opts) -> Opts:
   do IO<Unit>:
     +rc : U32 <- H.Host.vm_init(Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), ram())
     die_if(U32.is_ne(rc, 0), "cannot create the VM (step " ++ U32.show(rc) ++ ")")
+    display.map(display_of(Opts.display(o)))
     +kinds : +List<D.DevKind> <- devices(o)
     entry : U.U64 & U.U64 <- boot(String.is_empty(Opts.kernel(o)), o, List.length(&2, D.DevKind, kinds))
     start(o, kinds, entry)

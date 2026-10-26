@@ -28,7 +28,7 @@ def build(root, cpuid=0):
     hdr=struct.pack('>10I',0xd00dfeed,total,off_struct,off_strings,40,17,16,cpuid,len(strings),len(st))
     return hdr+b'\0'*16+st+strings
 
-def machine(ncpus, ram_size, bootargs, initrd, nvirtio):
+def machine(ncpus, ram_size, bootargs, initrd, nvirtio, display=None):
     chosen=[("bootargs", s(bootargs)), ("stdout-path", s("/pl011@9000000"))]
     if initrd: chosen += [("linux,initrd-start", u64(initrd[0])), ("linux,initrd-end", u64(initrd[1]))]
     cpus=[("cpu@%x"%i, [("device_type", s("cpu")), ("compatible", s("arm,arm-v8")), ("reg", u32(i)), ("enable-method", s("psci"))], []) for i in range(ncpus)]
@@ -43,11 +43,12 @@ def machine(ncpus, ram_size, bootargs, initrd, nvirtio):
       ("apb-pclk", [("compatible", s("fixed-clock")), ("#clock-cells", u32(0)), ("clock-frequency", u32(24000000)), ("clock-output-names", s("clk24mhz")), ("phandle", u32(2))], []),
       ("pl011@9000000", [("compatible", ss("arm,pl011", "arm,primecell")), ("reg", u32(0, 0x09000000, 0, 0x1000)), ("interrupts", u32(0, 1, 4)), ("clocks", u32(2, 2)), ("clock-names", ss("uartclk", "apb_pclk"))], []),
       ("pl031@9010000", [("compatible", ss("arm,pl031", "arm,primecell")), ("reg", u32(0, 0x09010000, 0, 0x1000)), ("interrupts", u32(0, 2, 4)), ("clocks", u32(2)), ("clock-names", s("apb_pclk"))], []),
-    ] + virtio)
+    ] + ([("framebuffer@10000000", [("compatible", s("simple-framebuffer")), ("reg", u32(0, 0x10000000, 0, 0x1000000)), ("width", u32(display[0])), ("height", u32(display[1])), ("stride", u32(display[0] * 4)), ("format", s("a8r8g8b8"))], [])] if display else []) + virtio)
     return build(root)
 
 a = machine(2, 0x10000000, "console=ttyAMA0", (0x42200000, 0x42300000), 2)
 b = machine(1, 0x8000000, "", None, 0)
 
-json.dump({"a": list(a), "b": list(b)}, sys.stdout)
+c = machine(1, 0x8000000, "console=tty0", None, 1, (1024, 768))
+json.dump({"a": list(a), "b": list(b), "c": list(c)}, sys.stdout)
 

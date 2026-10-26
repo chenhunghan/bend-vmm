@@ -195,6 +195,19 @@ def Hvf.vsock_accept() -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
+# The framebuffer and its window (host/hvf.c).
+def Hvf.fb_init(width: U32, height: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.fb_dump(path: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.fb_present(window: Window) -> IO(Window & List<Event>):
+  import "./hvf.c"
+  import "./hvf.js"
+
 # vCPU request codes (host/hvf.c).
 def Op.create() -> U32:
   0

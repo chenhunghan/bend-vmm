@@ -12,6 +12,7 @@ import ../lib/u64.bend as U
 #   PL031 RTC          151060480 (0x0901_0000), 4 KiB, SPI 2 (INTID 34)
 #   virtio-mmio slots  167772160 (0x0A00_0000), 512 bytes each, 32 slots;
 #                      slot n uses SPI 16 + n (INTID 48 + n)
+#   framebuffer        268435456 (0x1000_0000), 16 MiB (with --display)
 #   RAM                1073741824 (0x4000_0000) upward
 # Every device region in a Bus must be disjoint; RAM is not on the bus (the
 # host maps it, so it never traps).
@@ -38,6 +39,14 @@ def Layout.rtc_base() -> U.U64:
 
 def Layout.rtc_intid() -> U32:
   34
+
+# The framebuffer (--display): 16 MiB of host memory at 0x1000_0000, below
+# RAM and clear of every device.
+def Layout.fb_base() -> U.U64:
+  U.U64{0, 268435456}
+
+def Layout.fb_size() -> U32:
+  16777216
 
 def Layout.virtio_base() -> U.U64:
   U.U64{0, 167772160}

@@ -8,7 +8,7 @@ mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 mkdir -p /etc /mnt
 # Drivers this kernel builds as modules (shipped by scripts/guest-assets.sh).
-for m in virtio-rng rtc-pl031 netfs 9pnet 9pnet_virtio 9p vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport; do
+for m in virtio-rng rtc-pl031 netfs 9pnet 9pnet_virtio 9p vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport virtio_input; do
   [ -f /lib/modules/$m.ko ] && insmod /lib/modules/$m.ko 2>/dev/null
 done
 echo "GUEST: up, kernel $(uname -r), $(nproc) cpus"
@@ -29,5 +29,11 @@ if grep -qs share /sys/bus/virtio/drivers/9pnet_virtio/*/mount_tag; then
   mkdir -p /mnt/share && mount -t 9p -o trans=virtio,version=9p2000.L share /mnt/share && echo "GUEST: host directory at /mnt/share"
 fi
 echo "GUEST: busybox shell; 'poweroff -f' to stop, Ctrl-A x to quit the VMM"
+# With --display, a second shell on the framebuffer console (tty1), typed
+# into through the virtio keyboard.
+if [ -e /dev/fb0 ] && [ -e /dev/tty1 ]; then
+  echo "GUEST: display shell on tty1"
+  setsid sh -c 'while :; do sh -i </dev/tty1 >/dev/tty1 2>&1; done' &
+fi
 setsid sh -c 'exec sh -i </dev/ttyAMA0 >/dev/ttyAMA0 2>&1'
 poweroff -f

@@ -294,3 +294,10 @@ def VirtioMmio.irq(s: VirtioMmio) -> Bool:
   match s:
     case VirtioMmio{id, df, drf, dsel, drsel, qsel, qs, st, ist, cg, cfg}:
       U32.is_ne(ist, 0)
+
+# Replaces the config space (a device whose config depends on what the
+# driver selected, as virtio-input's).
+def VirtioMmio.with_config(s: VirtioMmio, cfg: +List<U32>) -> VirtioMmio:
+  match s:
+    case VirtioMmio{id, df, drf, dsel, drsel, qsel, qs, st, ist, cg, old}:
+      VirtioMmio{id, df, drf, dsel, drsel, qsel, qs, st, ist, cg, cfg}

@@ -24,6 +24,11 @@ the same code on any OS. A thin C layer (`host/`) drives Hypervisor.framework.
 - virtio-vsock to Unix sockets on the Mac (`--vsock PATH`, Firecracker's
   convention: the guest's connection to host port P reaches `PATH_P`; a host
   client connects to `PATH` and sends `CONNECT <port>` to reach a guest port).
+- A graphical console (`--display WxH`): a simple-framebuffer the guest's
+  `simpledrm`/fbcon draws on, shown in a macOS window through Metal straight
+  from guest memory, with a virtio keyboard and a virtio tablet (absolute
+  pointer) fed by the window. The bundled initramfs runs a second shell on
+  `tty1` there.
 - virtio-blk disks (read-write or read-only, FLUSH), virtio-rng, the PL031 RTC.
 - Reboot (`reboot` in the guest restarts the VM) and power-off.
 
@@ -58,13 +63,16 @@ Options:
 | `--share DIR` | a host directory over virtio-9p (`mount -t 9p -o trans=virtio,version=9p2000.L share /mnt`) |
 | `--payload FILE` | a bare-metal binary entered at the start of RAM |
 | `--vsock PATH` | virtio-vsock (guest CID 3) bridged to Unix sockets under PATH |
+| `--display WxH` | a window showing the guest's framebuffer, with a virtio keyboard and tablet |
 | `--control SOCK` | a Unix socket for management commands (below) |
 | `--restore FILE` | start from a snapshot (same disks and shares as when it was taken) |
 
 Management: on the console, `Ctrl-A p` pauses or resumes, `Ctrl-A s` writes
 `./bend-vmm.snap`, `Ctrl-A x` quits, `Ctrl-A h` lists the keys. Over
 `--control`: `echo pause | nc -U SOCK` (also `resume`, `status`,
-`snapshot PATH`, `quit`). A snapshot holds guest RAM (sparse), every vCPU's
+`snapshot PATH`, `quit`; with `--display`, `screendump PATH` writes the
+screen as a PPM, `type TEXT` types on the virtio keyboard (`\n` is Return),
+`pointer X Y` moves the tablet on its 0..32767 scale). A snapshot holds guest RAM (sparse), every vCPU's
 registers, the GIC, and the whole device state; `--restore` maps the RAM
 copy-on-write, so restoring is immediate. TCP connections through the NAT do
 not survive a restore.
@@ -104,7 +112,10 @@ armed.
 
 `scripts/check-mac.sh` boots a bare-metal payload, then Linux (1 and 4 CPUs),
 then a busybox userspace that runs an in-guest test suite: disk reads and
-writes, entropy, timers, interrupts, console input, reboot.
+writes, entropy, timers, interrupts, console input, reboot, networking, 9p,
+vsock both ways, pause/resume, snapshot/restore, and the display (a
+screendump, keys typed into the framebuffer console, tablet events read from
+the guest's evdev).
 
 ## Layout
 

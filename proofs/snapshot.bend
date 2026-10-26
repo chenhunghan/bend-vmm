@@ -27,3 +27,6 @@ def L.snapshot.empty():
 
 def L.snapshot.roundtrip_vsock():
   {==}
+
+def L.snapshot.roundtrip_input():
+  {==}

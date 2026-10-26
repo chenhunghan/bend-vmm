@@ -5,6 +5,10 @@
 #      through PSCI, driven by host/smoke.bend (host effects only).
 #   2. (when host/main.bend exists) the same payloads on the full machine.
 #   3. Linux (scripts/linux-assets.sh) boots to its init marker and powers off.
+#   4. the guest suite (tests/guest/rootfs/tests.sh), net, 9p, vsock, console.
+#   5. lifecycle: pause, resume, snapshot, restore.
+#   6. display: screendump, and the virtio keyboard and tablet driven through
+#      the control socket's type and pointer commands.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 [ "$(uname -s)-$(uname -m)" = "Darwin-arm64" ] || { echo "check-mac: needs macOS on arm64"; exit 2; }
@@ -96,6 +100,24 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo quit | nc -U "$sock" >/dev/null; sleep 1
   out=$( ( (sleep 3; printf 'cat /tmp/m\n'; sleep 2; printf 'poweroff -f\n'; sleep 3) | perl -e 'alarm 40; exec @ARGV' ./out/bend-vmm --restore "$t/vm.snap") 2>&1 )
   grep -q "^MARK-42" <<<"$(tr -d '\r' <<<"$out")" && grep -q "stopped (0)" <<<"$out" && grn "ok: restore (guest RAM and CPUs continue)" || { red "failed: restore"; tail -5 <<<"$out"; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 6. display: framebuffer, virtio keyboard and tablet"
+  t=$(mktemp -d); sock=$t/vm.sock
+  ( (sleep 40) | perl -e 'alarm 40; exec @ARGV' ./out/bend-vmm --mem 512 --cpus 2 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --control "$sock" --display 640x480 --cmdline "console=ttyAMA0 quiet" > "$t/run.log" 2>&1 & )
+  sleep 7
+  # typed on tty1 (the framebuffer console) through the virtio keyboard
+  printf '%s\n' 'type echo KEYS-$((6*7)) > /dev/ttyAMA0\n' | nc -U "$sock" >/dev/null; sleep 1
+  printf '%s\n' 'type dd if=/dev/input/event1 bs=24 count=3 2>/dev/null | hexdump -C > /dev/ttyAMA0 &\n' | nc -U "$sock" >/dev/null; sleep 1
+  [ "$(printf 'pointer 12345 32767\n' | nc -U "$sock")" = moved ] || { red "failed: pointer command"; fail=1; }
+  sleep 1
+  [ "$(echo "screendump $t/s.ppm" | nc -U "$sock")" = saved ] && [ "$(head -c 15 "$t/s.ppm" | tr '\n' ' ')" = "P6 640 480 255 " ] && grn "ok: screendump (640x480)" || { red "failed: screendump"; fail=1; }
+  echo quit | nc -U "$sock" >/dev/null; sleep 1
+  log=$(tr -d '\r' < "$t/run.log")
+  grep -q "KEYS-42" <<<"$log" && grn "ok: virtio keyboard (typed into the framebuffer console)" || { red "failed: virtio keyboard"; tail -5 <<<"$log"; fail=1; }
+  grep -q "03 00 00 00 39 30 00 00" <<<"$log" && grep -q "03 00 01 00 ff 7f 00 00" <<<"$log" && grn "ok: virtio tablet (ABS_X 12345, ABS_Y 32767)" || { red "failed: virtio tablet"; tail -5 <<<"$log"; fail=1; }
   rm -rf "$t"
 fi
 

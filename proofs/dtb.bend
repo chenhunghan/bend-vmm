@@ -9,3 +9,6 @@ def L.dtb.two_cpus():
 
 def L.dtb.minimal():
   {==}
+
+def L.dtb.display():
+  {==}

@@ -7,6 +7,7 @@ import ../dev/pl011.bend as Uart
 import ../dev/pl031.bend as Rtc
 import ../net/nat.bend as Nt
 import ../virtio/device.bend as D
+import ../virtio/input.bend as In
 import ./layout.bend as L
 import ./abi.bend as V
 
@@ -676,3 +677,28 @@ def Machine.vsock_backlog(m: Machine) -> U32:
   match m:
     case Machine{p, u, ui, devs, lines, rt, ri, nt}:
       Machine.vsock_backlog.of(devs)
+
+# A keyboard or pointer report to every device (D.Dev.hid: input devices
+# take it).
+def Machine.devs_hid(-R: Type, devs: +List<D.Dev>, +ev: In.Hid) -> V.Op<R, +List<D.Dev>>:
+  match devs:
+    case Nil{}:
+      V.Op.pure(R, +List<D.Dev>, [])
+    case d <> t:
+      do V.Op<R, +List<D.Dev>>:
+        d : D.Dev <- D.Dev.hid(R, d, ev)
+        t : +List<D.Dev> <- Machine.devs_hid(R, t, ev)
+        return d <> t
+
+def Machine.hid.go(-R: Type, m: Machine, ev: In.Hid) -> V.Op<R, Machine>:
+  match m:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt}:
+      do V.Op<R, Machine>:
+        devs : +List<D.Dev> <- Machine.devs_hid(R, devs, ev)
+        Machine.irqs(R, Machine{p, u, ui, devs, lines, rt, ri, nt})
+
+# A key, pointer move or button from the host's window: given to every
+# InputKind device (D.Dev.hid), then the interrupt lines are updated as after
+# a device access.
+def Machine.hid(m: Machine, ev: In.Hid) -> V.Vm<Machine>:
+  V.Op.finish(Machine, Machine.hid.go(Machine, m, ev))

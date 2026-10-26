@@ -10,6 +10,7 @@ import ../src/virtio/device.bend as D
 import ../src/fs/p9.bend as F
 import ../src/vmm/machine.bend as Mc
 import ../src/virtio/vsock.bend as Vs
+import ../src/virtio/input.bend as In
 import ../src/vmm/snapshot.bend as S
 
 # Frozen spec for src/vmm/snapshot.bend: decode inverts encode.
@@ -63,3 +64,10 @@ def vsock_machine() -> Mc.Machine:
 
 law snapshot.roundtrip_vsock:
   {S.Snap.decode(S.Snap.encode(vsock_machine())) == Some{vsock_machine()} : Maybe<&2, Mc.Machine>}
+
+# A machine with a tablet that has a selector set and events pending.
+def input_machine() -> Mc.Machine:
+  Mc.Machine{P.PsciState{[True{}]}, Uart.Pl011.new(), False{}, [D.Dev.new(D.InputKind{False{}}), D.Dev{D.InputKind{True{}}, M.VirtioMmio.new(18, U.U64{1, 0}, 2n, 256, In.Input.config(True{}, 18, 1)), [], D.InDev{In.InputState{18, 1, [[3, 0, 0, 0, 44, 1, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0]]}}}], [False{}, False{}], Rtc.Pl031.new(), False{}, Nt.Slirp.new()}
+
+law snapshot.roundtrip_input:
+  {S.Snap.decode(S.Snap.encode(input_machine())) == Some{input_machine()} : Maybe<&2, Mc.Machine>}

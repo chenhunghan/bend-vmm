@@ -10,6 +10,7 @@ import ./console.bend as Con
 import ./net.bend as N
 import ../fs/p9.bend as P
 import ./vsock.bend as Vs
+import ./input.bend as In
 
 # A virtio-mmio device: the transport register model plus the device logic
 # behind it, as the machine sees it.
@@ -23,6 +24,10 @@ import ./vsock.bend as Vs
 #                (Blk.features(True)); OUT requests answer IOERR
 #   ConsoleKind: virtio-console, device id 3, two queues (0 receiveq0,
 #                1 transmitq0), empty config space, no other feature
+#   InputKind:   virtio-input, device id 18, two queues (0 eventq, 1
+#                statusq), a keyboard or (tablet) a tablet; its config
+#                space follows the driver's select/subsel writes
+#                (In.Input.config)
 #   NetKind:     virtio-net, device id 1, two queues (0 receiveq1,
 #                1 transmitq1), also VIRTIO_NET_F_MAC (U.U64{1, 32}), config
 #                space N.Net.config(mac)
@@ -56,6 +61,7 @@ type DevKind is Data:
   NetKind{mac: +List<U32>}
   P9Kind{share: U32, tag: String}
   VsockKind{cid: U.U64}
+  InputKind{tablet: Bool}
 
 # The per-kind state of a device.
 type DevState is Data:
@@ -66,6 +72,7 @@ type DevState is Data:
   NetState{frames: +List<+List<U32>>}
   P9Dev{p9: P.P9State}
   VsState{vs: Vs.Vsock}
+  InDev{input: In.InputState}
 
 type Dev is Data:
   Dev{kind: DevKind, mmio: M.VirtioMmio, queues: +List<Q.Vq>, state: DevState}
@@ -100,6 +107,8 @@ def Dev.mmio(kind: DevKind) -> M.VirtioMmio:
       M.VirtioMmio.new(9, U.U64{1, 1}, 1n, 256, P.P9.config(tag))
     case VsockKind{cid}:
       M.VirtioMmio.new(19, Dev.features(), 3n, 256, Vs.Vs.config(cid))
+    case InputKind{tablet}:
+      M.VirtioMmio.new(18, Dev.features(), 2n, 256, In.Input.config(tablet, 0, 0))
 
 # The state of a fresh device of the given kind.
 def Dev.state(kind: DevKind) -> DevState:
@@ -118,6 +127,8 @@ def Dev.state(kind: DevKind) -> DevState:
       P9Dev{P.P9State.new()}
     case VsockKind{cid}:
       VsState{Vs.Vsock.new(cid)}
+    case InputKind{tablet}:
+      InDev{In.InputState.new()}
 
 def Dev.new(kind: DevKind) -> Dev:
   +kind = kind
@@ -189,6 +200,8 @@ def Dev.process(-R: Type, k: DevKind, q: Q.Vq) -> V.Op<R, Q.Vq & Bool>:
       V.Op.pure(R, Q.Vq & Bool, (q, False{}))
     case VsockKind{cid}:
       V.Op.pure(R, Q.Vq & Bool, (q, False{}))
+    case InputKind{tablet}:
+      V.Op.pure(R, Q.Vq & Bool, (q, False{}))
 
 # The pending console input of a state (none for other kinds).
 def Dev.input_of(st: DevState) -> +List<U32>:
@@ -202,6 +215,8 @@ def Dev.input_of(st: DevState) -> +List<U32>:
     case P9Dev{p}:
       []
     case VsState{v}:
+      []
+    case InDev{i}:
       []
 
 # The pending frames of a state (none for other kinds).
@@ -217,6 +232,8 @@ def Dev.frames_of(st: DevState) -> +List<+List<U32>>:
       []
     case VsState{v}:
       []
+    case InDev{i}:
+      []
 
 # The 9p server state of a state (a fresh one for other kinds).
 def Dev.p9_of(st: DevState) -> P.P9State:
@@ -230,6 +247,8 @@ def Dev.p9_of(st: DevState) -> P.P9State:
     case NetState{fs}:
       P.P9State.new()
     case VsState{v}:
+      P.P9State.new()
+    case InDev{i}:
       P.P9State.new()
 
 # The last Dev.max_frames() frames.
@@ -308,6 +327,8 @@ def Dev.vs_of(st: DevState) -> Vs.Vsock:
       Vs.Vsock.new(U.U64{0, 3})
     case P9Dev{p}:
       Vs.Vsock.new(U.U64{0, 3})
+    case InDev{i}:
+      Vs.Vsock.new(U.U64{0, 3})
 
 def Dev.pass.vs_tx(r: Vs.VsTx) -> Pass:
   match r:
@@ -334,6 +355,37 @@ def Dev.pass.vsock(-R: Type, tx: Bool, rx: Bool, st: DevState, q: Q.Vq) -> V.Op<
     case False{} False{}:
       V.Op.pure(R, Pass, Pass{q, st, [], [], [], False{}})
 
+# The input state of a state (a fresh one for other kinds).
+def Dev.in_of(st: DevState) -> In.InputState:
+  match st:
+    case InDev{i}:
+      i
+    case _:
+      In.InputState.new()
+
+def Dev.pass.in_rx(r: In.InRx) -> Pass:
+  match r:
+    case In.InRx{s, q, used}:
+      Pass{q, InDev{s}, [], [], [], used}
+
+def Dev.pass.in_status(st: DevState, r: Con.ConTx) -> Pass:
+  match r:
+    case Con.ConTx{q, bs, used}:
+      Pass{q, st, [], [], [], used}
+
+# The input device's pass: eventq (ev) gets the pending events; statusq
+# chains are taken and dropped.
+def Dev.pass.input(-R: Type, ev: Bool, st: DevState, q: Q.Vq) -> V.Op<R, Pass>:
+  match ev:
+    case True{}:
+      do V.Op<R, Pass>:
+        r : In.InRx <- In.Input.rx(R, Dev.in_of(st), q)
+        return Dev.pass.in_rx(r)
+    case False{}:
+      do V.Op<R, Pass>:
+        r : Con.ConTx <- Con.Con.tx(R, q)
+        return Dev.pass.in_status(st, r)
+
 # Runs the kind's pass on queue sel (q).
 def Dev.pass(-R: Type, k: DevKind, st: DevState, +sel: U32, q: Q.Vq) -> V.Op<R, Pass>:
   match k:
@@ -347,6 +399,8 @@ def Dev.pass(-R: Type, k: DevKind, st: DevState, +sel: U32, q: Q.Vq) -> V.Op<R, 
         return Dev.pass.p9(r)
     case VsockKind{cid}:
       Dev.pass.vsock(R, U32.is_eq(sel, 1), U32.is_eq(sel, 0), st, q)
+    case InputKind{tablet}:
+      Dev.pass.input(R, U32.is_eq(sel, 0), st, q)
     case RngKind{}:
       do V.Op<R, Pass>:
         r : Q.Vq & Bool <- Dev.process(R, RngKind{}, q)
@@ -430,10 +484,34 @@ def Dev.write.fin(-R: Type, k: DevKind, qs: +List<Q.Vq>, st: DevState, r: M.Virt
     case (m, ev):
       Dev.on_event(R, ev, k, m, qs, st)
 
-def Dev.write(-R: Type, d: Dev, off: U32, v: U32) -> V.Op<R, DevOut>:
-  match d:
-    case Dev{k, m, qs, st}:
+def Dev.is_input(k: DevKind) -> Bool:
+  match k:
+    case InputKind{tablet}:
+      True{}
+    case _:
+      False{}
+
+def Dev.tablet_of(k: DevKind) -> Bool:
+  match k:
+    case InputKind{tablet}:
+      tablet
+    case _:
+      False{}
+
+# A write to an input device's select or subsel byte rebuilds its config
+# space; other writes go to the transport.
+def Dev.write.go(-R: Type, select: Bool, +k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState, +off: U32, v: U32) -> V.Op<R, DevOut>:
+  match select:
+    case True{}:
+      +s = In.Input.select(Dev.in_of(st), (off - 256 : U32), v)
+      V.Op.pure(R, DevOut, Dev.out(Dev{k, M.VirtioMmio.with_config(m, In.InputState.config(Dev.tablet_of(k), s)), qs, InDev{s}}))
+    case False{}:
       Dev.write.fin(R, k, qs, st, M.VirtioMmio.write(m, off, v))
+
+def Dev.write(-R: Type, d: Dev, +off: U32, v: U32) -> V.Op<R, DevOut>:
+  match d:
+    case Dev{+k, m, qs, st}:
+      Dev.write.go(R, Dev.is_input(k) && (U32.is_eq(off, 256) || U32.is_eq(off, 257)), k, m, qs, st, off, v)
 
 # Delivers a device's pending input or frames into its queue 0, when it
 # exists.
@@ -453,6 +531,8 @@ def Dev.is_console(k: DevKind) -> Bool:
       False{}
     case VsockKind{cid}:
       False{}
+    case InputKind{tablet}:
+      False{}
 
 def Dev.is_net(k: DevKind) -> Bool:
   match k:
@@ -469,6 +549,8 @@ def Dev.is_net(k: DevKind) -> Bool:
     case P9Kind{share, tag}:
       False{}
     case VsockKind{cid}:
+      False{}
+    case InputKind{tablet}:
       False{}
 
 def Dev.input.go(-R: Type, console: Bool, k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState, bytes: +List<U32>) -> V.Op<R, Dev>:
@@ -546,3 +628,18 @@ def Dev.irq(d: Dev) -> Bool:
   match d:
     case Dev{k, m, qs, st}:
       M.VirtioMmio.irq(m)
+
+def Dev.hid.go(-R: Type, input: Bool, +k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState, ev: In.Hid) -> V.Op<R, Dev>:
+  match input:
+    case True{}:
+      Dev.flush(R, k, m, qs, InDev{In.Input.push(Dev.tablet_of(k), Dev.in_of(st), ev)})
+    case False{}:
+      V.Op.pure(R, Dev, Dev{k, m, qs, st})
+
+# A keyboard or pointer report from the host: an input device queues its
+# events (In.Input.push: the keyboard takes keys, the tablet moves and
+# buttons) and delivers what fits into eventq. Other kinds are unchanged.
+def Dev.hid(-R: Type, d: Dev, ev: In.Hid) -> V.Op<R, Dev>:
+  match d:
+    case Dev{+k, m, qs, st}:
+      Dev.hid.go(R, Dev.is_input(k), k, m, qs, st, ev)

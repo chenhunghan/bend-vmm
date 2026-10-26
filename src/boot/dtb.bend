@@ -39,6 +39,10 @@ import ../vmm/layout.bend as Lay
 #     compatible = "arm,pl031", "arm,primecell"; reg = <0 0x9010000 0 0x1000>;
 #     interrupts = <0 2 4>; clocks = <2>; clock-names = "apb_pclk";
 #   };
+#   framebuffer@10000000 {                              (only with a display)
+#     compatible = "simple-framebuffer"; reg = <0 0x10000000 0 0x1000000>;
+#     width = <w>; height = <h>; stride = <4 w>; format = "a8r8g8b8";
+#   };
 #   virtio_mmio@<a000000 + 0x200 n> {
 #     compatible = "virtio,mmio"; reg = <0 (0xa000000 + 0x200 n) 0 0x200>;
 #     interrupts = <0 (16 + n) 1>; dma-coherent;
@@ -51,8 +55,12 @@ import ../vmm/layout.bend as Lay
 type Initrd is Data:
   Initrd{start: U.U64, end: U.U64}
 
+# A framebuffer of width x height 32-bit pixels (a8r8g8b8).
+type Display is Data:
+  Display{width: U32, height: U32}
+
 type DtbCfg is Data:
-  DtbCfg{ncpus: Nat, ram_size: U.U64, bootargs: String, initrd: Maybe<&2, Initrd>, virtio_slots: Nat}
+  DtbCfg{ncpus: Nat, ram_size: U.U64, bootargs: String, initrd: Maybe<&2, Initrd>, virtio_slots: Nat, display: Maybe<&2, Display>}
 
 # Lowercase hex without a 0x prefix or leading zeros: the unit address of a node.
 def Dtb.unit(a: U.U64) -> String:
@@ -146,10 +154,24 @@ def Dtb.rtc() -> F.Node:
   +props = {[F.Prop.strs("compatible", ["arm,pl031", "arm,primecell"]), F.Prop.cells("reg", [U.U64.hi(a), U.U64.lo(a), 0, 4096]), F.Prop.cells("interrupts", [0, (Lay.Layout.rtc_intid() - 32 : U32), 4]), F.Prop.cells("clocks", [2]), F.Prop.str("clock-names", "apb_pclk")] : +List<F.Prop>}
   F.Node{"pl031@" ++ Dtb.unit(a), props, []}
 
+def Dtb.fb(d: Display) -> F.Node:
+  match d:
+    case Display{+w, h}:
+      +a = Lay.Layout.fb_base()
+      +props = {[F.Prop.str("compatible", "simple-framebuffer"), F.Prop.cells("reg", [U.U64.hi(a), U.U64.lo(a), 0, Lay.Layout.fb_size()]), F.Prop.u32("width", w), F.Prop.u32("height", h), F.Prop.u32("stride", (w * 4 : U32)), F.Prop.str("format", "a8r8g8b8")] : +List<F.Prop>}
+      F.Node{"framebuffer@" ++ Dtb.unit(a), props, []}
+
+def Dtb.fbs(d: Maybe<&2, Display>) -> +List<F.Node>:
+  match d:
+    case None{}:
+      []
+    case Some{x}:
+      [Dtb.fb(x)]
+
 def Dtb.tree(cfg: DtbCfg) -> F.Node:
   match cfg:
-    case DtbCfg{ncpus, ram_size, bootargs, initrd, +slots}:
-      +fixed = {[Dtb.chosen(bootargs, initrd), Dtb.memory(ram_size), Dtb.cpus(ncpus), Dtb.psci(), Dtb.timer(), Dtb.intc(), Dtb.clock(), Dtb.uart(), Dtb.rtc()] : +List<F.Node>}
+    case DtbCfg{ncpus, ram_size, bootargs, initrd, +slots, disp}:
+      +fixed = {List.append(&2, F.Node, [Dtb.chosen(bootargs, initrd), Dtb.memory(ram_size), Dtb.cpus(ncpus), Dtb.psci(), Dtb.timer(), Dtb.intc(), Dtb.clock(), Dtb.uart(), Dtb.rtc()], Dtb.fbs(disp)) : +List<F.Node>}
       F.Node{"", Dtb.root_props(), List.append(&2, F.Node, fixed, Dtb.range(~(n => Dtb.virtio(n)), slots, 0, slots))}
 
 def Dtb.build(cfg: DtbCfg) -> +List<U32>:

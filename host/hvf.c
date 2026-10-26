@@ -1802,9 +1802,13 @@ Term hvf_snap_write_run(Env e, Term* f, IoWork* w) {
       ngic = 0;
     }
   }
+#if !defined(__OBJC__) || !__has_feature(objc_arc)
   if (st) {
     os_release(st);
   }
+#else
+  st = nil; // ARC releases it
+#endif
   // argv
   int    argc = *_NSGetArgc();
   char** argv = *_NSGetArgv();
@@ -2169,6 +2173,153 @@ Term hvf_vsock_accept_run(Env e, Term* f, IoWork* w) {
   return hvf_vs_accept(e, w);
 }
 
+// The framebuffer and the display window
+// =======================================
+//
+// --display WxH maps 16 MiB of host memory at the guest's framebuffer
+// address (src/vmm/layout.bend), which the device tree describes as a
+// simple-framebuffer. Hvf.fb_present shows it in a window opened with Bend's
+// Window.open: Metal reads the guest's pixels straight from that memory (a
+// no-copy buffer) and blits them to the window's drawable, then the window's
+// events come back as Bend Events.
+
+static uint8_t* hvf_fb;
+static uint32_t hvf_fb_w, hvf_fb_h;
+#define HVF_FB_BASE 0x10000000ull
+#define HVF_FB_SIZE 0x1000000ull
+
+// Hvf.fb_init(width, height) -> U32: 0, or a step code.
+Term hvf_fb_init_run(Env e, Term* f, IoWork* w) {
+  uint32_t fw = (u32)f[0], fh = (u32)f[1];
+  if (fw == 0 || fh == 0 || (uint64_t)fw * fh * 4 > HVF_FB_SIZE) {
+    return (Term)1;
+  }
+  hvf_fb = mmap(NULL, HVF_FB_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+  if (hvf_fb == MAP_FAILED) {
+    hvf_fb = NULL;
+    return (Term)2;
+  }
+  if (hv.vm_map(hvf_fb, HVF_FB_BASE, HVF_FB_SIZE, HV_MEMORY_READ | HV_MEMORY_WRITE) != HV_SUCCESS) {
+    return (Term)3;
+  }
+  hvf_fb_w = fw;
+  hvf_fb_h = fh;
+  return (Term)0;
+}
+
+// Hvf.fb_dump(path) -> U32: writes the framebuffer as a binary PPM (P6);
+// 0, or an errno.
+Term hvf_fb_dump_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* path = io_cstr(e, f[0], &n);
+  if (!hvf_fb) {
+    free(path);
+    return (Term)(u32)ENODEV;
+  }
+  FILE* out = fopen(path, "wb");
+  free(path);
+  if (!out) {
+    return (Term)(u32)errno;
+  }
+  fprintf(out, "P6\n%u %u\n255\n", hvf_fb_w, hvf_fb_h);
+  for (uint32_t y = 0; y < hvf_fb_h; y++) {
+    for (uint32_t x = 0; x < hvf_fb_w; x++) {
+      const uint8_t* p = hvf_fb + ((size_t)y * hvf_fb_w + x) * 4; // B G R A
+      fputc(p[2], out);
+      fputc(p[1], out);
+      fputc(p[0], out);
+    }
+  }
+  int err = ferror(out) ? EIO : 0;
+  fclose(out);
+  return (Term)(u32)err;
+}
+
+#if defined(__OBJC__) && defined(CID(Window.frame))
+
+#import <Cocoa/Cocoa.h>
+#import <Metal/Metal.h>
+#import <QuartzCore/QuartzCore.h>
+
+// Events as Bend's Window.frame answers them (five words each: the
+// constructor id and its fields); Bend's window.c is spliced after this
+// file, so its window_list is not visible here.
+static Term hvf_event(Env e, const u32* ev) {
+  if (ev[0] == CID(Text)) {
+    const char* s = (const char*)(ev + 1);
+    return io_box(e, CID(Text), io_str(e, s, strnlen(s, 16)));
+  }
+  u32 n = cid_arity(ev[0]);
+  if (n == 0) {
+    return term_pak(ev[0], 0);
+  }
+  u64 l = heap_alloc(e, cls_fit(n));
+  for (u32 j = 0; j < n; j += 1) {
+    e.mem[l + j] = ev[1 + j];
+  }
+  return term_ctr(ev[0], l);
+}
+
+static Term hvf_events(Env e, const u32* p, u64 n) {
+  Term list = term_pak(CID(Nil), 0);
+  for (u64 i = n; i > 0; i -= 1) {
+    list = io_node(e, CID(Con), hvf_event(e, p + 5 * (i - 1)), list);
+  }
+  return list;
+}
+
+static id<MTLBuffer>       hvf_fb_buf;
+static id<MTLCommandQueue> hvf_fb_que;
+
+// Hvf.fb_present(window) -> Window & List<Event>: shows the framebuffer in
+// the window and answers the events since the last call.
+Term hvf_fb_present_run(Env e, Term* f, IoWork* w) {
+  intptr_t at = (intptr_t)io_hand_v(f[0]);
+  Term     list;
+  @autoreleasepool {
+    for (;;) {
+      NSEvent* ev = [NSApp nextEventMatchingMask:NSEventMaskAny untilDate:NSDate.distantPast
+        inMode:NSDefaultRunLoopMode dequeue:YES];
+      if (ev == nil) {
+        break;
+      }
+      [NSApp sendEvent:ev];
+    }
+    NSWindow*     win   = (__bridge NSWindow*)(void*)at;
+    NSView*       view  = win.contentView;
+    CAMetalLayer* layer = (CAMetalLayer*)view.layer;
+    if (hvf_fb) {
+      id<MTLDevice> dev = layer.device;
+      if (hvf_fb_buf == nil) {
+        layer.displaySyncEnabled = NO;
+        hvf_fb_buf = [dev newBufferWithBytesNoCopy:hvf_fb length:HVF_FB_SIZE
+          options:MTLResourceStorageModeShared deallocator:nil];
+        hvf_fb_que = [dev newCommandQueue];
+      }
+      id<CAMetalDrawable> d = [layer nextDrawable];
+      if (d != nil && hvf_fb_buf != nil) {
+        id<MTLCommandBuffer>      cb = [hvf_fb_que commandBuffer];
+        id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+        uint32_t                  cw = (uint32_t)d.texture.width < hvf_fb_w ? (uint32_t)d.texture.width : hvf_fb_w;
+        uint32_t                  ch = (uint32_t)d.texture.height < hvf_fb_h ? (uint32_t)d.texture.height : hvf_fb_h;
+        [bl copyFromBuffer:hvf_fb_buf sourceOffset:0 sourceBytesPerRow:hvf_fb_w * 4
+          sourceBytesPerImage:(NSUInteger)hvf_fb_w * 4 * hvf_fb_h sourceSize:MTLSizeMake(cw, ch, 1)
+          toTexture:d.texture destinationSlice:0 destinationLevel:0
+          destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [bl endEncoding];
+        [cb presentDrawable:d];
+        [cb commit];
+      }
+    }
+    NSMutableData* evs = [view valueForKey:@"evs"];
+    list = hvf_events(e, evs.bytes, evs.length / 20);
+    evs.length = 0;
+  }
+  return io_tup(e, io_hand(at), list);
+}
+
+#endif
+
 // Effects the program never calls have no id; register only the used ones.
 // The VMM's pure work per exit is microseconds, so extra runtime worker
 // threads only add contention: default the runtime to one (BENDRTS wins).
@@ -2269,6 +2420,15 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.vsock_accept)
   io_eff(CID(Hvf.vsock_accept), hvf_vsock_accept_run);
+#endif
+#ifdef CID(Hvf.fb_init)
+  io_eff(CID(Hvf.fb_init), hvf_fb_init_run);
+#endif
+#ifdef CID(Hvf.fb_dump)
+  io_eff(CID(Hvf.fb_dump), hvf_fb_dump_run);
+#endif
+#if defined(__OBJC__) && defined(CID(Window.frame)) && defined(CID(Hvf.fb_present))
+  io_eff(CID(Hvf.fb_present), hvf_fb_present_run);
 #endif
 #ifdef CID(Hvf.irq)
   io_eff(CID(Hvf.irq), hvf_irq_run);
