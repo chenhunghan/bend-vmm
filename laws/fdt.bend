@@ -39,3 +39,9 @@ law fdt.word_aligned:
   for root: F.Node
   for cpu: U32
   {Nat.mod(List.length(&2, U32, F.Fdt.build(root, cpu)), 4n) == 0n : Nat}
+
+# Proposed: the frozen fdt.sample blob is 186 bytes long, so a blob need not be
+# a whole number of 4-byte words (dtc does not pad the strings block). This
+# counterexample shows fdt.word_aligned is false as stated.
+law fdt.sample_not_word_aligned:
+  {Nat.mod(List.length(&2, U32, F.Fdt.build(sample(), 0)), 4n) == 2n : Nat}
