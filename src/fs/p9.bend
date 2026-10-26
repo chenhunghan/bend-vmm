@@ -8,7 +8,7 @@ import ./p9wire.bend as W
 # A 9P2000.L server over the host's shared directory (V.FsOp effects), and
 # the virtio-9p request queue (Virtio 1.2 section 5.11: device id 9, feature
 # VIRTIO_9P_MOUNT_TAG bit 0, config tag_len[2] tag; one queue). The guest
-# mounts it with: mount -t 9p -o trans=virtio,version=9P2000.L <tag> /mnt
+# mounts it with: mount -t 9p -o trans=virtio,version=9p2000.L <tag> /mnt
 #
 # State: msize and the fid table, each fid naming a path relative to the
 # share ("" is its root) and whether it was opened.

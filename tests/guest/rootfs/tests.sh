@@ -66,7 +66,7 @@ fi
 
 # virtio-9p: the host shares a directory tagged "share"
 if grep -q bendshare /proc/cmdline; then
-  if mount -t 9p -o trans=virtio,version=9P2000.L share /mnt; then
+  if mount -t 9p -o trans=virtio,version=9p2000.L share /mnt; then
     pass p9-mount
     check p9-read [ "$(cat /mnt/hello.txt)" = "BEND-9P-OK" ]
     echo "from-guest" > /mnt/guest.txt && pass p9-write
@@ -74,6 +74,6 @@ if grep -q bendshare /proc/cmdline; then
     mkdir /mnt/newdir && check p9-mkdir [ -d /mnt/newdir ]
     umount /mnt
   else
-    fail p9-mount "mount failed"
+    fail p9-mount "mount failed: $(dmesg | grep -i -E '9p|virtio' | tail -5 | tr '\n' '|')"
   fi
 fi
