@@ -12,3 +12,8 @@ import ./laws/virtio_mmio.bend as Laws_virtio_mmio
 import ./laws/virtio_queue.bend as Laws_virtio_queue
 import ./laws/image.bend as Laws_image
 import ./laws/layout.bend as Laws_layout
+import ./laws/dtb.bend as Laws_dtb
+import ./laws/device.bend as Laws_device
+import ./laws/rng.bend as Laws_rng
+import ./laws/blk.bend as Laws_blk
+import ./laws/machine.bend as Laws_machine

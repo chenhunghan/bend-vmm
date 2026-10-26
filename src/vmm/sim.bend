@@ -16,11 +16,15 @@ type Irq is Data:
 type CpuOn is Data:
   CpuOn{cpu: U32, entry: U.U64, ctx: U.U64}
 
-# Recorded lists are newest first.
+# Recorded lists are newest first. disk is disk image 0 (the only one the
+# simulator models; others read as empty and ignore writes). Entropy is the
+# counter sequence seed, seed+1, ... (mod 256), so tests can predict it.
 type Sim is Data:
   Sim{
     base: U.U64,
     mem: +List<U32>,
+    disk: +List<U32>,
+    seed: U32,
     console: +List<U32>,
     regs: +List<SetReg>,
     pc_steps: Nat,
@@ -32,11 +36,11 @@ type Sim is Data:
 
 # A machine with size bytes of zeroed memory at base.
 def Sim.new(base: U.U64, size: Nat) -> Sim:
-  Sim{base, B.Bytes.zeros(size), [], [], 0n, [], [], [], []}
+  Sim{base, B.Bytes.zeros(size), [], 0, [], [], 0n, [], [], [], []}
 
 # The same, with memory initialised to the given bytes.
 def Sim.with_mem(base: U.U64, mem: +List<U32>) -> Sim:
-  Sim{base, mem, [], [], 0n, [], [], [], []}
+  Sim{base, mem, [], 0, [], [], 0n, [], [], [], []}
 
 # Offset of addr in the region; addresses below base wrap and read as absent.
 def Sim.offset(+base: U.U64, addr: U.U64) -> Nat:
@@ -44,7 +48,7 @@ def Sim.offset(+base: U.U64, addr: U.U64) -> Nat:
 
 def Sim.read(s: Sim, addr: U.U64, len: U32) -> +List<U32>:
   match s:
-    case Sim{+base, +mem, c, r, p, i, pw, co, l}:
+    case Sim{+base, +mem, d, sd, c, r, p, i, pw, co, l}:
       B.Bytes.slice(mem, Sim.offset(base, addr), U32.to_nat(len))
 
 def Sim.splice(mem: +List<U32>, +off: Nat, +bs: +List<U32>) -> +List<U32>:
@@ -55,43 +59,90 @@ def Sim.splice(mem: +List<U32>, +off: Nat, +bs: +List<U32>) -> +List<U32>:
 
 def Sim.write(s: Sim, addr: U.U64, bytes: +List<U32>) -> Sim:
   match s:
-    case Sim{+base, mem, c, r, p, i, pw, co, l}:
-      Sim{base, Sim.splice(mem, Sim.offset(base, addr), bytes), c, r, p, i, pw, co, l}
+    case Sim{+base, mem, d, sd, c, r, p, i, pw, co, l}:
+      Sim{base, Sim.splice(mem, Sim.offset(base, addr), bytes), d, sd, c, r, p, i, pw, co, l}
 
 def Sim.set_reg(s: Sim, reg: U32, value: U.U64) -> Sim:
   match s:
-    case Sim{b, m, c, r, p, i, pw, co, l}:
-      Sim{b, m, c, SetReg{reg, value} <> r, p, i, pw, co, l}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
+      Sim{b, m, d, sd, c, SetReg{reg, value} <> r, p, i, pw, co, l}
 
 def Sim.advance_pc(s: Sim) -> Sim:
   match s:
-    case Sim{b, m, c, r, p, i, pw, co, l}:
-      Sim{b, m, c, r, 1n+p, i, pw, co, l}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
+      Sim{b, m, d, sd, c, r, 1n+p, i, pw, co, l}
 
 def Sim.console(s: Sim, bytes: +List<U32>) -> Sim:
   match s:
-    case Sim{b, m, c, r, p, i, pw, co, l}:
-      Sim{b, m, List.append(&2, U32, c, bytes), r, p, i, pw, co, l}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
+      Sim{b, m, d, sd, List.append(&2, U32, c, bytes), r, p, i, pw, co, l}
 
 def Sim.irq(s: Sim, intid: U32, level: Bool) -> Sim:
   match s:
-    case Sim{b, m, c, r, p, i, pw, co, l}:
-      Sim{b, m, c, r, p, Irq{intid, level} <> i, pw, co, l}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
+      Sim{b, m, d, sd, c, r, p, Irq{intid, level} <> i, pw, co, l}
 
 def Sim.power(s: Sim, op: V.PowerOp) -> Sim:
   match s:
-    case Sim{b, m, c, r, p, i, pw, co, l}:
-      Sim{b, m, c, r, p, i, op <> pw, co, l}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
+      Sim{b, m, d, sd, c, r, p, i, op <> pw, co, l}
 
 def Sim.cpu_on(s: Sim, cpu: U32, entry: U.U64, ctx: U.U64) -> Sim:
   match s:
-    case Sim{b, m, c, r, p, i, pw, co, l}:
-      Sim{b, m, c, r, p, i, pw, CpuOn{cpu, entry, ctx} <> co, l}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
+      Sim{b, m, d, sd, c, r, p, i, pw, CpuOn{cpu, entry, ctx} <> co, l}
 
 def Sim.log(s: Sim, msg: String) -> Sim:
   match s:
-    case Sim{b, m, c, r, p, i, pw, co, l}:
-      Sim{b, m, c, r, p, i, pw, co, msg <> l}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
+      Sim{b, m, d, sd, c, r, p, i, pw, co, msg <> l}
+
+# A disk with the given bytes as image 0.
+def Sim.with_disk(s: Sim, disk: +List<U32>) -> Sim:
+  match s:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
+      Sim{b, m, disk, sd, c, r, p, i, pw, co, l}
+
+def Sim.disk(s: Sim) -> +List<U32>:
+  match s:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
+      d
+
+def Sim.disk_read(s: Sim, disk: U32, offset: U.U64, len: U32) -> +List<U32>:
+  match s:
+    case Sim{b, m, +d, sd, c, r, p, i, pw, co, l}:
+      Bool.pick(+List<U32>, U32.is_zero(disk), B.Bytes.slice(d, U32.to_nat(U.U64.lo(offset)), U32.to_nat(len)), [])
+
+def Sim.disk_write.go(zero: Bool, s: Sim, offset: U.U64, bytes: +List<U32>) -> Sim:
+  match zero:
+    case False{}:
+      s
+    case True{}:
+      match s:
+        case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
+          Sim{b, m, Sim.splice(d, U32.to_nat(U.U64.lo(offset)), bytes), sd, c, r, p, i, pw, co, l}
+
+def Sim.disk_write(s: Sim, disk: U32, offset: U.U64, bytes: +List<U32>) -> Sim:
+  Sim.disk_write.go(U32.is_zero(disk), s, offset, bytes)
+
+def Sim.entropy(n: Nat, +x: U32) -> +List<U32>:
+  match n:
+    case 0n:
+      []
+    case 1n+p:
+      (x .&. 255 : U32) <> Sim.entropy(p, (x + 1 : U32))
+
+# The next len entropy bytes.
+def Sim.random(s: Sim, len: U32) -> +List<U32>:
+  match s:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
+      Sim.entropy(U32.to_nat(len), sd)
+
+# The state after drawing len entropy bytes.
+def Sim.random_next(s: Sim, len: U32) -> Sim:
+  match s:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
+      Sim{b, m, d, (sd + len : U32), c, r, p, i, pw, co, l}
 
 # Runs a Vm program for at most fuel steps. None when the fuel runs out.
 def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
@@ -121,6 +172,14 @@ def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
           Sim.run(f, A, Sim.cpu_on(s, c, e, x), next)
         case V.VmLog{msg, next}:
           Sim.run(f, A, Sim.log(s, msg), next)
+        case V.VmDiskRead{+dk, +off, n, k}:
+          +s = s
+          Sim.run(f, A, s, k(Sim.disk_read(s, dk, off, n)))
+        case V.VmDiskWrite{dk, off, bs, next}:
+          Sim.run(f, A, Sim.disk_write(s, dk, off, bs), next)
+        case V.VmRandom{+n, k}:
+          +s = s
+          Sim.run(f, A, Sim.random_next(s, n), k(Sim.random(s, n)))
 
 # Runs an Op to completion with a generous step budget.
 def Sim.exec(-A: Type, s: Sim, m: V.Op<A, A>) -> Maybe<&1, Sim & A>:
@@ -128,35 +187,40 @@ def Sim.exec(-A: Type, s: Sim, m: V.Op<A, A>) -> Maybe<&1, Sim & A>:
 
 def Sim.mem(s: Sim) -> +List<U32>:
   match s:
-    case Sim{b, m, c, r, p, i, pw, co, l}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
       m
 
 def Sim.console_out(s: Sim) -> +List<U32>:
   match s:
-    case Sim{b, m, c, r, p, i, pw, co, l}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
       c
 
 def Sim.regs(s: Sim) -> +List<SetReg>:
   match s:
-    case Sim{b, m, c, r, p, i, pw, co, l}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
       r
 
 def Sim.pc_steps(s: Sim) -> Nat:
   match s:
-    case Sim{b, m, c, r, p, i, pw, co, l}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
       p
 
 def Sim.irqs(s: Sim) -> +List<Irq>:
   match s:
-    case Sim{b, m, c, r, p, i, pw, co, l}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
       i
 
 def Sim.powers(s: Sim) -> +List<V.PowerOp>:
   match s:
-    case Sim{b, m, c, r, p, i, pw, co, l}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
       pw
+
+def Sim.logs(s: Sim) -> +List<String>:
+  match s:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
+      l
 
 def Sim.cpu_ons(s: Sim) -> +List<CpuOn>:
   match s:
-    case Sim{b, m, c, r, p, i, pw, co, l}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l}:
       co

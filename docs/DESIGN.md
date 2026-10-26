@@ -109,9 +109,12 @@ per module implements and proves it, in parallel, each in its own files
 
 - **Wave 1 (independent):** lib laws, esr, psci, fdt, pl011, virtio_mmio,
   virtio_queue, image, layout.
-- **Wave 2 (needs wave 1):** boot/dtb (the machine's device tree), virtio
-  blk/console/rng devices, vmm/machine (the exit handler wiring every
-  device), whole-boot exit traces on the simulator.
+- **Wave 2 (contracts against wave 1):** boot/dtb (the machine's device
+  tree, byte-exact laws), virtio device framework + rng, virtio blk,
+  vmm/machine (the exit handler wiring every device; tests/machine.bend is
+  its frozen spec). Each runs once its wave-1 dependencies merge.
+- **Wave 3:** whole-boot exit traces on the simulator, virtio-console,
+  a Linux boot in check-mac.sh.
 - **Host (macOS, in parallel with both):** host/hvf.c effects, vCPU threads,
   GIC, the run loop, the CLI, check-mac.sh.
 
