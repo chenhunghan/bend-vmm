@@ -98,6 +98,30 @@ type FsResult is Data:
   # statfs: block size, total, free and available blocks, total and free files.
   FsStatfsOk{bsize: U32, blocks: U.U64, bfree: U.U64, bavail: U.U64, files: U.U64, ffree: U.U64}
 
+# Host commands from virtio-vsock (src/virtio/vsock.bend). Connections are
+# numbered by the device for guest-initiated ones and by the host (from
+# 2147483648 up) for host-initiated ones. The host maps guest port P on the
+# host CID to the Unix socket "<--vsock path>_P" (Firecracker's convention).
+type VsockCmd is Data:
+  # The guest connects to host port `port`.
+  VsConnect{conn: U32, port: U32}
+  VsSend{conn: U32, bytes: +List<U32>}
+  # The guest will send no more.
+  VsShutdown{conn: U32}
+  VsClose{conn: U32}
+  # The guest accepted a host-initiated connection; the host answers its
+  # client "OK <port>".
+  VsAccepted{conn: U32, port: U32}
+
+type VsockEvent is Data:
+  VsConnected{conn: U32}
+  VsRefused{conn: U32}
+  VsData{conn: U32, bytes: +List<U32>}
+  # The host side will send no more.
+  VsEof{conn: U32}
+  # A host client asks to connect to guest port `port` (it sent "CONNECT port").
+  VsIncoming{conn: U32, port: U32}
+
 # A program of host effects that ends with a value of type A. Each effect
 # applies to the vCPU whose exit is being handled, unless it names a cpu.
 type Vm<-A: Type> is Type:
@@ -134,6 +158,8 @@ type Vm<-A: Type> is Type:
   VmNet{cmd: NetCmd, next: Vm<A>}
   # A file operation on the shared directory (`share` numbers the --share).
   VmFs{share: U32, op: FsOp, k: FsResult -> Vm<A>}
+  # A vsock command for the host's Unix sockets.
+  VmVsock{cmd: VsockCmd, next: Vm<A>}
 
 # Device code is written in Op, a continuation monad over Vm: its bind needs
 # no recursion, so `do Op<R, A>:` blocks pass Bend's termination check. R is
@@ -203,3 +229,6 @@ def Op.net(-R: Type, cmd: NetCmd) -> Op<R, Unit>:
 
 def Op.fs(-R: Type, share: U32, op: FsOp) -> Op<R, FsResult>:
   Op{k => VmFs{share, op, k}}
+
+def Op.vsock(-R: Type, cmd: VsockCmd) -> Op<R, Unit>:
+  Op{k => VmVsock{cmd, k(Unit{})}}

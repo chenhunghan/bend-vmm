@@ -9,6 +9,7 @@ import ../virtio/mmio.bend as M
 import ../virtio/queue.bend as Q
 import ../virtio/device.bend as D
 import ../fs/p9.bend as F
+import ../virtio/vsock.bend as Vs
 import ./machine.bend as Mc
 
 # The machine's device state as a stream of 32-bit words, for snapshots.
@@ -106,6 +107,8 @@ def Enc.kind(k: D.DevKind) -> +List<U32>:
       4 <> X.Enc.bytes(mac)
     case D.P9Kind{sh, tag}:
       List.append(&2, U32, [5, sh], X.Enc.string(tag))
+    case D.VsockKind{cid}:
+      6 <> X.Enc.u64(cid)
 
 def Enc.fids(fs: +List<F.Fid>) -> +List<U32>:
   match fs:
@@ -113,6 +116,18 @@ def Enc.fids(fs: +List<F.Fid>) -> +List<U32>:
       []
     case Con{F.Fid{fid, path, open}, rest}:
       List.append(&2, U32, fid <> X.Enc.string(path), List.append(&2, U32, [Bool.to_u32(open)], Enc.fids(rest)))
+
+def Enc.vconns(cs: +List<Vs.VConn>) -> +List<U32>:
+  match cs:
+    case Nil{}:
+      []
+    case Con{Vs.VConn{id, gp, hp, st, tx, pa, pf, fwd, lf, pend, eof}, rest}:
+      List.append(&2, U32, [id, gp, hp, st, tx, pa, pf, fwd, lf], List.append(&2, U32, X.Enc.bytes(pend), Bool.to_u32(eof) <> Enc.vconns(rest)))
+
+def Enc.vsock(v: Vs.Vsock) -> +List<U32>:
+  match v:
+    case Vs.Vsock{cid, +cs, nid, np, +out}:
+      List.append(&2, U32, X.Enc.u64(cid), List.append(&2, U32, [nid, np, Enc.len(Vs.VConn, cs)], List.append(&2, U32, Enc.vconns(cs), Enc.len(+List<U32>, out) <> Enc.frames(out))))
 
 def Enc.state(s: D.DevState) -> +List<U32>:
   match s:
@@ -124,6 +139,8 @@ def Enc.state(s: D.DevState) -> +List<U32>:
       List.append(&2, U32, [2, Enc.len(+List<U32>, fs)], Enc.frames(fs))
     case D.P9Dev{F.P9State{ms, +fids}}:
       List.append(&2, U32, [3, ms, Enc.len(F.Fid, fids)], Enc.fids(fids))
+    case D.VsState{v}:
+      4 <> Enc.vsock(v)
 
 def Enc.dev(d: D.Dev) -> +List<U32>:
   match d:
@@ -292,27 +309,34 @@ def Dec.kind.p9() -> X.Dec<D.DevKind>:
     tag : String <- X.Dec.string()
     return D.P9Kind{sh, tag}
 
-def Dec.kind.by(t0: Bool, t1: Bool, t2: Bool, t3: Bool, t4: Bool, t5: Bool) -> X.Dec<D.DevKind>:
-  match t0 t1 t2 t3 t4 t5:
-    case True{} _ _ _ _ _:
+def Dec.kind.vsock() -> X.Dec<D.DevKind>:
+  do X.Dec<D.DevKind>:
+    cid : U.U64 <- X.Dec.u64()
+    return D.VsockKind{cid}
+
+def Dec.kind.by(t0: Bool, t1: Bool, t2: Bool, t3: Bool, t4: Bool, t5: Bool, t6: Bool) -> X.Dec<D.DevKind>:
+  match t0 t1 t2 t3 t4 t5 t6:
+    case True{} _ _ _ _ _ _:
       X.Dec.pure(D.DevKind, D.RngKind{})
-    case False{} True{} _ _ _ _:
+    case False{} True{} _ _ _ _ _:
       Dec.kind.blk(False{})
-    case False{} False{} True{} _ _ _:
+    case False{} False{} True{} _ _ _ _:
       Dec.kind.blk(True{})
-    case False{} False{} False{} True{} _ _:
+    case False{} False{} False{} True{} _ _ _:
       X.Dec.pure(D.DevKind, D.ConsoleKind{})
-    case False{} False{} False{} False{} True{} _:
+    case False{} False{} False{} False{} True{} _ _:
       Dec.kind.net()
-    case False{} False{} False{} False{} False{} True{}:
+    case False{} False{} False{} False{} False{} True{} _:
       Dec.kind.p9()
-    case False{} False{} False{} False{} False{} False{}:
+    case False{} False{} False{} False{} False{} False{} True{}:
+      Dec.kind.vsock()
+    case False{} False{} False{} False{} False{} False{} False{}:
       X.Dec.fail(D.DevKind)
 
 def Dec.kind() -> X.Dec<D.DevKind>:
   do X.Dec<D.DevKind>:
     +t : U32 <- X.Dec.u32()
-    Dec.kind.by(U32.is_eq(t, 0), U32.is_eq(t, 1), U32.is_eq(t, 2), U32.is_eq(t, 3), U32.is_eq(t, 4), U32.is_eq(t, 5))
+    Dec.kind.by(U32.is_eq(t, 0), U32.is_eq(t, 1), U32.is_eq(t, 2), U32.is_eq(t, 3), U32.is_eq(t, 4), U32.is_eq(t, 5), U32.is_eq(t, 6))
 
 def Dec.fids(n: Nat) -> X.Dec<+List<F.Fid>>:
   match n:
@@ -344,23 +368,56 @@ def Dec.state.p9() -> X.Dec<D.DevState>:
     fids : +List<F.Fid> <- Dec.fids(n)
     return D.P9Dev{F.P9State{ms, fids}}
 
-def Dec.state.by(t0: Bool, t1: Bool, t2: Bool, t3: Bool) -> X.Dec<D.DevState>:
-  match t0 t1 t2 t3:
-    case True{} _ _ _:
+def Dec.vconns(n: Nat) -> X.Dec<+List<Vs.VConn>>:
+  match n:
+    case 0n:
+      X.Dec.pure(+List<Vs.VConn>, [])
+    case 1n+p:
+      do X.Dec<+List<Vs.VConn>>:
+        id : U32 <- X.Dec.u32()
+        gp : U32 <- X.Dec.u32()
+        hp : U32 <- X.Dec.u32()
+        st : U32 <- X.Dec.u32()
+        tx : U32 <- X.Dec.u32()
+        pa : U32 <- X.Dec.u32()
+        pf : U32 <- X.Dec.u32()
+        fwd : U32 <- X.Dec.u32()
+        lf : U32 <- X.Dec.u32()
+        pend : +List<U32> <- X.Dec.bytes()
+        eof : Bool <- X.Dec.bool()
+        rest : +List<Vs.VConn> <- Dec.vconns(p)
+        return Vs.VConn{id, gp, hp, st, tx, pa, pf, fwd, lf, pend, eof} <> rest
+
+def Dec.state.vsock() -> X.Dec<D.DevState>:
+  do X.Dec<D.DevState>:
+    cid : U.U64 <- X.Dec.u64()
+    nid : U32 <- X.Dec.u32()
+    np : U32 <- X.Dec.u32()
+    nc : Nat <- Dec.count()
+    cs : +List<Vs.VConn> <- Dec.vconns(nc)
+    no : Nat <- Dec.count()
+    out : +List<+List<U32>> <- Dec.frames(no)
+    return D.VsState{Vs.Vsock{cid, cs, nid, np, out}}
+
+def Dec.state.by(t0: Bool, t1: Bool, t2: Bool, t3: Bool, t4: Bool) -> X.Dec<D.DevState>:
+  match t0 t1 t2 t3 t4:
+    case True{} _ _ _ _:
       X.Dec.pure(D.DevState, D.NoState{})
-    case False{} True{} _ _:
+    case False{} True{} _ _ _:
       Dec.state.con()
-    case False{} False{} True{} _:
+    case False{} False{} True{} _ _:
       Dec.state.net()
-    case False{} False{} False{} True{}:
+    case False{} False{} False{} True{} _:
       Dec.state.p9()
-    case False{} False{} False{} False{}:
+    case False{} False{} False{} False{} True{}:
+      Dec.state.vsock()
+    case False{} False{} False{} False{} False{}:
       X.Dec.fail(D.DevState)
 
 def Dec.state() -> X.Dec<D.DevState>:
   do X.Dec<D.DevState>:
     +t : U32 <- X.Dec.u32()
-    Dec.state.by(U32.is_eq(t, 0), U32.is_eq(t, 1), U32.is_eq(t, 2), U32.is_eq(t, 3))
+    Dec.state.by(U32.is_eq(t, 0), U32.is_eq(t, 1), U32.is_eq(t, 2), U32.is_eq(t, 3), U32.is_eq(t, 4))
 
 def Dec.dev() -> X.Dec<D.Dev>:
   do X.Dec<D.Dev>:

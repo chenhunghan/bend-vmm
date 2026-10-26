@@ -177,6 +177,24 @@ def Hvf.ctl_reply(text: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+# vsock over Unix sockets (host/hvf.c). Sockets share the tcp_* table under
+# the key conn XOR 0x40000000.
+def Hvf.unix_connect(key: U32, path: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.vsock_listen(path: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.vsock_base() -> IO(String):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.vsock_accept() -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
 # vCPU request codes (host/hvf.c).
 def Op.create() -> U32:
   0

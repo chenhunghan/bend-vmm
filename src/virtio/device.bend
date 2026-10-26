@@ -9,6 +9,7 @@ import ./blk.bend as Blk
 import ./console.bend as Con
 import ./net.bend as N
 import ../fs/p9.bend as P
+import ./vsock.bend as Vs
 
 # A virtio-mmio device: the transport register model plus the device logic
 # behind it, as the machine sees it.
@@ -54,6 +55,7 @@ type DevKind is Data:
   ConsoleKind{}
   NetKind{mac: +List<U32>}
   P9Kind{share: U32, tag: String}
+  VsockKind{cid: U.U64}
 
 # The per-kind state of a device.
 type DevState is Data:
@@ -63,6 +65,7 @@ type DevState is Data:
   # Frames for the guest not yet delivered, oldest first.
   NetState{frames: +List<+List<U32>>}
   P9Dev{p9: P.P9State}
+  VsState{vs: Vs.Vsock}
 
 type Dev is Data:
   Dev{kind: DevKind, mmio: M.VirtioMmio, queues: +List<Q.Vq>, state: DevState}
@@ -70,7 +73,7 @@ type Dev is Data:
 # The device after a write, the bytes the guest wrote to hvc0 and the frames
 # the guest transmitted, in order.
 type DevOut is Data:
-  DevOut{dev: Dev, console: +List<U32>, frames: +List<+List<U32>>}
+  DevOut{dev: Dev, console: +List<U32>, frames: +List<+List<U32>>, vsock: +List<V.VsockCmd>}
 
 # VIRTIO_F_VERSION_1: bit 32, so bit 0 of the high word (the rng features).
 def Dev.features() -> U.U64:
@@ -95,6 +98,8 @@ def Dev.mmio(kind: DevKind) -> M.VirtioMmio:
       M.VirtioMmio.new(1, U.U64{1, 32}, 2n, 256, N.Net.config(mac))
     case P9Kind{share, tag}:
       M.VirtioMmio.new(9, U.U64{1, 1}, 1n, 256, P.P9.config(tag))
+    case VsockKind{cid}:
+      M.VirtioMmio.new(19, Dev.features(), 3n, 256, Vs.Vs.config(cid))
 
 # The state of a fresh device of the given kind.
 def Dev.state(kind: DevKind) -> DevState:
@@ -111,6 +116,8 @@ def Dev.state(kind: DevKind) -> DevState:
       NetState{[]}
     case P9Kind{share, tag}:
       P9Dev{P.P9State.new()}
+    case VsockKind{cid}:
+      VsState{Vs.Vsock.new(cid)}
 
 def Dev.new(kind: DevKind) -> Dev:
   +kind = kind
@@ -180,6 +187,8 @@ def Dev.process(-R: Type, k: DevKind, q: Q.Vq) -> V.Op<R, Q.Vq & Bool>:
       V.Op.pure(R, Q.Vq & Bool, (q, False{}))
     case P9Kind{share, tag}:
       V.Op.pure(R, Q.Vq & Bool, (q, False{}))
+    case VsockKind{cid}:
+      V.Op.pure(R, Q.Vq & Bool, (q, False{}))
 
 # The pending console input of a state (none for other kinds).
 def Dev.input_of(st: DevState) -> +List<U32>:
@@ -191,6 +200,8 @@ def Dev.input_of(st: DevState) -> +List<U32>:
     case NetState{fs}:
       []
     case P9Dev{p}:
+      []
+    case VsState{v}:
       []
 
 # The pending frames of a state (none for other kinds).
@@ -204,6 +215,8 @@ def Dev.frames_of(st: DevState) -> +List<+List<U32>>:
       []
     case P9Dev{p}:
       []
+    case VsState{v}:
+      []
 
 # The 9p server state of a state (a fresh one for other kinds).
 def Dev.p9_of(st: DevState) -> P.P9State:
@@ -216,6 +229,8 @@ def Dev.p9_of(st: DevState) -> P.P9State:
       P.P9State.new()
     case NetState{fs}:
       P.P9State.new()
+    case VsState{v}:
+      P.P9State.new()
 
 # The last Dev.max_frames() frames.
 def Dev.cap(+fs: +List<+List<U32>>) -> +List<+List<U32>>:
@@ -224,37 +239,37 @@ def Dev.cap(+fs: +List<+List<U32>>) -> +List<+List<U32>>:
 # What a pass on one queue did: the queue, the new state, the bytes for the
 # host console, the frames for the host, and whether it used any chain.
 type Pass is Data:
-  Pass{q: Q.Vq, state: DevState, console: +List<U32>, frames: +List<+List<U32>>, used: Bool}
+  Pass{q: Q.Vq, state: DevState, console: +List<U32>, frames: +List<+List<U32>>, vsock: +List<V.VsockCmd>, used: Bool}
 
 def Dev.pass.plain(st: DevState, r: Q.Vq & Bool) -> Pass:
   match r:
     case (q, used):
-      Pass{q, st, [], [], used}
+      Pass{q, st, [], [], [], used}
 
 def Dev.pass.con_tx(st: DevState, r: Con.ConTx) -> Pass:
   match r:
     case Con.ConTx{q, bs, used}:
-      Pass{q, st, bs, [], used}
+      Pass{q, st, bs, [], [], used}
 
 def Dev.pass.con_rx(r: Con.ConRx) -> Pass:
   match r:
     case Con.ConRx{q, left, used}:
-      Pass{q, ConState{left}, [], [], used}
+      Pass{q, ConState{left}, [], [], [], used}
 
 def Dev.pass.net_tx(st: DevState, r: N.NetTx) -> Pass:
   match r:
     case N.NetTx{q, fs, used}:
-      Pass{q, st, [], fs, used}
+      Pass{q, st, [], fs, [], used}
 
 def Dev.pass.net_rx(r: N.NetRx) -> Pass:
   match r:
     case N.NetRx{q, left, used}:
-      Pass{q, NetState{left}, [], [], used}
+      Pass{q, NetState{left}, [], [], [], used}
 
 def Dev.pass.p9(r: P.P9Pass) -> Pass:
   match r:
     case P.P9Pass{s, q, used}:
-      Pass{q, P9Dev{s}, [], [], used}
+      Pass{q, P9Dev{s}, [], [], [], used}
 
 # The console's pass: transmitq0 (tx) or receiveq0.
 def Dev.pass.con(-R: Type, tx: Bool, st: DevState, q: Q.Vq) -> V.Op<R, Pass>:
@@ -280,6 +295,45 @@ def Dev.pass.net(-R: Type, tx: Bool, st: DevState, q: Q.Vq) -> V.Op<R, Pass>:
         r : N.NetRx <- N.Net.rx(R, q, Dev.frames_of(st))
         return Dev.pass.net_rx(r)
 
+# The vsock state of a state (a fresh one, CID 3, for other kinds).
+def Dev.vs_of(st: DevState) -> Vs.Vsock:
+  match st:
+    case VsState{v}:
+      v
+    case NoState{}:
+      Vs.Vsock.new(U.U64{0, 3})
+    case ConState{bs}:
+      Vs.Vsock.new(U.U64{0, 3})
+    case NetState{fs}:
+      Vs.Vsock.new(U.U64{0, 3})
+    case P9Dev{p}:
+      Vs.Vsock.new(U.U64{0, 3})
+
+def Dev.pass.vs_tx(r: Vs.VsTx) -> Pass:
+  match r:
+    case Vs.VsTx{v, q, cmds, used}:
+      Pass{q, VsState{v}, [], [], cmds, used}
+
+def Dev.pass.vs_rx(r: Vs.VsRx) -> Pass:
+  match r:
+    case Vs.VsRx{v, q, used}:
+      Pass{q, VsState{v}, [], [], [], used}
+
+# The vsock device's pass: tx (queue 1), rx (queue 0); the event queue (2)
+# is never used.
+def Dev.pass.vsock(-R: Type, tx: Bool, rx: Bool, st: DevState, q: Q.Vq) -> V.Op<R, Pass>:
+  match tx rx:
+    case True{} _:
+      do V.Op<R, Pass>:
+        r : Vs.VsTx <- Vs.Vsock.tx(R, Dev.vs_of(st), q)
+        return Dev.pass.vs_tx(r)
+    case False{} True{}:
+      do V.Op<R, Pass>:
+        r : Vs.VsRx <- Vs.Vsock.rx(R, Dev.vs_of(st), q)
+        return Dev.pass.vs_rx(r)
+    case False{} False{}:
+      V.Op.pure(R, Pass, Pass{q, st, [], [], [], False{}})
+
 # Runs the kind's pass on queue sel (q).
 def Dev.pass(-R: Type, k: DevKind, st: DevState, +sel: U32, q: Q.Vq) -> V.Op<R, Pass>:
   match k:
@@ -291,6 +345,8 @@ def Dev.pass(-R: Type, k: DevKind, st: DevState, +sel: U32, q: Q.Vq) -> V.Op<R, 
       do V.Op<R, Pass>:
         r : P.P9Pass <- P.P9.process(R, share, Dev.p9_of(st), q)
         return Dev.pass.p9(r)
+    case VsockKind{cid}:
+      Dev.pass.vsock(R, U32.is_eq(sel, 1), U32.is_eq(sel, 0), st, q)
     case RngKind{}:
       do V.Op<R, Pass>:
         r : Q.Vq & Bool <- Dev.process(R, RngKind{}, q)
@@ -306,12 +362,12 @@ def Dev.pass(-R: Type, k: DevKind, st: DevState, +sel: U32, q: Q.Vq) -> V.Op<R, 
 
 # A device with nothing for the host.
 def Dev.out(d: Dev) -> DevOut:
-  DevOut{d, [], []}
+  DevOut{d, [], [], []}
 
 def Dev.notify.fin(k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, sel: U32, r: Pass) -> DevOut:
   match r:
-    case Pass{q, st, bs, fs, used}:
-      DevOut{Dev{k, Dev.raise_if(used, m), Dev.qput(qs, 0, sel, q), st}, bs, fs}
+    case Pass{q, st, bs, fs, vc, used}:
+      DevOut{Dev{k, Dev.raise_if(used, m), Dev.qput(qs, 0, sel, q), st}, bs, fs, vc}
 
 # Runs the pass on queue sel when it exists.
 def Dev.notify(-R: Type, mq: Maybe<&2, Q.Vq>, +k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState, +sel: U32) -> V.Op<R, DevOut>:
@@ -324,6 +380,35 @@ def Dev.notify(-R: Type, mq: Maybe<&2, Q.Vq>, +k: DevKind, m: M.VirtioMmio, qs: 
         return Dev.notify.fin(k, m, qs, sel, r)
 
 # Acts on the event of a transport write.
+def DevOut.dev(o: DevOut) -> Dev:
+  match o:
+    case DevOut{d, bs, fs, vc}:
+      d
+
+def Dev.flush(-R: Type, k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState) -> V.Op<R, Dev>:
+  +qs = qs
+  do V.Op<R, Dev>:
+    o : DevOut <- Dev.notify(R, Dev.qget(qs, 0, 0), k, m, qs, st, 0)
+    return DevOut.dev(o)
+
+def Dev.after.vsock(-R: Type, again: Bool, o: DevOut) -> V.Op<R, DevOut>:
+  match again:
+    case False{}:
+      V.Op.pure(R, DevOut, o)
+    case True{}:
+      match o:
+        case DevOut{Dev{k, m, qs, st}, bs, fs, vc}:
+          do V.Op<R, DevOut>:
+            d : Dev <- Dev.flush(R, k, m, qs, st)
+            return DevOut{d, bs, fs, vc}
+
+def Dev.is_vsock(k: DevKind) -> Bool:
+  match k:
+    case VsockKind{cid}:
+      True{}
+    case _:
+      False{}
+
 def Dev.on_event(-R: Type, ev: M.MmioEvent, k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState) -> V.Op<R, DevOut>:
   match ev:
     case M.NoEvent{}:
@@ -335,7 +420,10 @@ def Dev.on_event(-R: Type, ev: M.MmioEvent, k: DevKind, m: M.VirtioMmio, qs: +Li
       V.Op.pure(R, DevOut, Dev.out(Dev{k, m, Dev.build(Dev.cfgs(m)), st}))
     case M.Notify{+q}:
       +qs = qs
-      Dev.notify(R, Dev.qget(qs, 0, q), k, m, qs, st, q)
+      +k = k
+      do V.Op<R, DevOut>:
+        o : DevOut <- Dev.notify(R, Dev.qget(qs, 0, q), k, m, qs, st, q)
+        Dev.after.vsock(R, Dev.is_vsock(k) && U32.is_eq(q, 1), o)
 
 def Dev.write.fin(-R: Type, k: DevKind, qs: +List<Q.Vq>, st: DevState, r: M.VirtioMmio & M.MmioEvent) -> V.Op<R, DevOut>:
   match r:
@@ -347,19 +435,8 @@ def Dev.write(-R: Type, d: Dev, off: U32, v: U32) -> V.Op<R, DevOut>:
     case Dev{k, m, qs, st}:
       Dev.write.fin(R, k, qs, st, M.VirtioMmio.write(m, off, v))
 
-def DevOut.dev(o: DevOut) -> Dev:
-  match o:
-    case DevOut{d, bs, fs}:
-      d
-
 # Delivers a device's pending input or frames into its queue 0, when it
 # exists.
-def Dev.flush(-R: Type, k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState) -> V.Op<R, Dev>:
-  +qs = qs
-  do V.Op<R, Dev>:
-    o : DevOut <- Dev.notify(R, Dev.qget(qs, 0, 0), k, m, qs, st, 0)
-    return DevOut.dev(o)
-
 def Dev.is_console(k: DevKind) -> Bool:
   match k:
     case ConsoleKind{}:
@@ -373,6 +450,8 @@ def Dev.is_console(k: DevKind) -> Bool:
     case NetKind{mac}:
       False{}
     case P9Kind{share, tag}:
+      False{}
+    case VsockKind{cid}:
       False{}
 
 def Dev.is_net(k: DevKind) -> Bool:
@@ -388,6 +467,8 @@ def Dev.is_net(k: DevKind) -> Bool:
     case ConsoleKind{}:
       False{}
     case P9Kind{share, tag}:
+      False{}
+    case VsockKind{cid}:
       False{}
 
 def Dev.input.go(-R: Type, console: Bool, k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState, bytes: +List<U32>) -> V.Op<R, Dev>:
@@ -433,6 +514,33 @@ def Dev.backlog(d: Dev) -> U32:
     case Dev{k, m, qs, st}:
       U32.from_nat(List.length(&2, +List<U32>, Dev.frames_of(st)))
 
+# Whether the device is a vsock device.
+def Dev.vsock(d: Dev) -> Bool:
+  match d:
+    case Dev{k, m, qs, st}:
+      Dev.is_vsock(k)
+
+# A vsock device's backlog (Vs.Vsock.backlog; 0 for other kinds).
+def Dev.vsock_backlog(d: Dev) -> U32:
+  match d:
+    case Dev{k, m, qs, st}:
+      Vs.Vsock.backlog(Dev.vs_of(st))
+
+def Dev.host_vsock.fin(-R: Type, k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, o: Vs.VsOut) -> V.Op<R, DevOut>:
+  match o:
+    case Vs.VsOut{v, cmds}:
+      do V.Op<R, DevOut>:
+        d : Dev <- Dev.flush(R, k, m, qs, VsState{v})
+        return DevOut{d, [], [], cmds}
+
+# An event from the host's vsock sockets: through the protocol, then the
+# packets it queued go into the rx queue. Other kinds are unchanged.
+def Dev.host_vsock(-R: Type, d: Dev, ev: V.VsockEvent) -> V.Op<R, DevOut>:
+  match d:
+    case Dev{k, m, qs, st}:
+      Dev.host_vsock.fin(R, k, m, qs, Vs.Vsock.host_event(Dev.vs_of(st), ev))
+
+# After a vsock tx pass, the replies it queued go out through the rx queue.
 # The interrupt line's level.
 def Dev.irq(d: Dev) -> Bool:
   match d:

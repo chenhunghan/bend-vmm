@@ -18,11 +18,11 @@ if [ ! -f out/guest/busybox ]; then
 fi
 # Drivers this kernel builds as modules: virtio-rng and the 9p stack.
 kver=6.8.0-147-generic
-if [ ! -f out/guest/modules/9p.ko ]; then
+if [ ! -f out/guest/modules/9p.ko ] || [ ! -f out/guest/modules/vsock.ko ]; then
   mkdir -p out/guest/modules out/guest/deb
   curl -fsSL -o out/guest/modules.deb "http://ports.ubuntu.com/ubuntu-ports/pool/main/l/linux/linux-modules-${kver%-generic}-generic_${kver%-generic}.147_arm64.deb"
   (cd out/guest/deb && ar x ../modules.deb && tar -xf data.tar ./lib/modules)
-  for m in drivers/char/hw_random/virtio-rng fs/netfs/netfs net/9p/9pnet net/9p/9pnet_virtio fs/9p/9p; do
+  for m in drivers/char/hw_random/virtio-rng fs/netfs/netfs net/9p/9pnet net/9p/9pnet_virtio fs/9p/9p net/vmw_vsock/vsock net/vmw_vsock/vmw_vsock_virtio_transport_common net/vmw_vsock/vmw_vsock_virtio_transport; do
     zstd -dqf "out/guest/deb/lib/modules/$kver/kernel/$m.ko.zst" -o "out/guest/modules/$(basename $m).ko"
   done
   rm -rf out/guest/deb out/guest/modules.deb
@@ -34,7 +34,12 @@ if [ ! -f out/guest/modules/rtc-pl031.ko ]; then
   zstd -dqf "out/guest/extra/lib/modules/$kver/kernel/drivers/rtc/rtc-pl031.ko.zst" -o out/guest/modules/rtc-pl031.ko
   rm -rf out/guest/extra out/guest/extra.deb
 fi
-mods=""
+# the guest's vsock test program
+lld=$(command -v ld.lld || ls /opt/homebrew/opt/lld*/bin/ld.lld 2>/dev/null | tail -1)
+clang -target aarch64-linux-gnu -c tests/guest/vsock.S -o out/guest/vsock.o
+"$lld" -static -e _start out/guest/vsock.o -o out/guest/vsock
+rm -f out/guest/vsock.o
+mods="out/guest/vsock:bin/vsock"
 for k in out/guest/modules/*.ko; do mods="$mods $k:lib/modules/$(basename "$k")"; done
 python3 scripts/mkinitramfs.py tests/guest/rootfs out/guest/guest.cpio out/guest/busybox:bin/busybox $mods
 echo out/guest/Image out/guest/guest.cpio

@@ -24,3 +24,6 @@ def L.snapshot.trailing():
 
 def L.snapshot.empty():
   {==}
+
+def L.snapshot.roundtrip_vsock():
+  {==}

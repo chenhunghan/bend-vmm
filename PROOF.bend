@@ -27,3 +27,4 @@ import ./proofs/net.bend as Proofs_net
 import ./proofs/p9wire.bend as Proofs_p9wire
 import ./proofs/p9.bend as Proofs_p9
 import ./proofs/snapshot.bend as Proofs_snapshot
+import ./proofs/vsock.bend as Proofs_vsock

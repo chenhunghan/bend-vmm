@@ -26,3 +26,4 @@ import ./laws/net.bend as Laws_net
 import ./laws/p9wire.bend as Laws_p9wire
 import ./laws/p9.bend as Laws_p9
 import ./laws/snapshot.bend as Laws_snapshot
+import ./laws/vsock.bend as Laws_vsock

@@ -21,6 +21,9 @@ the same code on any OS. A thin C layer (`host/`) drives Hypervisor.framework.
   written in Bend (DHCP, DNS, TCP, UDP, ping to the gateway; the host is
   10.0.2.2).
 - Host directory sharing over virtio-9p (9P2000.L).
+- virtio-vsock to Unix sockets on the Mac (`--vsock PATH`, Firecracker's
+  convention: the guest's connection to host port P reaches `PATH_P`; a host
+  client connects to `PATH` and sends `CONNECT <port>` to reach a guest port).
 - virtio-blk disks (read-write or read-only, FLUSH), virtio-rng, the PL031 RTC.
 - Reboot (`reboot` in the guest restarts the VM) and power-off.
 
@@ -54,6 +57,7 @@ Options:
 | `--disk A[,B:ro…]` | raw disk images as virtio-blk (`/dev/vda`, `/dev/vdb`, …); `:ro` attaches one read-only |
 | `--share DIR` | a host directory over virtio-9p (`mount -t 9p -o trans=virtio,version=9p2000.L share /mnt`) |
 | `--payload FILE` | a bare-metal binary entered at the start of RAM |
+| `--vsock PATH` | virtio-vsock (guest CID 3) bridged to Unix sockets under PATH |
 | `--control SOCK` | a Unix socket for management commands (below) |
 | `--restore FILE` | start from a snapshot (same disks and shares as when it was taken) |
 

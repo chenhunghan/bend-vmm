@@ -9,6 +9,7 @@ import ../src/virtio/queue.bend as Q
 import ../src/virtio/device.bend as D
 import ../src/fs/p9.bend as F
 import ../src/vmm/machine.bend as Mc
+import ../src/virtio/vsock.bend as Vs
 import ../src/vmm/snapshot.bend as S
 
 # Frozen spec for src/vmm/snapshot.bend: decode inverts encode.
@@ -54,3 +55,11 @@ law snapshot.trailing:
 
 law snapshot.empty:
   {S.Snap.decode([]) == None{} : Maybe<&2, Mc.Machine>}
+
+# A machine with a vsock device holding a connection, pending host data and
+# a packet for the guest.
+def vsock_machine() -> Mc.Machine:
+  Mc.Machine{P.PsciState{[True{}]}, Uart.Pl011.new(), False{}, [D.Dev{D.VsockKind{w(3)}, M.VirtioMmio.new(19, U.U64{1, 0}, 3n, 256, [3, 0, 0, 0, 0, 0, 0, 0]), [], D.VsState{Vs.Vsock{w(3), [Vs.VConn{0, 40000, 1234, 1, 10, 4096, 4, 7, 0, [1, 2, 3], True{}}], 1, 1024, [[9, 8]]}}}], [False{}], Rtc.Pl031.new(), False{}, Nt.Slirp.new()}
+
+law snapshot.roundtrip_vsock:
+  {S.Snap.decode(S.Snap.encode(vsock_machine())) == Some{vsock_machine()} : Maybe<&2, Mc.Machine>}

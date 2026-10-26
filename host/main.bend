@@ -27,52 +27,57 @@ import ./fs.bend as Fs
 #        bend-vmm --payload file.bin      (bare metal: entered at RAM base)
 
 type Opts is Data:
-  Opts{kernel: String, initrd: String, payload: String, cmdline: String, mem: U32, cpus: U32, disk: String, share: String, restore: String, control: String}
+  Opts{kernel: String, initrd: String, payload: String, cmdline: String, mem: U32, cpus: U32, disk: String, share: String, restore: String, control: String, vsock: String}
 
 def Opts.default() -> Opts:
-  Opts{"", "", "", "console=ttyAMA0 earlycon=pl011,0x9000000", 512, 1, "", "", "", ""}
+  Opts{"", "", "", "console=ttyAMA0 earlycon=pl011,0x9000000", 512, 1, "", "", "", "", ""}
 
 def Opts.mem(o: Opts) -> U32:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
       m
 
 def Opts.disk(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
       d
 
 def Opts.kernel(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
       k
 
 def Opts.share(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
       sh
 
 def Opts.restore(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
       rs
 
 def Opts.control(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
       ct
 
 def Opts.cpus(o: Opts) -> U32:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
       n
+
+def Opts.vsock(o: Opts) -> String:
+  match o:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
+      vk
 
 def Opts.num(s: String, d: U32) -> U32:
   Maybe.default(&2, U32, U32.read(s), d)
 
 def Opts.set(+flag: String, +v: String, o: Opts) -> Opts:
   match o:
-    case Opts{k, i, p, c, +m, +n, d, sh, rs, ct}:
+    case Opts{k, i, p, c, +m, +n, d, sh, rs, ct, vk}:
       Opts{
         Bool.pick(String, String.eq(flag, "--kernel"), v, k),
         Bool.pick(String, String.eq(flag, "--initrd"), v, i),
@@ -83,7 +88,8 @@ def Opts.set(+flag: String, +v: String, o: Opts) -> Opts:
         Bool.pick(String, String.eq(flag, "--disk"), v, d),
         Bool.pick(String, String.eq(flag, "--share"), v, sh),
         Bool.pick(String, String.eq(flag, "--restore"), v, rs),
-        Bool.pick(String, String.eq(flag, "--control"), v, ct)
+        Bool.pick(String, String.eq(flag, "--control"), v, ct),
+        Bool.pick(String, String.eq(flag, "--vsock"), v, vk)
       }
 
 def Opts.parse(args: List<String>, o: Opts) -> Opts:
@@ -208,6 +214,10 @@ def put(mc: Chan(M.Machine), m: M.Machine) -> IO(Unit):
     case V.VmNet{cmd, next}:
       do IO<A>:
         net_cmd(mc, done, cmd)
+        interp(cpu, mc, done, A, next)
+    case V.VmVsock{cmd, next}:
+      do IO<A>:
+        vsock_cmd(mc, done, cmd)
         interp(cpu, mc, done, A, next)
     case V.VmFs{sh, op, k}:
       do IO<A>:
@@ -444,6 +454,115 @@ def reply_rc(+rc: U32, ok: String) -> String:
     case False{} False{} _:
       IO.print_err("\r\n[bend-vmm] Ctrl-A: p pause/resume, s snapshot, x quit, Ctrl-A send Ctrl-A\r")
 
+# vsock: the device's commands run on Unix sockets (host/hvf.c); what the
+# sockets report comes back as VsockEvents, each delivered by its own task.
+@unsafe def vs_deliver(+mc: Chan(M.Machine), +done: Chan(U32), ev: V.VsockEvent) -> IO(Unit):
+  do IO<Unit>:
+    m0 : M.Machine <- take(mc)
+    m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.vsock_event(m0, ev))
+    put(mc, m1)
+
+def vkey(+conn: U32) -> U32:
+  (conn .^. 1073741824 : U32)
+
+# Holds a reader back while the guest has too much vsock data pending.
+@unsafe def vs_wait(+mc: Chan(M.Machine), fuel: Nat) -> IO(Unit):
+  match fuel:
+    case 0n:
+      IO.pure(Unit, Unit{})
+    case 1n+f:
+      do IO<Unit>:
+        +m : M.Machine <- take(mc)
+        put(mc, m)
+        vs_wait.go(U32.is_lt(M.Machine.vsock_backlog(m), 32), mc, f)
+
+@unsafe def vs_wait.go(ok: Bool, +mc: Chan(M.Machine), fuel: Nat) -> IO(Unit):
+  match ok:
+    case True{}:
+      IO.pure(Unit, Unit{})
+    case False{}:
+      do IO<Unit>:
+        IO.sleep(2)
+        vs_wait(mc, fuel)
+
+@unsafe def vs_reader.got(eof: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32, bs: +List<U32>) -> IO(Unit):
+  match eof:
+    case True{}:
+      vs_deliver(mc, done, V.VsEof{conn})
+    case False{}:
+      do IO<Unit>:
+        vs_deliver(mc, done, V.VsData{conn, bs})
+        vs_wait(mc, 5000n)
+        vs_reader(mc, done, conn)
+
+@unsafe def vs_reader(+mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  do IO<Unit>:
+    +bs : +List<U32> <- H.Hvf.tcp_recv(vkey(conn))
+    vs_reader.got(List.is_empty(&2, U32, bs), mc, done, conn, bs)
+
+@unsafe def vs_task.connected(ok: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  match ok:
+    case True{}:
+      do IO<Unit>:
+        vs_deliver(mc, done, V.VsConnected{conn})
+        vs_reader(mc, done, conn)
+    case False{}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.tcp_close(vkey(conn))
+        vs_deliver(mc, done, V.VsRefused{conn})
+
+@unsafe def vs_task(+mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  do IO<Unit>:
+    rc : U32 <- H.Hvf.tcp_wait(vkey(conn))
+    vs_task.connected(U32.is_zero(rc), mc, done, conn)
+
+@unsafe def vs_connect.go(ok: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  match ok:
+    case True{}:
+      IO.spawn(Unit, vs_task(mc, done, conn))
+    case False{}:
+      IO.spawn(Unit, vs_deliver(mc, done, V.VsRefused{conn}))
+
+# The --vsock base path, kept by the C side (Hvf.vsock_base).
+@unsafe def vsock_cmd(+mc: Chan(M.Machine), +done: Chan(U32), cmd: V.VsockCmd) -> IO(Unit):
+  match cmd:
+    case V.VsConnect{+conn, port}:
+      do IO<Unit>:
+        base : String <- H.Hvf.vsock_base()
+        rc : U32 <- H.Hvf.unix_connect(vkey(conn), base ++ "_" ++ U32.show(port))
+        vs_connect.go(U32.is_zero(rc), mc, done, conn)
+    case V.VsSend{conn, bs}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.tcp_send(vkey(conn), bs)
+        return Unit{}
+    case V.VsShutdown{conn}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.tcp_shutdown(vkey(conn))
+        return Unit{}
+    case V.VsClose{conn}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.tcp_close(vkey(conn))
+        return Unit{}
+    case V.VsAccepted{+conn, port}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.tcp_send(vkey(conn), B.Bytes.of_string("OK " ++ U32.show(port) ++ "\n"))
+        IO.spawn(Unit, vs_reader(mc, done, conn))
+
+# Host clients asking for guest ports.
+@unsafe def vs_accept_loop.got(stop: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +ws: +List<U32>) -> IO(Unit):
+  match stop:
+    case True{}:
+      IO.pure(Unit, Unit{})
+    case False{}:
+      do IO<Unit>:
+        IO.spawn(Unit, vs_deliver(mc, done, V.VsIncoming{H.Host.first(ws), H.Host.first(List.drop(&2, U32, ws, 1n))}))
+        vs_accept_loop(mc, done)
+
+@unsafe def vs_accept_loop(+mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+  do IO<Unit>:
+    +ws : +List<U32> <- H.Hvf.vsock_accept()
+    vs_accept_loop.got(List.is_empty(&2, U32, ws), mc, done, ws)
+
 # Bytes typed on the host console go to the UART: this loop parks on stdin
 # and hands each chunk to the machine. An idle guest may never exit (the GIC
 # and timer live in Hypervisor.framework), so input cannot wait for exits.
@@ -557,13 +676,26 @@ def devices.share(none: Bool, dir: String) -> IO(+List<D.DevKind>):
         die_if(U32.is_eq(sh, err()), "cannot open the shared directory")
         return [D.P9Kind{sh, "share"}]
 
+# --vsock PATH: a virtio-vsock device (guest CID 3) whose host side is
+# Unix sockets under PATH.
+def devices.vsock(none: Bool, path: String) -> IO(+List<D.DevKind>):
+  match none:
+    case True{}:
+      IO.pure(+List<D.DevKind>, [])
+    case False{}:
+      do IO<+List<D.DevKind>>:
+        +rc : U32 <- H.Hvf.vsock_listen(path)
+        die_if(U32.is_ne(rc, 0), "cannot listen on the vsock socket (" ++ U32.show(rc) ++ ")")
+        return [D.VsockKind{U.U64{0, 3}}]
+
 def devices(o: Opts) -> IO(+List<D.DevKind>):
   match o:
-    case Opts{k, i, p, c, m, n, +d, +sh, rs, ct}:
+    case Opts{k, i, p, c, m, n, +d, +sh, rs, ct, +vk}:
       do IO<+List<D.DevKind>>:
         +disks : +List<D.DevKind> <- devices.disk(String.is_empty(d), d)
         +shares : +List<D.DevKind> <- devices.share(String.is_empty(sh), sh)
-        return List.append(&2, D.DevKind, base_devices(), List.append(&2, D.DevKind, disks, shares))
+        +socks : +List<D.DevKind> <- devices.vsock(String.is_empty(vk), vk)
+        return List.append(&2, D.DevKind, base_devices(), List.append(&2, D.DevKind, disks, List.append(&2, D.DevKind, shares, socks)))
 
 def initrd_of(present: Bool, start: U.U64, end: U.U64) -> Maybe<&2, T.Initrd>:
   match present:
@@ -585,7 +717,7 @@ def no_image() -> I.ImageInfo:
 # Writes the DTB and the initrd where the layout says; answers (entry, dtb).
 def boot_linux.lay(lay: I.Layout, o: Opts, +ilen: U32, nslots: Nat) -> IO(U.U64 & U.U64):
   match lay o:
-    case I.Layout{kernel, kend, +dtb, +rd, rd_end} Opts{k, initrd, p, cmdline, +mem, cpus, d, sh, rs, ct}:
+    case I.Layout{kernel, kend, +dtb, +rd, rd_end} Opts{k, initrd, p, cmdline, +mem, cpus, d, sh, rs, ct, vk}:
       +has_rd = U32.is_ne(ilen, 0)
       do IO<U.U64 & U.U64>:
         cfg : T.DtbCfg = T.DtbCfg{U32.to_nat(cpus), ram_bytes(mem), cmdline, initrd_of(has_rd, rd, rd_end), nslots}
@@ -606,7 +738,7 @@ def boot_linux.placed(placed: Maybe<&2, I.Layout>, o: Opts, ilen: U32, nslots: N
 # 3.17), then places the DTB and initrd after it.
 def boot_linux(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
   match o:
-    case Opts{kernel, +initrd, p, c, +mem, cpus, d, sh, rs, ct}:
+    case Opts{kernel, +initrd, p, c, +mem, cpus, d, sh, rs, ct, vk}:
       do IO<U.U64 & U.U64>:
         +klen : U32 <- H.Host.load(kernel, ram())
         die_if(U32.is_eq(klen, err()), "cannot load the kernel")
@@ -620,7 +752,7 @@ def boot_linux(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
 # A bare-metal payload runs from the start of RAM, with the DTB 64 MiB in.
 def boot_payload(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
   match o:
-    case Opts{k, i, payload, cmdline, +mem, cpus, d, sh, rs, ct}:
+    case Opts{k, i, payload, cmdline, +mem, cpus, d, sh, rs, ct, vk}:
       +dtb = U.U64.add_u32(ram(), 67108864)
       do IO<U.U64 & U.U64>:
         cfg : T.DtbCfg = T.DtbCfg{U32.to_nat(cpus), ram_bytes(mem), cmdline, None{}, nslots}
@@ -669,6 +801,7 @@ def stopped(+code: U32) -> IO(Unit):
   do IO<Unit>:
     spawn_cpus(mc, done, cpus)
     IO.spawn(Unit, input_loop(mc, done))
+    IO.spawn(Unit, vs_accept_loop(mc, done))
     control(String.is_empty(ctl), ctl, mc, done)
     got : Maybe<&1, U32> <- Chan.recv(U32, done)
     +code : U32 = Maybe.default(&1, U32, got, 2)
@@ -695,7 +828,7 @@ def stopped(+code: U32) -> IO(Unit):
 
 @unsafe def start(o: Opts, kinds: +List<D.DevKind>, entry: U.U64 & U.U64) -> IO(Unit):
   match o:
-    case Opts{k, i, p, c, m, cpus, d, sh, rs, ct}:
+    case Opts{k, i, p, c, m, cpus, d, sh, rs, ct, vk}:
       match entry:
         case (pc, dtb):
           start.go(cpus, ct, kinds, pc, dtb)
@@ -760,7 +893,7 @@ def psci_on(m: M.Machine) -> +List<Bool>:
 # Options for a restore: the snapshot's own, plus this run's --control.
 def restore.opts(saved: List<String>, now: Opts) -> Opts:
   match now:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk}:
       Opts.set("--control", ct, Opts.parse(List.drop(&1, String, saved, 1n), Opts.default()))
 
 @unsafe def restore(path: String, now: Opts) -> IO(Unit):

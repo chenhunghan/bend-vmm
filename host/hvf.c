@@ -1119,9 +1119,11 @@ Term hvf_disk_write_run(Env e, Term* f, IoWork* w) {
 
 typedef struct {
   int      used;
-  uint32_t key;   // conn id (TCP) or guest port (UDP)
+  uint32_t key;     // conn id (TCP, vsock) or guest port (UDP)
   int      udp;
   int      fd;
+  int      parked;  // an effect waits on fd in the event loop
+  int      closing; // closed while parked: the parked effect closes fd
 } HvfSock;
 
 static HvfSock  hvf_socks[HVF_MAX_SOCKS];
@@ -1167,16 +1169,43 @@ static HvfSock* hvf_sock(uint32_t key, int udp) {
 static HvfSock* hvf_sock_new(uint32_t key, int udp, int fd) {
   for (int i = 0; i < HVF_MAX_SOCKS; i++) {
     if (!hvf_socks[i].used) {
-      hvf_socks[i] = (HvfSock){1, key, udp, fd};
+      hvf_socks[i] = (HvfSock){1, key, udp, fd, 0, 0};
       return &hvf_socks[i];
     }
   }
   return NULL;
 }
 
+// Closing a socket that an effect is parked on would pull the fd out from
+// under the event loop's poll. Instead it is shut down, which wakes the
+// parked effect, and that effect closes it (hvf_sock_woke).
 static void hvf_sock_free(HvfSock* k) {
+  if (k->parked) {
+    shutdown(k->fd, SHUT_RDWR);
+    k->closing = 1;
+    k->key     = 0xffffffffu; // no longer found by key
+    return;
+  }
   close(k->fd);
   k->used = 0;
+}
+
+// The parked effect woke: if its socket was closed meanwhile, finish the
+// close and answer 1 (the effect then reports EOF).
+static int hvf_sock_woke(HvfSock* k) {
+  k->parked = 0;
+  if (k->closing) {
+    close(k->fd);
+    k->used    = 0;
+    k->closing = 0;
+    return 1;
+  }
+  return 0;
+}
+
+// The table entry a parked effect stored by index (w->made).
+static HvfSock* hvf_sock_at(IoWork* w) {
+  return &hvf_socks[w->made];
 }
 
 static struct sockaddr_in hvf_addr(uint32_t ip, uint32_t port) {
@@ -1212,8 +1241,8 @@ Term hvf_tcp_connect_run(Env e, Term* f, IoWork* w) {
 }
 
 static Term hvf_tcp_wait_more(Env e, IoWork* w) {
-  HvfSock* k = hvf_sock((uint32_t)w->hand, 0);
-  if (!k) {
+  HvfSock* k = hvf_sock_at(w);
+  if (hvf_sock_woke(k)) {
     return (Term)(u32)ECONNABORTED;
   }
   int       err = 0;
@@ -1228,18 +1257,20 @@ Term hvf_tcp_wait_run(Env e, Term* f, IoWork* w) {
   if (!k) {
     return (Term)(u32)ECONNABORTED;
   }
-  w->hand = (intptr_t)(u32)f[0];
+  w->made   = (intptr_t)(k - hvf_socks);
+  k->parked = 1;
   return io_wait_on(w, k->fd, POLLOUT, 0, hvf_tcp_wait_more);
 }
 
 static Term hvf_tcp_recv_more(Env e, IoWork* w) {
-  HvfSock* k = hvf_sock((uint32_t)w->hand, 0);
-  if (!k) {
+  HvfSock* k = hvf_sock_at(w);
+  if (hvf_sock_woke(k)) {
     return term_pak(CID(Nil), 0);
   }
   char    buf[16384];
   ssize_t n = recv(k->fd, buf, sizeof buf, 0);
   if (n < 0 && errno == EAGAIN) {
+    k->parked = 1;
     return io_wait_on(w, k->fd, POLLIN, 0, hvf_tcp_recv_more);
   }
   return n > 0 ? io_list(e, buf, (u64)n) : term_pak(CID(Nil), 0);
@@ -1252,7 +1283,8 @@ Term hvf_tcp_recv_run(Env e, Term* f, IoWork* w) {
   if (!k) {
     return term_pak(CID(Nil), 0);
   }
-  w->hand = (intptr_t)(u32)f[0];
+  w->made   = (intptr_t)(k - hvf_socks);
+  k->parked = 1;
   return io_wait_on(w, k->fd, POLLIN, 0, hvf_tcp_recv_more);
 }
 
@@ -1328,8 +1360,8 @@ Term hvf_udp_send_run(Env e, Term* f, IoWork* w) {
 }
 
 static Term hvf_udp_recv_more(Env e, IoWork* w) {
-  HvfSock* k = hvf_sock((uint32_t)w->hand, 1);
-  if (!k) {
+  HvfSock* k = hvf_sock_at(w);
+  if (hvf_sock_woke(k)) {
     return term_pak(CID(Nil), 0);
   }
   char               buf[65536];
@@ -1337,7 +1369,11 @@ static Term hvf_udp_recv_more(Env e, IoWork* w) {
   socklen_t          len = sizeof a;
   ssize_t            n   = recvfrom(k->fd, buf, sizeof buf, 0, (struct sockaddr*)&a, &len);
   if (n < 0) {
-    return errno == EAGAIN ? io_wait_on(w, k->fd, POLLIN, 0, hvf_udp_recv_more) : term_pak(CID(Nil), 0);
+    if (errno == EAGAIN) {
+      k->parked = 1;
+      return io_wait_on(w, k->fd, POLLIN, 0, hvf_udp_recv_more);
+    }
+    return term_pak(CID(Nil), 0);
   }
   // [ip, port, bytes...]
   Term xs = io_list(e, buf, (u64)n);
@@ -1352,7 +1388,8 @@ Term hvf_udp_recv_run(Env e, Term* f, IoWork* w) {
   if (!k) {
     return term_pak(CID(Nil), 0);
   }
-  w->hand = (intptr_t)(u32)f[0];
+  w->made   = (intptr_t)(k - hvf_socks);
+  k->parked = 1;
   return io_wait_on(w, k->fd, POLLIN, 0, hvf_udp_recv_more);
 }
 
@@ -1996,6 +2033,142 @@ Term hvf_ctl_reply_run(Env e, Term* f, IoWork* w) {
   return (Term)0;
 }
 
+// vsock over Unix sockets
+// ========================
+//
+// Guest-initiated: the guest's connection to host port P becomes a
+// connection to the Unix socket "<base>_P" (Hvf.unix_connect, then the
+// tcp_* effects on the same table). Host-initiated: clients connect to
+// "<base>" and send "CONNECT <port>\n" (Firecracker's convention);
+// Hvf.vsock_accept answers [conn, port] for each.
+
+static int      hvf_vs_fd = -1;
+static char     hvf_vs_base[1024];
+
+// Hvf.vsock_base() -> String: the --vsock base path.
+Term hvf_vsock_base_run(Env e, Term* f, IoWork* w) {
+  return io_str(e, hvf_vs_base, strlen(hvf_vs_base));
+}
+static uint32_t hvf_vs_next = 0x80000000u;
+
+// Hvf.unix_connect(key, path) -> U32: a non-blocking Unix-socket connect
+// filed under key; 0, or an errno.
+Term hvf_unix_connect_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* path = io_cstr(e, f[1], &n);
+  struct sockaddr_un a = {0};
+  a.sun_family = AF_UNIX;
+  if (n >= sizeof a.sun_path) {
+    free(path);
+    return (Term)(u32)ENAMETOOLONG;
+  }
+  memcpy(a.sun_path, path, n + 1);
+  free(path);
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0) {
+    return (Term)(u32)errno;
+  }
+  fcntl(fd, F_SETFL, O_NONBLOCK);
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+  if (connect(fd, (struct sockaddr*)&a, sizeof a) != 0 && errno != EINPROGRESS) {
+    int err = errno;
+    close(fd);
+    return (Term)(u32)err;
+  }
+  if (!hvf_sock_new((u32)f[0], 0, fd)) {
+    close(fd);
+    return (Term)(u32)EMFILE;
+  }
+  return (Term)0;
+}
+
+// Hvf.vsock_listen(path) -> U32: 0, or an errno.
+Term hvf_vsock_listen_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* path = io_cstr(e, f[0], &n);
+  struct sockaddr_un a = {0};
+  a.sun_family = AF_UNIX;
+  if (n >= sizeof a.sun_path) {
+    free(path);
+    return (Term)(u32)ENAMETOOLONG;
+  }
+  memcpy(a.sun_path, path, n + 1);
+  snprintf(hvf_vs_base, sizeof hvf_vs_base, "%s", path);
+  unlink(path);
+  free(path);
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0 || bind(fd, (struct sockaddr*)&a, sizeof a) != 0 || listen(fd, 16) != 0) {
+    int err = errno;
+    if (fd >= 0) {
+      close(fd);
+    }
+    return (Term)(u32)err;
+  }
+  fcntl(fd, F_SETFL, O_NONBLOCK);
+  hvf_vs_fd = fd;
+  return (Term)0;
+}
+
+static Term hvf_vs_line(Env e, IoWork* w);
+
+static Term hvf_vs_accept(Env e, IoWork* w) {
+  int c = accept(hvf_vs_fd, NULL, NULL);
+  if (c < 0) {
+    return io_wait_on(w, hvf_vs_fd, POLLIN, 0, hvf_vs_accept);
+  }
+  fcntl(c, F_SETFL, O_NONBLOCK);
+  int one = 1;
+  setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+  w->hand = c;
+  w->made = 0;
+  return hvf_vs_line(e, w);
+}
+
+// Reads the client's "CONNECT <port>\n"; files the socket and answers
+// [conn, port] (a bad line closes the client and waits for the next).
+static Term hvf_vs_line(Env e, IoWork* w) {
+  int  c = (int)w->hand;
+  char ch;
+  for (;;) {
+    ssize_t k = read(c, &ch, 1);
+    if (k < 0 && errno == EAGAIN) {
+      return io_wait_on(w, c, POLLIN, 0, hvf_vs_line);
+    }
+    if (k <= 0 || ch == '\n' || w->made >= 63) {
+      break;
+    }
+    w->data[w->made++] = ch;
+  }
+  w->data[w->made] = 0;
+  unsigned port;
+  if (sscanf(w->data, "CONNECT %u", &port) != 1) {
+    close(c);
+    w->made = 0;
+    return hvf_vs_accept(e, w);
+  }
+  uint32_t conn = hvf_vs_next++;
+  if (!hvf_sock_new(conn ^ 0x40000000u, 0, c)) {
+    close(c);
+    w->made = 0;
+    return hvf_vs_accept(e, w);
+  }
+  free(w->data);
+  uint32_t ws[2] = {conn, port};
+  return hvf_words(e, ws, 2);
+}
+
+// Hvf.vsock_accept() -> List<U32>: parks until a host client asks for a
+// guest port; [conn, port] ([] without a listener).
+Term hvf_vsock_accept_run(Env e, Term* f, IoWork* w) {
+  if (hvf_vs_fd < 0) {
+    return term_pak(CID(Nil), 0);
+  }
+  w->data = io_mem(malloc(64));
+  w->made = 0;
+  return hvf_vs_accept(e, w);
+}
+
 // Effects the program never calls have no id; register only the used ones.
 // The VMM's pure work per exit is microseconds, so extra runtime worker
 // threads only add contention: default the runtime to one (BENDRTS wins).
@@ -2084,6 +2257,18 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.ctl_reply)
   io_eff(CID(Hvf.ctl_reply), hvf_ctl_reply_run);
+#endif
+#ifdef CID(Hvf.vsock_base)
+  io_eff(CID(Hvf.vsock_base), hvf_vsock_base_run);
+#endif
+#ifdef CID(Hvf.unix_connect)
+  io_eff(CID(Hvf.unix_connect), hvf_unix_connect_run);
+#endif
+#ifdef CID(Hvf.vsock_listen)
+  io_eff(CID(Hvf.vsock_listen), hvf_vsock_listen_run);
+#endif
+#ifdef CID(Hvf.vsock_accept)
+  io_eff(CID(Hvf.vsock_accept), hvf_vsock_accept_run);
 #endif
 #ifdef CID(Hvf.irq)
   io_eff(CID(Hvf.irq), hvf_irq_run);

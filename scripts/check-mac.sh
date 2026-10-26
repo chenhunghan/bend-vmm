@@ -72,6 +72,11 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   grep -q HVC0-MARKER-OK <<<"$out" && grn "ok: hvc0 output reaches the host" || { red "failed: hvc0 output"; fail=1; }
   [ "$(cat "$share/guest.txt" 2>/dev/null)" = from-guest ] && grn "ok: 9p write reaches the host" || { red "failed: 9p write on the host"; fail=1; }
   rm -rf "$www" "$share"
+  vs=$(mktemp -d)/v.sock
+  out=$( (perl -e 'alarm 120; exec @ARGV' python3 scripts/vsock-test.py "$vs" ./out/bend-vmm --mem 512 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --vsock "$vs" --cmdline "console=ttyAMA0 bendtest bendvsock quiet") 2>&1 )
+  grep -q "GUEST-TEST PASS vsock-client" <<<"$out" && grn "ok: vsock guest -> host (Unix socket ${vs##*/}_1234)" || { red "failed: vsock guest -> host"; fail=1; }
+  grep -q "GUEST-TEST PASS vsock-server" <<<"$out" && grep -q HOST-VSOCK-OK <<<"$out" && grn "ok: vsock host -> guest (CONNECT 5000)" || { red "failed: vsock host -> guest"; grep -a -i vsock <<<"$out" | tail -5; fail=1; }
+  rm -rf "$(dirname "$vs")"
   out=$( (perl -e 'alarm 120; exec @ARGV' ./out/bend-vmm --mem 4096 --cpus 8 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --disk out/guest/disk.img --cmdline "console=ttyAMA0 bendtest bendcpus=8 quiet") 2>&1 )
   if grep -q GUEST-TESTS-DONE <<<"$out" && ! grep -q "GUEST-TEST FAIL" <<<"$out"; then grn "ok: 8 cpus, 4 GiB (RAM past 4 GiB)"; else red "failed: 8 cpus, 4 GiB"; grep -a GUEST <<<"$out" | tail; fail=1; fi
   out=$( ( (sleep 20; printf 'echo hi-$((40+2))\n'; sleep 2; printf 'poweroff -f\n'; sleep 5) | perl -e 'alarm 60; exec @ARGV' ./out/bend-vmm --mem 1024 --kernel out/guest/Image --initrd out/guest/guest.cpio) 2>&1 )

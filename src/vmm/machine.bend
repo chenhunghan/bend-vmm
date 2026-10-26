@@ -200,23 +200,23 @@ def Machine.devs_read(devs: +List<D.Dev>, n: Nat, off: U32, size: U32) -> +List<
 # A virtio write: the devices after it, the bytes the guest wrote to hvc0 and
 # the frames it transmitted.
 type Wrote is Data:
-  Wrote{devs: +List<D.Dev>, console: +List<U32>, frames: +List<+List<U32>>}
+  Wrote{devs: +List<D.Dev>, console: +List<U32>, frames: +List<+List<U32>>, vsock: +List<V.VsockCmd>}
 
 def Machine.wrote.head(t: +List<D.Dev>, o: D.DevOut) -> Wrote:
   match o:
-    case D.DevOut{d, bs, fs}:
-      Wrote{d <> t, bs, fs}
+    case D.DevOut{d, bs, fs, vc}:
+      Wrote{d <> t, bs, fs, vc}
 
 def Machine.wrote.tail(d: D.Dev, w: Wrote) -> Wrote:
   match w:
-    case Wrote{t, bs, fs}:
-      Wrote{d <> t, bs, fs}
+    case Wrote{t, bs, fs, vc}:
+      Wrote{d <> t, bs, fs, vc}
 
 # The write to virtio device n of the list; nothing past its end.
 def Machine.devs_write(-R: Type, devs: +List<D.Dev>, n: Nat, off: U32, v: U32) -> V.Op<R, Wrote>:
   match devs n:
     case Nil{} _:
-      V.Op.pure(R, Wrote, Wrote{[], [], []})
+      V.Op.pure(R, Wrote, Wrote{[], [], [], []})
     case d <> t 0n:
       do V.Op<R, Wrote>:
         o : D.DevOut <- D.Dev.write(R, d, off, v)
@@ -319,13 +319,24 @@ def Machine.guest_frame(o: Nt.SlirpOut, f: +List<U32>) -> Nt.SlirpOut:
 def Machine.guest_frames(n: Nt.Slirp, fs: +List<+List<U32>>) -> Nt.SlirpOut:
   List.foldl(~&2, ~+List<U32>, ~Nt.SlirpOut, ~Machine.guest_frame, fs, Nt.SlirpOut{n, [], []})
 
-# After a virtio write: hvc0 bytes to the console, transmitted frames through
-# the NAT.
+# Vsock commands for the host, in order.
+def Machine.vsock_cmds(-R: Type, cs: +List<V.VsockCmd>) -> V.Op<R, Unit>:
+  match cs:
+    case Nil{}:
+      V.Op.pure(R, Unit, Unit{})
+    case Con{c, rest}:
+      do V.Op<R, Unit>:
+        V.Op.vsock(R, c)
+        Machine.vsock_cmds(R, rest)
+
+# After a virtio write: hvc0 bytes to the console, vsock commands to the
+# host, transmitted frames through the NAT.
 def Machine.virtio_wrote(-R: Type, p: P.PsciState, u: Uart.Pl011, ui: Bool, lines: +List<Bool>, rt: Rtc.Pl031, ri: Bool, nt: Nt.Slirp, w: Wrote) -> V.Op<R, Machine>:
   match w:
-    case Wrote{devs, bs, fs}:
+    case Wrote{devs, bs, fs, vc}:
       do V.Op<R, Machine>:
         Machine.print(R, bs)
+        Machine.vsock_cmds(R, vc)
         Machine.slirp(R, p, u, ui, devs, lines, rt, ri, Machine.guest_frames(nt, fs))
 
 # The 32-bit write of v to bus device n at off.
@@ -608,3 +619,60 @@ def Machine.net_backlog(m: Machine) -> U32:
   match m:
     case Machine{p, u, ui, devs, lines, rt, ri, nt}:
       Machine.backlog(devs)
+
+def Machine.vsock_devs.out(-R: Type, o: D.DevOut, t: +List<D.Dev>) -> V.Op<R, +List<D.Dev>>:
+  match o:
+    case D.DevOut{d, bs, fs, vc}:
+      do V.Op<R, +List<D.Dev>>:
+        Machine.vsock_cmds(R, vc)
+        return d <> t
+
+# The index of the first VsockKind device (the list's length when none).
+def Machine.vsock_index(devs: +List<D.Dev>) -> Nat:
+  match devs:
+    case Nil{}:
+      0n
+    case +d <> t:
+      Bool.pick(Nat, D.Dev.vsock(d), 0n, 1n+Machine.vsock_index(t))
+
+# A vsock event to device n of the list (no change past its end).
+def Machine.vsock_at(-R: Type, devs: +List<D.Dev>, n: Nat, ev: V.VsockEvent) -> V.Op<R, +List<D.Dev>>:
+  match devs n:
+    case Nil{} _:
+      V.Op.pure(R, +List<D.Dev>, [])
+    case d <> t 0n:
+      do V.Op<R, +List<D.Dev>>:
+        o : D.DevOut <- D.Dev.host_vsock(R, d, ev)
+        Machine.vsock_devs.out(R, o, t)
+    case d <> t 1n+i:
+      do V.Op<R, +List<D.Dev>>:
+        rest : +List<D.Dev> <- Machine.vsock_at(R, t, i, ev)
+        return d <> rest
+
+# A vsock event from the host: to the first VsockKind device, its commands to
+# the host, then the interrupt lines.
+def Machine.vsock_devs(-R: Type, +devs: +List<D.Dev>, ev: V.VsockEvent) -> V.Op<R, +List<D.Dev>>:
+  Machine.vsock_at(R, devs, Machine.vsock_index(devs), ev)
+
+def Machine.vsock_event.go(-R: Type, m: Machine, ev: V.VsockEvent) -> V.Op<R, Machine>:
+  match m:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt}:
+      do V.Op<R, Machine>:
+        devs : +List<D.Dev> <- Machine.vsock_devs(R, devs, ev)
+        Machine.irqs(R, Machine{p, u, ui, devs, lines, rt, ri, nt})
+
+def Machine.vsock_event(m: Machine, ev: V.VsockEvent) -> V.Vm<Machine>:
+  V.Op.finish(Machine, Machine.vsock_event.go(Machine, m, ev))
+
+def Machine.vsock_backlog.of(devs: +List<D.Dev>) -> U32:
+  match devs:
+    case Nil{}:
+      0
+    case +d <> t:
+      Bool.pick(U32, D.Dev.vsock(d), D.Dev.vsock_backlog(d), Machine.vsock_backlog.of(t))
+
+# The vsock device's backlog (D.Dev.vsock_backlog), for host backpressure.
+def Machine.vsock_backlog(m: Machine) -> U32:
+  match m:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt}:
+      Machine.vsock_backlog.of(devs)

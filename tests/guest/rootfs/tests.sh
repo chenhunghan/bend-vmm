@@ -84,3 +84,14 @@ if grep -q bendshare /proc/cmdline; then
     fail p9-mount "mount failed: $(dmesg | grep -i -E '9p|virtio' | tail -5 | tr '\n' '|')"
   fi
 fi
+
+# virtio-vsock: the host serves Unix sockets under its --vsock path
+if grep -q bendvsock /proc/cmdline; then
+  check vsock-client sh -c '/bin/vsock c | grep -q PONG-HOST'
+  /bin/vsock s > /tmp/vs.out 2>&1 &
+  srv=$!
+  sleep 0.3
+  echo "VSOCK-SERVER-READY"
+  i=0; while kill -0 $srv 2>/dev/null && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+  wait $srv && pass vsock-server || fail vsock-server "$(cat /tmp/vs.out)"
+fi

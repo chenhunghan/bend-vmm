@@ -47,3 +47,7 @@ io_eff(CID(Hvf.snap_gic), hvf_unavailable);
 io_eff(CID(Hvf.ctl_listen), hvf_unavailable);
 io_eff(CID(Hvf.ctl_next), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.ctl_reply), hvf_unavailable);
+io_eff(CID(Hvf.unix_connect), hvf_unavailable);
+io_eff(CID(Hvf.vsock_listen), hvf_unavailable);
+io_eff(CID(Hvf.vsock_accept), () => ({ $: CID(Nil) }));
+io_eff(CID(Hvf.vsock_base), () => "");
