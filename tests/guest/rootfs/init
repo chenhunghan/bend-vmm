@@ -8,7 +8,7 @@ mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 mkdir -p /etc /mnt
 # Drivers this kernel builds as modules (shipped by scripts/guest-assets.sh).
-for m in virtio-rng netfs 9pnet 9pnet_virtio 9p; do
+for m in virtio-rng rtc-pl031 netfs 9pnet 9pnet_virtio 9p; do
   [ -f /lib/modules/$m.ko ] && insmod /lib/modules/$m.ko 2>/dev/null
 done
 echo "GUEST: up, kernel $(uname -r), $(nproc) cpus"

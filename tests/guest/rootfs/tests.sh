@@ -36,7 +36,7 @@ check irqs grep -q "arch_timer" /proc/interrupts
 if [ -e /dev/rtc0 ]; then
   check rtc [ "$(date +%Y)" -ge 2026 ]
 else
-  skip rtc "no /dev/rtc0"
+  skip rtc "no /dev/rtc0 (amba: $(ls /sys/bus/amba/devices 2>/dev/null | tr '\n' ' '); pl031 id: $(cat /sys/bus/amba/devices/9010000.pl031/id 2>/dev/null); drivers: $(ls /sys/bus/amba/drivers 2>/dev/null | tr '\n' ' '))"
 fi
 
 # virtio-console: the host prints what the guest writes to hvc0

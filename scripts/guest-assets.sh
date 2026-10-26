@@ -25,6 +25,12 @@ if [ ! -f out/guest/modules/9p.ko ]; then
     zstd -dqf "out/guest/deb/lib/modules/$kver/kernel/$m.ko.zst" -o "out/guest/modules/$(basename $m).ko"
   done
 fi
+if [ ! -f out/guest/modules/rtc-pl031.ko ]; then
+  mkdir -p out/guest/extra
+  curl -fsSL -o out/guest/extra.deb "http://ports.ubuntu.com/ubuntu-ports/pool/main/l/linux/linux-modules-extra-${kver%-generic}-generic_${kver%-generic}.147_arm64.deb"
+  (cd out/guest/extra && ar x ../extra.deb && tar -xf data.tar --include='*rtc-pl031*')
+  zstd -dqf "out/guest/extra/lib/modules/$kver/kernel/drivers/rtc/rtc-pl031.ko.zst" -o out/guest/modules/rtc-pl031.ko
+fi
 mods=""
 for k in out/guest/modules/*.ko; do mods="$mods $k:lib/modules/$(basename "$k")"; done
 python3 scripts/mkinitramfs.py tests/guest/rootfs out/guest/guest.cpio out/guest/busybox:bin/busybox $mods
