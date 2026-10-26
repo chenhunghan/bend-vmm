@@ -106,3 +106,7 @@ law psci.handle_keeps_cpu_count:
   for on: +List<Bool>
   for call: P.PsciCall
   {List.length(&2, Bool, on_of(state_of(P.Psci.handle(self, P.PsciState{on}, call)))) == List.length(&2, Bool, on) : Nat}
+
+law psci.system_off_x0:
+  # SYSTEM_OFF and SYSTEM_RESET do not return, but the handler still answers 0.
+  {x0_of(P.Psci.handle(0, P.PsciState.boot(1n), P.SystemOff{})) == z() : U.U64}

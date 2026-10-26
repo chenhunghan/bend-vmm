@@ -13,3 +13,8 @@ import ./proofs/virtio_mmio.bend as Proofs_virtio_mmio
 import ./proofs/virtio_queue.bend as Proofs_virtio_queue
 import ./proofs/image.bend as Proofs_image
 import ./proofs/layout.bend as Proofs_layout
+import ./proofs/dtb.bend as Proofs_dtb
+import ./proofs/device.bend as Proofs_device
+import ./proofs/rng.bend as Proofs_rng
+import ./proofs/blk.bend as Proofs_blk
+import ./proofs/machine.bend as Proofs_machine

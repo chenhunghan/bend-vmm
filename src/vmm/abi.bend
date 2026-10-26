@@ -53,6 +53,12 @@ type Vm<-A: Type> is Type:
   VmCpuOn{cpu: U32, entry: U.U64, ctx: U.U64, next: Vm<A>}
   # A diagnostic line for the host's log (stderr), not the guest console.
   VmLog{msg: String, next: Vm<A>}
+  # Reads len bytes of disk image `disk` at byte offset; short at its end.
+  VmDiskRead{disk: U32, offset: U.U64, len: U32, k: +List<U32> -> Vm<A>}
+  # Writes bytes to disk image `disk` at byte offset.
+  VmDiskWrite{disk: U32, offset: U.U64, bytes: +List<U32>, next: Vm<A>}
+  # len bytes from the host's entropy source.
+  VmRandom{len: U32, k: +List<U32> -> Vm<A>}
 
 # Device code is written in Op, a continuation monad over Vm: its bind needs
 # no recursion, so `do Op<R, A>:` blocks pass Bend's termination check. R is
@@ -101,3 +107,12 @@ def Op.cpu_on(-R: Type, cpu: U32, entry: U.U64, ctx: U.U64) -> Op<R, Unit>:
 
 def Op.log(-R: Type, msg: String) -> Op<R, Unit>:
   Op{k => VmLog{msg, k(Unit{})}}
+
+def Op.disk_read(-R: Type, disk: U32, offset: U.U64, len: U32) -> Op<R, +List<U32>>:
+  Op{k => VmDiskRead{disk, offset, len, k}}
+
+def Op.disk_write(-R: Type, disk: U32, offset: U.U64, bytes: +List<U32>) -> Op<R, Unit>:
+  Op{k => VmDiskWrite{disk, offset, bytes, k(Unit{})}}
+
+def Op.random(-R: Type, len: U32) -> Op<R, +List<U32>>:
+  Op{k => VmRandom{len, k}}

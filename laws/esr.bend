@@ -62,3 +62,19 @@ law esr.insn_abort:
 law esr.other:
   # EC 0x07 (FP access): 0x1E000000
   {E.Trap.decode(U.U64{0, 503316480}, z(), z()) == E.Other{7} : E.Trap}
+
+# Proposed: general laws added by the esr implementation.
+
+law esr.decode_ignores_high_word:
+  # ESR_EL2[63:32] (ISS2 and RES0) never changes the decode.
+  for h: U32
+  for l: U32
+  for ipa: U.U64
+  for xt: U.U64
+  {E.Trap.decode(U.U64{h, l}, ipa, xt) == E.Trap.decode(U.U64{0, l}, ipa, xt) : E.Trap}
+
+law esr.load_value_zero:
+  # `ldr w1, [x0]`: 0x93810000. A read never carries xt, whatever it holds.
+  for ipa: U.U64
+  for xt: U.U64
+  {E.Trap.decode(U.U64{0, 2474704896}, ipa, xt) == E.Mmio{ipa, False{}, 4, 1, U.U64{0, 0}, False{}, False{}} : E.Trap}

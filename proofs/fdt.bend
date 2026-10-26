@@ -22,8 +22,11 @@ def L.fdt.sample():
 def L.fdt.boot_cpuid():
   {==}
 
-# fdt.word_aligned stays open: fdt.sample fixes a 186-byte blob (186 mod 4 = 2),
-# so the law is false; see fdt.sample_not_word_aligned.
 
 def L.fdt.sample_not_word_aligned():
+  {==}
+
+# The header is built from a concrete magic word, so the first four bytes
+# compute without knowing the tree.
+def L.fdt.magic(root, cpu):
   {==}

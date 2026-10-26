@@ -26,9 +26,11 @@ def U64.lo(a: U64) -> U32:
 
 def U64.add(a: U64, b: U64) -> U64:
   match a b:
-    case U64{ah, +al} U64{bh, bl}:
+    case U64{ah, +al} U64{bh, +bl}:
       +lo = (al + bl : U32)
-      carry = Bool.to_u32(U32.is_lt(lo, al))
+      # The sum wrapped iff it is below both addends; testing both keeps the
+      # carry symmetric in a and b.
+      carry = Bool.to_u32(U32.is_lt(lo, al) && U32.is_lt(lo, bl))
       U64{(ah + bh + carry : U32), lo}
 
 def U64.sub(a: U64, b: U64) -> U64:
