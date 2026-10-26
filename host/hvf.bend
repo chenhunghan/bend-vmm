@@ -61,6 +61,14 @@ def Hvf.disk_size(disk: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.disk_flush(disk: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.now() -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.disk_read(disk: U32, off_hi: U32, off_lo: U32, len: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
@@ -171,4 +179,9 @@ def Host.disk_write(disk: U32, off: U.U64, bytes: +List<U32>) -> IO(U32):
 def Host.disk_size(disk: U32) -> IO(U.U64):
   do IO<U.U64>:
     +ws : +List<U32> <- Hvf.disk_size(disk)
+    return U.U64{Host.first(ws), Host.first(List.drop(&2, U32, ws, 1n))}
+
+def Host.now() -> IO(U.U64):
+  do IO<U.U64>:
+    +ws : +List<U32> <- Hvf.now()
     return U.U64{Host.first(ws), Host.first(List.drop(&2, U32, ws, 1n))}

@@ -31,6 +31,29 @@ type PowerOp is Data:
   PowerOff{}
   PowerReset{}
 
+# Host network commands from the NAT (src/net/nat.bend). Connections are
+# numbered by the NAT; addresses are IPv4 as U32 (10.0.2.2 = 167772674). The
+# host maps 10.0.2.2 to its own loopback and 10.0.2.3 to its DNS resolver.
+type NetCmd is Data:
+  TcpConnect{conn: U32, ip: U32, port: U32}
+  TcpSend{conn: U32, bytes: +List<U32>}
+  # Half-close: no more data from the guest (shutdown(SHUT_WR)).
+  TcpShutdown{conn: U32}
+  # Full close: forget the connection.
+  TcpClose{conn: U32}
+  # A datagram from guest port sport to ip:port.
+  UdpSend{sport: U32, ip: U32, port: U32, bytes: +List<U32>}
+
+# What the host reports back to the NAT.
+type NetEvent is Data:
+  TcpConnected{conn: U32}
+  TcpRefused{conn: U32}
+  TcpData{conn: U32, bytes: +List<U32>}
+  # The remote side finished sending (EOF).
+  TcpEof{conn: U32}
+  # A datagram from ip:port to guest port dport.
+  UdpData{ip: U32, port: U32, dport: U32, bytes: +List<U32>}
+
 # A program of host effects that ends with a value of type A. Each effect
 # applies to the vCPU whose exit is being handled, unless it names a cpu.
 type Vm<-A: Type> is Type:
@@ -59,6 +82,12 @@ type Vm<-A: Type> is Type:
   VmDiskWrite{disk: U32, offset: U.U64, bytes: +List<U32>, next: Vm<A>}
   # len bytes from the host's entropy source.
   VmRandom{len: U32, k: +List<U32> -> Vm<A>}
+  # Wall-clock time: seconds since the Unix epoch.
+  VmNow{k: U.U64 -> Vm<A>}
+  # Makes earlier writes to disk image `disk` durable (fsync).
+  VmDiskFlush{disk: U32, next: Vm<A>}
+  # A network command for the host's sockets.
+  VmNet{cmd: NetCmd, next: Vm<A>}
 
 # Device code is written in Op, a continuation monad over Vm: its bind needs
 # no recursion, so `do Op<R, A>:` blocks pass Bend's termination check. R is
@@ -116,3 +145,12 @@ def Op.disk_write(-R: Type, disk: U32, offset: U.U64, bytes: +List<U32>) -> Op<R
 
 def Op.random(-R: Type, len: U32) -> Op<R, +List<U32>>:
   Op{k => VmRandom{len, k}}
+
+def Op.now(-R: Type) -> Op<R, U.U64>:
+  Op{k => VmNow{k}}
+
+def Op.disk_flush(-R: Type, disk: U32) -> Op<R, Unit>:
+  Op{k => VmDiskFlush{disk, k(Unit{})}}
+
+def Op.net(-R: Type, cmd: NetCmd) -> Op<R, Unit>:
+  Op{k => VmNet{cmd, k(Unit{})}}

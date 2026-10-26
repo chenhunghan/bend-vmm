@@ -528,6 +528,19 @@ Term hvf_disk_size_run(Env e, Term* f, IoWork* w) {
   return hvf_words(e, ws, 2);
 }
 
+// Hvf.disk_flush(disk) -> U32: fsync; 0, or 0xFFFFFFFF.
+Term hvf_disk_flush_run(Env e, Term* f, IoWork* w) {
+  int fd = hvf_disk(f[0]);
+  return (Term)(fd >= 0 && fsync(fd) == 0 ? 0 : HVF_ERR);
+}
+
+// Hvf.now() -> List<U32>: [hi, lo] of the wall clock in seconds since 1970.
+Term hvf_now_run(Env e, Term* f, IoWork* w) {
+  uint64_t t     = (uint64_t)time(NULL);
+  uint32_t ws[2] = {(uint32_t)(t >> 32), (uint32_t)t};
+  return hvf_words(e, ws, 2);
+}
+
 // Hvf.disk_read(disk, off_hi, off_lo, len) -> List<U32>: the bytes there,
 // short at the end of the image.
 Term hvf_disk_read_run(Env e, Term* f, IoWork* w) {
@@ -596,6 +609,12 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.disk_size)
   io_eff(CID(Hvf.disk_size), hvf_disk_size_run);
+#endif
+#ifdef CID(Hvf.disk_flush)
+  io_eff(CID(Hvf.disk_flush), hvf_disk_flush_run);
+#endif
+#ifdef CID(Hvf.now)
+  io_eff(CID(Hvf.now), hvf_now_run);
 #endif
 #ifdef CID(Hvf.disk_read)
   io_eff(CID(Hvf.disk_read), hvf_disk_read_run);

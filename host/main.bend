@@ -172,6 +172,17 @@ def put(mc: Chan(M.Machine), m: M.Machine) -> IO(Unit):
       do IO<A>:
         bs : +List<U32> <- H.Hvf.random(n)
         interp(cpu, mc, done, A, k(bs))
+    case V.VmNow{k}:
+      do IO<A>:
+        t : U.U64 <- H.Host.now()
+        interp(cpu, mc, done, A, k(t))
+    case V.VmDiskFlush{d, next}:
+      do IO<A>:
+        _ : U32 <- H.Hvf.disk_flush(d)
+        interp(cpu, mc, done, A, next)
+    case V.VmNet{cmd, next}:
+      # Wired to host sockets once the NAT lands (src/net/nat.bend).
+      interp(cpu, mc, done, A, next)
 
 # Bytes typed on the host console go to the UART: this loop parks on stdin
 # and hands each chunk to the machine. An idle guest may never exit (the GIC

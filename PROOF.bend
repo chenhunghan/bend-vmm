@@ -18,3 +18,9 @@ import ./proofs/device.bend as Proofs_device
 import ./proofs/rng.bend as Proofs_rng
 import ./proofs/blk.bend as Proofs_blk
 import ./proofs/machine.bend as Proofs_machine
+import ./proofs/pl031.bend as Proofs_pl031
+import ./proofs/console.bend as Proofs_console
+import ./proofs/wire.bend as Proofs_wire
+import ./proofs/dhcp.bend as Proofs_dhcp
+import ./proofs/nat.bend as Proofs_nat
+import ./proofs/net.bend as Proofs_net

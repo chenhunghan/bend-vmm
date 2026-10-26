@@ -17,3 +17,9 @@ import ./laws/device.bend as Laws_device
 import ./laws/rng.bend as Laws_rng
 import ./laws/blk.bend as Laws_blk
 import ./laws/machine.bend as Laws_machine
+import ./laws/pl031.bend as Laws_pl031
+import ./laws/console.bend as Laws_console
+import ./laws/wire.bend as Laws_wire
+import ./laws/dhcp.bend as Laws_dhcp
+import ./laws/nat.bend as Laws_nat
+import ./laws/net.bend as Laws_net
