@@ -45,6 +45,10 @@ def Hvf.stdin(max: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.stdin_wait(max: U32) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.random(len: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"

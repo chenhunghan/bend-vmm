@@ -1,0 +1,16 @@
+#!/bin/busybox sh
+# bend-vmm guest userspace (busybox). With `bendtest` on the kernel command
+# line it runs the in-guest test suite and powers off; otherwise it starts an
+# interactive shell on the console.
+/bin/busybox --install -s /bin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+echo "GUEST: up, kernel $(uname -r), $(nproc) cpus"
+if grep -q bendtest /proc/cmdline; then
+  sh /tests.sh
+  echo "GUEST-TESTS-DONE"
+  poweroff -f
+fi
+setsid sh -c 'exec sh -i </dev/ttyAMA0 >/dev/ttyAMA0 2>&1'
+poweroff -f

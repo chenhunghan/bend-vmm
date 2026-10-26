@@ -20,3 +20,4 @@ io_eff(CID(Hvf.disk_size), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.disk_read), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.disk_write), hvf_unavailable);
 io_eff(CID(Hvf.file_size), hvf_unavailable);
+io_eff(CID(Hvf.stdin_wait), () => ({ $: CID(Nil) }));

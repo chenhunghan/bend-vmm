@@ -44,5 +44,20 @@ if [ -f host/main.bend ] && [ "${SKIP_LINUX:-0}" != 1 ]; then
   expect "linux smp (4 cpus)" 120 "Brought up 1 node, 4 CPUs" ./out/bend-vmm --cpus 4 --kernel out/linux/linux --initrd out/linux/initrd.cpio
 fi
 
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 4. guest userspace (Ubuntu kernel, busybox)"
+  scripts/guest-assets.sh >/dev/null || { red "guest assets failed"; exit 1; }
+  dd if=/dev/zero of=out/guest/disk.img bs=1m count=8 2>/dev/null
+  printf 'BEND-DISK-SECTOR0' | dd of=out/guest/disk.img conv=notrunc 2>/dev/null
+  out=$( (perl -e 'alarm 180; exec @ARGV' ./out/bend-vmm --mem 1024 --cpus 2 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk out/guest/disk.img --cmdline "console=ttyAMA0 bendtest bendcpus=2") 2>&1 )
+  if grep -q GUEST-TESTS-DONE <<<"$out" && ! grep -q "GUEST-TEST FAIL" <<<"$out"; then
+    grn "ok: guest tests ($(grep -c 'GUEST-TEST PASS' <<<"$out") passed, $(grep -c 'GUEST-TEST SKIP' <<<"$out") skipped)"
+  else
+    red "failed: guest tests"; grep -a "GUEST" <<<"$out" | tail -20; fail=1
+  fi
+  out=$( ( (sleep 20; printf 'echo hi-$((40+2))\n'; sleep 2; printf 'poweroff -f\n'; sleep 5) | perl -e 'alarm 60; exec @ARGV' ./out/bend-vmm --mem 1024 --kernel out/guest/Image --initrd out/guest/guest.cpio) 2>&1 )
+  if grep -q "^hi-42" <<<"$out"; then grn "ok: console input"; else red "failed: console input"; tail -5 <<<"$out"; fail=1; fi
+fi
+
 if [ $fail = 0 ]; then grn "CHECK-MAC OK"; else red "CHECK-MAC FAILED"; fi
 exit $fail

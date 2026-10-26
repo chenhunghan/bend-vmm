@@ -117,7 +117,8 @@ typedef struct {
 
 static HvfCpu hvf_cpus[HVF_MAX_CPUS];
 
-// BEND_VMM_TRACE=1 prints every exception exit on stderr.
+// BEND_VMM_TRACE: bit 1 prints every exception exit on stderr, bit 2 the
+// console input and interrupt line changes.
 static int hvf_trace;
 
 static void hvf_put64(HvfCpu* c, uint64_t v) {
@@ -155,7 +156,7 @@ static void hvf_run(HvfCpu* c) {
       uint32_t srt = (uint32_t)(esr >> 16) & 31;
       int isv = (esr >> 24) & 1;
       hvf_put64(c, isv && srt != 31 ? hvf_reg(c, (hv_reg_t)(HV_REG_X0 + srt)) : 0);
-      if (hvf_trace) {
+      if (hvf_trace & 1) {
         fprintf(stderr, "[trace] esr=%08llx ipa=%09llx x0=%llx xt=%llx pc=%llx\n",
           (unsigned long long)esr, (unsigned long long)c->exit->exception.physical_address,
           (unsigned long long)hvf_reg(c, HV_REG_X0),
@@ -235,7 +236,7 @@ Term hvf_init_run(Env e, Term* f, IoWork* w) {
   if (hvf_open() != 0) {
     return (Term)1;
   }
-  hvf_trace = getenv("BEND_VMM_TRACE") != NULL;
+  hvf_trace = getenv("BEND_VMM_TRACE") ? atoi(getenv("BEND_VMM_TRACE")) : 0;
   if (hv.vm_create(NULL) != HV_SUCCESS) {
     return (Term)2;
   }
@@ -356,7 +357,11 @@ Term hvf_vcpu_run(Env e, Term* f, IoWork* w) {
 
 // Hvf.irq(intid, level) -> U32: sets an SPI's level (0 low, else high).
 Term hvf_irq_run(Env e, Term* f, IoWork* w) {
-  return (Term)(hv.gic_set_spi((u32)f[0], (u32)f[1] != 0) == HV_SUCCESS ? 0 : HVF_ERR);
+  hv_return_t r = hv.gic_set_spi((u32)f[0], (u32)f[1] != 0);
+  if (hvf_trace & 2) {
+    fprintf(stderr, "[trace] irq %u -> %u (%d)\n", (u32)f[0], (u32)f[1], r);
+  }
+  return (Term)(r == HV_SUCCESS ? 0 : HVF_ERR);
 }
 
 // Hvf.kick(cpu) -> U32: forces a running vCPU out of the guest.
@@ -397,6 +402,9 @@ Term hvf_stdin_run(Env e, Term* f, IoWork* w) {
   char    buf[256];
   u64     max = (u32)f[0] < sizeof buf ? (u32)f[0] : sizeof buf;
   ssize_t k   = read(0, buf, max);
+  if ((hvf_trace & 2) && k > 0) {
+    fprintf(stderr, "[trace] stdin %zd bytes\n", k);
+  }
   return k > 0 ? io_list(e, buf, (u64)k) : term_pak(CID(Nil), 0);
 }
 
@@ -408,6 +416,84 @@ Term hvf_random_run(Env e, Term* f, IoWork* w) {
   Term xs = io_list(e, (const char*)buf, n);
   free(buf);
   return xs;
+}
+
+#include <termios.h>
+
+// When stdin is a terminal it goes raw (keys, Ctrl-C included, go to the
+// guest) and is restored at exit. Ctrl-A then x quits the VMM.
+static struct termios hvf_tty;
+static int            hvf_raw;
+static int            hvf_ctrl_a;
+
+static void hvf_tty_restore(void) {
+  if (hvf_raw) {
+    tcsetattr(0, TCSANOW, &hvf_tty);
+  }
+}
+
+static void hvf_tty_raw(void) {
+  if (hvf_raw || !isatty(0) || tcgetattr(0, &hvf_tty) != 0) {
+    return;
+  }
+  struct termios t = hvf_tty;
+  cfmakeraw(&t);
+  t.c_oflag |= OPOST | ONLCR;
+  if (tcsetattr(0, TCSANOW, &t) == 0) {
+    hvf_raw = 1;
+    atexit(hvf_tty_restore);
+  }
+}
+
+// Drops the Ctrl-A escape from buf; quits on Ctrl-A x.
+static ssize_t hvf_escape(char* buf, ssize_t k) {
+  ssize_t n = 0;
+  for (ssize_t i = 0; i < k; i++) {
+    if (hvf_ctrl_a) {
+      hvf_ctrl_a = 0;
+      if (buf[i] == 'x') {
+        hvf_tty_restore();
+        fprintf(stderr, "\r\nbend-vmm: quit (Ctrl-A x)\r\n");
+        exit(0);
+      }
+      if (buf[i] != 1) {
+        buf[n++] = 1;
+      }
+      buf[n++] = buf[i];
+    } else if (buf[i] == 1 && hvf_raw) {
+      hvf_ctrl_a = 1;
+    } else {
+      buf[n++] = buf[i];
+    }
+  }
+  return n;
+}
+
+static Term hvf_stdin_more(Env e, IoWork* w) {
+  char    buf[256];
+  ssize_t k = read(0, buf, (size_t)w->made);
+  if (k < 0 && errno == EAGAIN) {
+    return io_wait_on(w, 0, POLLIN, 0, hvf_stdin_more);
+  }
+  if (k > 0) {
+    k = hvf_escape(buf, k);
+    if (k == 0) {
+      return io_wait_on(w, 0, POLLIN, 0, hvf_stdin_more);
+    }
+  }
+  if ((hvf_trace & 2) && k > 0) {
+    fprintf(stderr, "[trace] stdin %zd bytes\n", k);
+  }
+  return k > 0 ? io_list(e, buf, (u64)k) : term_pak(CID(Nil), 0);
+}
+
+// Hvf.stdin_wait(max) -> List<U32>: parks until stdin has bytes and answers
+// up to max of them; [] at end of input (or on an error).
+Term hvf_stdin_wait_run(Env e, Term* f, IoWork* w) {
+  hvf_tty_raw();
+  fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
+  w->made = (u32)f[0] < 256 ? (intptr_t)(u32)f[0] : 256;
+  return io_wait_on(w, 0, POLLIN, 0, hvf_stdin_more);
 }
 
 #define HVF_MAX_DISKS 8
@@ -498,6 +584,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.stdin)
   io_eff(CID(Hvf.stdin), hvf_stdin_run);
+#endif
+#ifdef CID(Hvf.stdin_wait)
+  io_eff(CID(Hvf.stdin_wait), hvf_stdin_wait_run);
 #endif
 #ifdef CID(Hvf.random)
   io_eff(CID(Hvf.random), hvf_random_run);

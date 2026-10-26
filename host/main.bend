@@ -173,30 +173,31 @@ def put(mc: Chan(M.Machine), m: M.Machine) -> IO(Unit):
         bs : +List<U32> <- H.Hvf.random(n)
         interp(cpu, mc, done, A, k(bs))
 
-# Bytes typed on the host console go to the UART (polled by vCPU 0).
-@unsafe def poll_input.go(empty: Bool, +cpu: U32, +mc: Chan(M.Machine), +done: Chan(U32), m: M.Machine, bs: +List<U32>) -> IO(M.Machine):
-  match empty:
+# Bytes typed on the host console go to the UART: this loop parks on stdin
+# and hands each chunk to the machine. An idle guest may never exit (the GIC
+# and timer live in Hypervisor.framework), so input cannot wait for exits.
+@unsafe def input_loop.go(eof: Bool, +mc: Chan(M.Machine), +done: Chan(U32), bs: +List<U32>) -> IO(Unit):
+  match eof:
     case True{}:
-      IO.pure(M.Machine, m)
+      IO.pure(Unit, Unit{})
     case False{}:
-      interp(cpu, mc, done, M.Machine, M.Machine.input(m, bs))
+      do IO<Unit>:
+        m0 : M.Machine <- take(mc)
+        m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.input(m0, bs))
+        put(mc, m1)
+        input_loop(mc, done)
 
-@unsafe def poll_input.cpu(cpu0: Bool, +cpu: U32, +mc: Chan(M.Machine), +done: Chan(U32), m: M.Machine) -> IO(M.Machine):
-  match cpu0:
-    case False{}:
-      IO.pure(M.Machine, m)
-    case True{}:
-      do IO<M.Machine>:
-        +bs : +List<U32> <- H.Hvf.stdin(64)
-        poll_input.go(List.is_empty(&2, U32, bs), cpu, mc, done, m, bs)
+@unsafe def input_loop(+mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+  do IO<Unit>:
+    +bs : +List<U32> <- H.Hvf.stdin_wait(64)
+    input_loop.go(List.is_empty(&2, U32, bs), mc, done, bs)
 
 # One vCPU: run, hand the exit to the machine, act on the answer, repeat.
 @unsafe def vcpu_loop(+cpu: U32, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
   do IO<Unit>:
     e : V.RawExit <- H.Host.run(cpu)
-    m0 : M.Machine <- take(mc)
-    m1 : M.Machine <- poll_input.cpu(U32.is_zero(cpu), cpu, mc, done, m0)
-    step : M.Step <- interp(cpu, mc, done, M.Step, M.Machine.on_exit(cpu, m1, e))
+    m : M.Machine <- take(mc)
+    step : M.Step <- interp(cpu, mc, done, M.Step, M.Machine.on_exit(cpu, m, e))
     vcpu_loop.next(cpu, mc, done, step)
 
 @unsafe def vcpu_loop.ctl(+cpu: U32, +mc: Chan(M.Machine), +done: Chan(U32), ctl: M.Control) -> IO(Unit):
@@ -318,6 +319,7 @@ def boot(payload: Bool, o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
     put(mc, M.Machine.new(U32.to_nat(cpus), kinds))
     +done : Chan(U32) <- Chan.new(U32, 4)
     IO.spawn(Unit, vcpu_loop(0, mc, done))
+    IO.spawn(Unit, input_loop(mc, done))
     got : Maybe<&1, U32> <- Chan.recv(U32, done)
     +code : U32 = Maybe.default(&1, U32, got, 1)
     IO.print_err("bend-vmm: stopped (" ++ U32.show(code) ++ ")")
