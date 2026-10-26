@@ -36,3 +36,33 @@ jobs:
           if [ -n "$removed" ]; then echo "laws/ lines removed or changed:"; echo "$removed"; exit 1; fi
           frozen=$(git diff --name-only "origin/$GITHUB_BASE_REF"...HEAD -- tests | while read -r f; do git show "origin/$GITHUB_BASE_REF:$f" 2>/dev/null | grep -l 'FROZEN SPEC' >/dev/null && echo "$f"; done)
           if [ -n "$frozen" ]; then echo "frozen tests changed: $frozen"; exit 1; fi
+
+  verdict:
+    # Every done module re-checked by the BendTT kernel, proven sound in Lean.
+    runs-on: ubuntu-latest
+    env:
+      BEND_VERSION: 2.0.39
+      BEND_SHA_LINUX_X64: 6cf462fd8f70b094a4950ebb709a9c4ffd8f1d1189d9cedf1fd63cd5d041c7ab
+      BEND_NO_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bend
+        run: |
+          name="bend-$BEND_VERSION-linux-x64.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "/tmp/$name" "https://github.com/bendlang/bend/releases/download/v$BEND_VERSION/$name"
+          echo "$BEND_SHA_LINUX_X64  /tmp/$name" | sha256sum -c -
+          tar -xzf "/tmp/$name" -C /tmp
+          mkdir -p "$HOME/.bend/bin"
+          mv /tmp/bend/bend2 /tmp/bend/guide "$HOME/.bend/"
+          mv /tmp/bend/bin/bend "$HOME/.bend/bin/bend"
+          echo "$HOME/.bend/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: elan-lean-4.34.0
+      - name: Install Lean 4.34
+        run: |
+          [ -x "$HOME/.elan/bin/lean" ] || curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain leanprover/lean4:v4.34.0 --no-modify-path
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Verdict
+        run: VERDICT=1 scripts/check.sh

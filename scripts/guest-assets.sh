@@ -15,5 +15,17 @@ if [ ! -f out/guest/busybox ]; then
   mkdir -p out/guest/bb && tar -xzf out/guest/bb.apk -C out/guest/bb 2>/dev/null || true
   cp out/guest/bb/bin/busybox.static out/guest/busybox
 fi
-python3 scripts/mkinitramfs.py tests/guest/rootfs out/guest/guest.cpio out/guest/busybox:bin/busybox
+# Drivers this kernel builds as modules: virtio-rng and the 9p stack.
+kver=6.8.0-147-generic
+if [ ! -f out/guest/modules/9p.ko ]; then
+  mkdir -p out/guest/modules out/guest/deb
+  curl -fsSL -o out/guest/modules.deb "http://ports.ubuntu.com/ubuntu-ports/pool/main/l/linux/linux-modules-${kver%-generic}-generic_${kver%-generic}.147_arm64.deb"
+  (cd out/guest/deb && ar x ../modules.deb && tar -xf data.tar ./lib/modules)
+  for m in drivers/char/hw_random/virtio-rng fs/netfs/netfs net/9p/9pnet net/9p/9pnet_virtio fs/9p/9p; do
+    zstd -dqf "out/guest/deb/lib/modules/$kver/kernel/$m.ko.zst" -o "out/guest/modules/$(basename $m).ko"
+  done
+fi
+mods=""
+for k in out/guest/modules/*.ko; do mods="$mods $k:lib/modules/$(basename "$k")"; done
+python3 scripts/mkinitramfs.py tests/guest/rootfs out/guest/guest.cpio out/guest/busybox:bin/busybox $mods
 echo out/guest/Image out/guest/guest.cpio
