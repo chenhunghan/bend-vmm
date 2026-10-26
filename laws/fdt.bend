@@ -41,3 +41,8 @@ law fdt.magic:
   for root: F.Node
   for cpu: U32
   {B.Bytes.slice(F.Fdt.build(root, cpu), 0n, 4n) == [208, 13, 254, 237] : +List<U32>}
+
+# Proposed: the frozen fdt.sample blob is 186 bytes long, so a blob need not be
+# a whole number of 4-byte words (dtc does not pad the strings block).
+law fdt.sample_not_word_aligned:
+  {Nat.mod(List.length(&2, U32, F.Fdt.build(sample(), 0)), 4n) == 2n : Nat}
