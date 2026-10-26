@@ -55,6 +55,8 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   else
     red "failed: guest tests"; grep -a "GUEST" <<<"$out" | tail -20; fail=1
   fi
+  out=$( (perl -e 'alarm 120; exec @ARGV' ./out/bend-vmm --mem 4096 --cpus 8 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --disk out/guest/disk.img --cmdline "console=ttyAMA0 bendtest bendcpus=8 quiet") 2>&1 )
+  if grep -q GUEST-TESTS-DONE <<<"$out" && ! grep -q "GUEST-TEST FAIL" <<<"$out"; then grn "ok: 8 cpus, 4 GiB (RAM past 4 GiB)"; else red "failed: 8 cpus, 4 GiB"; grep -a GUEST <<<"$out" | tail; fail=1; fi
   out=$( ( (sleep 20; printf 'echo hi-$((40+2))\n'; sleep 2; printf 'poweroff -f\n'; sleep 5) | perl -e 'alarm 60; exec @ARGV' ./out/bend-vmm --mem 1024 --kernel out/guest/Image --initrd out/guest/guest.cpio) 2>&1 )
   if grep -q "^hi-42" <<<"$out"; then grn "ok: console input"; else red "failed: console input"; tail -5 <<<"$out"; fail=1; fi
   out=$( ( (sleep 20; printf 'reboot -f\n'; sleep 25; printf 'poweroff -f\n'; sleep 5) | perl -e 'alarm 90; exec @ARGV' ./out/bend-vmm --mem 1024 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio) 2>&1 )

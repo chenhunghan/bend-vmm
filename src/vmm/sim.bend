@@ -2,6 +2,7 @@ import Base
 import ../lib/u64.bend as U
 import ../lib/bytes.bend as B
 import ./abi.bend as V
+import ./simfs.bend as F
 
 # A pure interpreter for Vm programs: the stand-in for the macOS host in
 # tests and proofs. Guest memory is one flat region of bytes at `base`; every
@@ -19,7 +20,9 @@ type CpuOn is Data:
 # Recorded lists are newest first. now is the wall clock VmNow answers (it does
 # not advance by itself; tests set it with Sim.with_now). disk is disk image 0 (the only one the
 # simulator models; others read as empty and ignore writes). Entropy is the
-# counter sequence seed, seed+1, ... (mod 256), so tests can predict it.
+# counter sequence seed, seed+1, ... (mod 256), so tests can predict it. fs is
+# the shared directory of share 0 (src/vmm/simfs.bend; an empty root unless a
+# test sets it with Sim.with_fs); other shares answer ENOSYS.
 type Sim is Data:
   Sim{
     base: U.U64,
@@ -35,16 +38,17 @@ type Sim is Data:
     log: +List<String>,
     flushes: Nat,
     net: +List<V.NetCmd>,
-    now: U.U64
+    now: U.U64,
+    fs: F.SimFs
   }
 
 # A machine with size bytes of zeroed memory at base.
 def Sim.new(base: U.U64, size: Nat) -> Sim:
-  Sim{base, B.Bytes.zeros(size), [], 0, [], [], 0n, [], [], [], [], 0n, [], U.U64{0, 0}}
+  Sim{base, B.Bytes.zeros(size), [], 0, [], [], 0n, [], [], [], [], 0n, [], U.U64{0, 0}, F.SimFs.new()}
 
 # The same, with memory initialised to the given bytes.
 def Sim.with_mem(base: U.U64, mem: +List<U32>) -> Sim:
-  Sim{base, mem, [], 0, [], [], 0n, [], [], [], [], 0n, [], U.U64{0, 0}}
+  Sim{base, mem, [], 0, [], [], 0n, [], [], [], [], 0n, [], U.U64{0, 0}, F.SimFs.new()}
 
 # Offset of addr in the region; addresses below base wrap and read as absent.
 def Sim.offset(+base: U.U64, addr: U.U64) -> Nat:
@@ -52,7 +56,7 @@ def Sim.offset(+base: U.U64, addr: U.U64) -> Nat:
 
 def Sim.read(s: Sim, addr: U.U64, len: U32) -> +List<U32>:
   match s:
-    case Sim{+base, +mem, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
+    case Sim{+base, +mem, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
       B.Bytes.slice(mem, Sim.offset(base, addr), U32.to_nat(len))
 
 def Sim.splice(mem: +List<U32>, +off: Nat, +bs: +List<U32>) -> +List<U32>:
@@ -63,58 +67,58 @@ def Sim.splice(mem: +List<U32>, +off: Nat, +bs: +List<U32>) -> +List<U32>:
 
 def Sim.write(s: Sim, addr: U.U64, bytes: +List<U32>) -> Sim:
   match s:
-    case Sim{+base, mem, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
-      Sim{base, Sim.splice(mem, Sim.offset(base, addr), bytes), d, sd, c, r, p, i, pw, co, l, fl, nt, nw}
+    case Sim{+base, mem, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
+      Sim{base, Sim.splice(mem, Sim.offset(base, addr), bytes), d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}
 
 def Sim.set_reg(s: Sim, reg: U32, value: U.U64) -> Sim:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
-      Sim{b, m, d, sd, c, SetReg{reg, value} <> r, p, i, pw, co, l, fl, nt, nw}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
+      Sim{b, m, d, sd, c, SetReg{reg, value} <> r, p, i, pw, co, l, fl, nt, nw, fs}
 
 def Sim.advance_pc(s: Sim) -> Sim:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
-      Sim{b, m, d, sd, c, r, 1n+p, i, pw, co, l, fl, nt, nw}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
+      Sim{b, m, d, sd, c, r, 1n+p, i, pw, co, l, fl, nt, nw, fs}
 
 def Sim.console(s: Sim, bytes: +List<U32>) -> Sim:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
-      Sim{b, m, d, sd, List.append(&2, U32, c, bytes), r, p, i, pw, co, l, fl, nt, nw}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
+      Sim{b, m, d, sd, List.append(&2, U32, c, bytes), r, p, i, pw, co, l, fl, nt, nw, fs}
 
 def Sim.irq(s: Sim, intid: U32, level: Bool) -> Sim:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
-      Sim{b, m, d, sd, c, r, p, Irq{intid, level} <> i, pw, co, l, fl, nt, nw}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
+      Sim{b, m, d, sd, c, r, p, Irq{intid, level} <> i, pw, co, l, fl, nt, nw, fs}
 
 def Sim.power(s: Sim, op: V.PowerOp) -> Sim:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
-      Sim{b, m, d, sd, c, r, p, i, op <> pw, co, l, fl, nt, nw}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
+      Sim{b, m, d, sd, c, r, p, i, op <> pw, co, l, fl, nt, nw, fs}
 
 def Sim.cpu_on(s: Sim, cpu: U32, entry: U.U64, ctx: U.U64) -> Sim:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
-      Sim{b, m, d, sd, c, r, p, i, pw, CpuOn{cpu, entry, ctx} <> co, l, fl, nt, nw}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
+      Sim{b, m, d, sd, c, r, p, i, pw, CpuOn{cpu, entry, ctx} <> co, l, fl, nt, nw, fs}
 
 def Sim.log(s: Sim, msg: String) -> Sim:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
-      Sim{b, m, d, sd, c, r, p, i, pw, co, msg <> l, fl, nt, nw}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
+      Sim{b, m, d, sd, c, r, p, i, pw, co, msg <> l, fl, nt, nw, fs}
 
 # A disk with the given bytes as image 0.
 def Sim.with_disk(s: Sim, disk: +List<U32>) -> Sim:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
-      Sim{b, m, disk, sd, c, r, p, i, pw, co, l, fl, nt, nw}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
+      Sim{b, m, disk, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}
 
 def Sim.disk(s: Sim) -> +List<U32>:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
       d
 
 def Sim.disk_read(s: Sim, disk: U32, offset: U.U64, len: U32) -> +List<U32>:
   match s:
-    case Sim{b, m, +d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
+    case Sim{b, m, +d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
       Bool.pick(+List<U32>, U32.is_zero(disk), B.Bytes.slice(d, U32.to_nat(U.U64.lo(offset)), U32.to_nat(len)), [])
 
 def Sim.disk_write.go(zero: Bool, s: Sim, offset: U.U64, bytes: +List<U32>) -> Sim:
@@ -123,8 +127,8 @@ def Sim.disk_write.go(zero: Bool, s: Sim, offset: U.U64, bytes: +List<U32>) -> S
       s
     case True{}:
       match s:
-        case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
-          Sim{b, m, Sim.splice(d, U32.to_nat(U.U64.lo(offset)), bytes), sd, c, r, p, i, pw, co, l, fl, nt, nw}
+        case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
+          Sim{b, m, Sim.splice(d, U32.to_nat(U.U64.lo(offset)), bytes), sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}
 
 def Sim.disk_write(s: Sim, disk: U32, offset: U.U64, bytes: +List<U32>) -> Sim:
   Sim.disk_write.go(U32.is_zero(disk), s, offset, bytes)
@@ -139,45 +143,93 @@ def Sim.entropy(n: Nat, +x: U32) -> +List<U32>:
 # The next len entropy bytes.
 def Sim.random(s: Sim, len: U32) -> +List<U32>:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
       Sim.entropy(U32.to_nat(len), sd)
 
 # The state after drawing len entropy bytes.
 def Sim.random_next(s: Sim, len: U32) -> Sim:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
-      Sim{b, m, d, (sd + len : U32), c, r, p, i, pw, co, l, fl, nt, nw}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
+      Sim{b, m, d, (sd + len : U32), c, r, p, i, pw, co, l, fl, nt, nw, fs}
 
 def Sim.flush(s: Sim) -> Sim:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
-      Sim{b, m, d, sd, c, r, p, i, pw, co, l, 1n+fl, nt, nw}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
+      Sim{b, m, d, sd, c, r, p, i, pw, co, l, 1n+fl, nt, nw, fs}
 
 def Sim.net_cmd(s: Sim, cmd: V.NetCmd) -> Sim:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
-      Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, cmd <> nt, nw}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
+      Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, cmd <> nt, nw, fs}
 
 def Sim.now(s: Sim) -> U.U64:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
       nw
 
 # The wall clock VmNow answers.
 def Sim.with_now(s: Sim, now: U.U64) -> Sim:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
-      Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, now}
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
+      Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, now, fs}
 
 def Sim.flushes(s: Sim) -> Nat:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
       fl
 
 def Sim.net(s: Sim) -> +List<V.NetCmd>:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
       nt
+
+# The shared directory of share 0.
+def Sim.fs(s: Sim) -> F.SimFs:
+  match s:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
+      fs
+
+def Sim.with_fs(s: Sim, fs: F.SimFs) -> Sim:
+  match s:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, old}:
+      Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}
+
+def Sim.fs_op.fin(s: Sim, r: F.SimFs & V.FsResult) -> Sim & V.FsResult:
+  match r:
+    case (fs, res):
+      (Sim.with_fs(s, fs), res)
+
+def Sim.fs_op.go(zero: Bool, s: Sim, op: V.FsOp) -> Sim & V.FsResult:
+  match zero:
+    case False{}:
+      # Only share 0 is simulated: ENOSYS (78 on macOS).
+      (s, V.FsErr{78})
+    case True{}:
+      match s:
+        case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
+          Sim.fs_op.fin(Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, F.SimFs.new()}, F.SimFs.apply(fs, op))
+
+# Applies a filesystem operation of share sh: the new state and the answer.
+def Sim.fs_op(s: Sim, sh: U32, op: V.FsOp) -> Sim & V.FsResult:
+  Sim.fs_op.go(U32.is_zero(sh), s, op)
+
+def Sim.fs_fst(r: Sim & V.FsResult) -> Sim:
+  match r:
+    case (s, res):
+      s
+
+def Sim.fs_snd(r: Sim & V.FsResult) -> V.FsResult:
+  match r:
+    case (s, res):
+      res
+
+# The state after a filesystem operation.
+def Sim.fs_next(s: Sim, sh: U32, op: V.FsOp) -> Sim:
+  Sim.fs_fst(Sim.fs_op(s, sh, op))
+
+# The answer to a filesystem operation.
+def Sim.fs_answer(s: Sim, sh: U32, op: V.FsOp) -> V.FsResult:
+  Sim.fs_snd(Sim.fs_op(s, sh, op))
 
 # Runs a Vm program for at most fuel steps. None when the fuel runs out.
 def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
@@ -222,10 +274,9 @@ def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
           Sim.run(f, A, Sim.flush(s), next)
         case V.VmNet{cmd, next}:
           Sim.run(f, A, Sim.net_cmd(s, cmd), next)
-        case V.VmFs{sh, op, k}:
-          # No simulated filesystem yet: every operation fails with ENOSYS (78
-          # on macOS).
-          Sim.run(f, A, s, k(V.FsErr{78}))
+        case V.VmFs{+sh, +op, k}:
+          +s = s
+          Sim.run(f, A, Sim.fs_next(s, sh, op), k(Sim.fs_answer(s, sh, op)))
 
 # Runs an Op to completion with a generous step budget.
 def Sim.exec(-A: Type, s: Sim, m: V.Op<A, A>) -> Maybe<&1, Sim & A>:
@@ -233,40 +284,40 @@ def Sim.exec(-A: Type, s: Sim, m: V.Op<A, A>) -> Maybe<&1, Sim & A>:
 
 def Sim.mem(s: Sim) -> +List<U32>:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
       m
 
 def Sim.console_out(s: Sim) -> +List<U32>:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
       c
 
 def Sim.regs(s: Sim) -> +List<SetReg>:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
       r
 
 def Sim.pc_steps(s: Sim) -> Nat:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
       p
 
 def Sim.irqs(s: Sim) -> +List<Irq>:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
       i
 
 def Sim.powers(s: Sim) -> +List<V.PowerOp>:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
       pw
 
 def Sim.logs(s: Sim) -> +List<String>:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
       l
 
 def Sim.cpu_ons(s: Sim) -> +List<CpuOn>:
   match s:
-    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw}:
+    case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs}:
       co
