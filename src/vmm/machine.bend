@@ -5,6 +5,7 @@ import ../arm64/esr.bend as E
 import ../arm64/psci.bend as P
 import ../dev/pl011.bend as Uart
 import ../dev/pl031.bend as Rtc
+import ../dev/pflash.bend as Pf
 import ../net/nat.bend as Nt
 import ../virtio/device.bend as D
 import ../virtio/input.bend as In
@@ -65,7 +66,7 @@ type Control is Data:
   Stop{code: U32}
 
 type Machine is Data:
-  Machine{psci: P.PsciState, uart: Uart.Pl011, uart_irq: Bool, devs: +List<D.Dev>, dev_irqs: +List<Bool>, rtc: Rtc.Pl031, rtc_irq: Bool, net: Nt.Slirp}
+  Machine{psci: P.PsciState, uart: Uart.Pl011, uart_irq: Bool, devs: +List<D.Dev>, dev_irqs: +List<Bool>, rtc: Rtc.Pl031, rtc_irq: Bool, net: Nt.Slirp, flash: Pf.Pflash}
 
 # One fresh device per kind, in slot order.
 def Machine.devs(kinds: +List<D.DevKind>) -> +List<D.Dev>:
@@ -89,7 +90,7 @@ def Machine.new(ncpus: Nat, kinds: +List<D.DevKind>) -> Machine:
   # The devices and their lines are independent.
   +kinds = kinds
   devs lines = Machine.devs(kinds) Machine.lows(kinds)
-  Machine{P.PsciState.boot(ncpus), Uart.Pl011.new(), False{}, devs, lines, Rtc.Pl031.new(), False{}, Nt.Slirp.new()}
+  Machine{P.PsciState.boot(ncpus), Uart.Pl011.new(), False{}, devs, lines, Rtc.Pl031.new(), False{}, Nt.Slirp.new(), Pf.Pflash.new()}
 
 # The regions of virtio slots n, n+1, ... for the devices left.
 def Machine.slots(devs: +List<D.Dev>, +n: U32) -> +List<L.Region>:
@@ -101,7 +102,7 @@ def Machine.slots(devs: +List<D.Dev>, +n: U32) -> +List<L.Region>:
 
 def Machine.bus(m: Machine) -> +List<L.Region>:
   match m:
-    case Machine{p, u, ui, devs, lines, rt, ri, nt}:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
       L.Region{L.Layout.uart_base(), U.U64{0, 4096}, 0} <> Machine.slots(devs, 0)
 
 # One handled exit: the machine after it and what the vCPU does next.
@@ -147,18 +148,18 @@ def Machine.dev_lines(-R: Type, devs: +List<D.Dev>, lines: +List<Bool>, +n: U32)
 # the RTC's at time now.
 def Machine.irqs.at(-R: Type, +now: U32, m: Machine) -> V.Op<R, Machine>:
   match m:
-    case Machine{p, +u, ui, +devs, lines, +rt, ri, nt}:
+    case Machine{p, +u, ui, +devs, lines, +rt, ri, nt, fl}:
       do V.Op<R, Machine>:
         ui : Bool <- Machine.line(R, L.Layout.uart_intid(), ui, Uart.Pl011.irq(u))
         lines : +List<Bool> <- Machine.dev_lines(R, devs, lines, 0)
         ri : Bool <- Machine.line(R, L.Layout.rtc_intid(), ri, Rtc.Pl031.irq(rt, now))
-        return Machine{p, u, ui, devs, lines, rt, ri, nt}
+        return Machine{p, u, ui, devs, lines, rt, ri, nt, fl}
 
 # Whether the RTC's alarm interrupt is unmasked (IMSC bit 0): only then does
 # its line depend on the time.
 def Machine.alarm_armed(m: Machine) -> Bool:
   match m:
-    case Machine{p, u, ui, devs, lines, Rtc.Pl031{o, mr, lr, imsc, r}, ri, nt}:
+    case Machine{p, u, ui, devs, lines, Rtc.Pl031{o, mr, lr, imsc, r}, ri, nt, fl}:
       U32.is_ne((imsc .&. 1 : U32), 0)
 
 def Machine.irqs.go(-R: Type, armed: Bool, m: Machine) -> V.Op<R, Machine>:
@@ -227,23 +228,23 @@ def Machine.devs_write(-R: Type, devs: +List<D.Dev>, n: Nat, off: U32, v: U32) -
         w : Wrote <- Machine.devs_write(R, t, i, off, v)
         return Machine.wrote.tail(d, w)
 
-def Machine.uart_read(p: P.PsciState, ui: Bool, devs: +List<D.Dev>, lines: +List<Bool>, rt: Rtc.Pl031, ri: Bool, nt: Nt.Slirp, r: Uart.Pl011 & U32) -> Machine & U32:
+def Machine.uart_read(p: P.PsciState, ui: Bool, devs: +List<D.Dev>, lines: +List<Bool>, rt: Rtc.Pl031, ri: Bool, nt: Nt.Slirp, fl: Pf.Pflash, r: Uart.Pl011 & U32) -> Machine & U32:
   match r:
     case (u, v):
-      (Machine{p, u, ui, devs, lines, rt, ri, nt}, v)
+      (Machine{p, u, ui, devs, lines, rt, ri, nt, fl}, v)
 
-def Machine.virtio_read(p: P.PsciState, u: Uart.Pl011, ui: Bool, lines: +List<Bool>, rt: Rtc.Pl031, ri: Bool, nt: Nt.Slirp, r: +List<D.Dev> & U32) -> Machine & U32:
+def Machine.virtio_read(p: P.PsciState, u: Uart.Pl011, ui: Bool, lines: +List<Bool>, rt: Rtc.Pl031, ri: Bool, nt: Nt.Slirp, fl: Pf.Pflash, r: +List<D.Dev> & U32) -> Machine & U32:
   match r:
     case (devs, v):
-      (Machine{p, u, ui, devs, lines, rt, ri, nt}, v)
+      (Machine{p, u, ui, devs, lines, rt, ri, nt, fl}, v)
 
 # The 32-bit read of bus device n (0 the UART, k+1 virtio slot k) at off.
 def Machine.dev_read(n: Nat, m: Machine, off: U32, size: U32) -> Machine & U32:
   match n m:
-    case 0n Machine{p, u, ui, devs, lines, rt, ri, nt}:
-      Machine.uart_read(p, ui, devs, lines, rt, ri, nt, Uart.Pl011.read(u, off))
-    case 1n+k Machine{p, u, ui, devs, lines, rt, ri, nt}:
-      Machine.virtio_read(p, u, ui, lines, rt, ri, nt, Machine.devs_read(devs, k, off, size))
+    case 0n Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      Machine.uart_read(p, ui, devs, lines, rt, ri, nt, fl, Uart.Pl011.read(u, off))
+    case 1n+k Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      Machine.virtio_read(p, u, ui, lines, rt, ri, nt, fl, Machine.devs_read(devs, k, off, size))
 
 # Prints bytes on the console, when there are any.
 def Machine.print(-R: Type, bs: +List<U32>) -> V.Op<R, Unit>:
@@ -253,12 +254,12 @@ def Machine.print(-R: Type, bs: +List<U32>) -> V.Op<R, Unit>:
     case h <> t:
       V.Op.console(R, h <> t)
 
-def Machine.uart_write(-R: Type, p: P.PsciState, ui: Bool, devs: +List<D.Dev>, lines: +List<Bool>, rt: Rtc.Pl031, ri: Bool, nt: Nt.Slirp, r: Uart.Pl011 & +List<U32>) -> V.Op<R, Machine>:
+def Machine.uart_write(-R: Type, p: P.PsciState, ui: Bool, devs: +List<D.Dev>, lines: +List<Bool>, rt: Rtc.Pl031, ri: Bool, nt: Nt.Slirp, fl: Pf.Pflash, r: Uart.Pl011 & +List<U32>) -> V.Op<R, Machine>:
   match r:
     case (u, bs):
       do V.Op<R, Machine>:
         Machine.print(R, bs)
-        return Machine{p, u, ui, devs, lines, rt, ri, nt}
+        return Machine{p, u, ui, devs, lines, rt, ri, nt, fl}
 
 # The network
 
@@ -296,13 +297,13 @@ def Machine.to_net(-R: Type, devs: +List<D.Dev>, +fs: +List<+List<U32>>, done: B
 
 # Applies a NAT step: the new NAT state, its frames delivered to the first
 # net device, its host commands as VmNet, in order.
-def Machine.slirp(-R: Type, p: P.PsciState, u: Uart.Pl011, ui: Bool, devs: +List<D.Dev>, lines: +List<Bool>, rt: Rtc.Pl031, ri: Bool, o: Nt.SlirpOut) -> V.Op<R, Machine>:
+def Machine.slirp(-R: Type, p: P.PsciState, u: Uart.Pl011, ui: Bool, devs: +List<D.Dev>, lines: +List<Bool>, rt: Rtc.Pl031, ri: Bool, fl: Pf.Pflash, o: Nt.SlirpOut) -> V.Op<R, Machine>:
   match o:
     case Nt.SlirpOut{nt, fs, cs}:
       do V.Op<R, Machine>:
         devs : +List<D.Dev> <- Machine.to_net(R, devs, fs, False{})
         Machine.cmds(R, cs)
-        return Machine{p, u, ui, devs, lines, rt, ri, nt}
+        return Machine{p, u, ui, devs, lines, rt, ri, nt, fl}
 
 def Machine.guest_frame.join(fs: +List<+List<U32>>, cs: +List<V.NetCmd>, o: Nt.SlirpOut) -> Nt.SlirpOut:
   match o:
@@ -332,23 +333,23 @@ def Machine.vsock_cmds(-R: Type, cs: +List<V.VsockCmd>) -> V.Op<R, Unit>:
 
 # After a virtio write: hvc0 bytes to the console, vsock commands to the
 # host, transmitted frames through the NAT.
-def Machine.virtio_wrote(-R: Type, p: P.PsciState, u: Uart.Pl011, ui: Bool, lines: +List<Bool>, rt: Rtc.Pl031, ri: Bool, nt: Nt.Slirp, w: Wrote) -> V.Op<R, Machine>:
+def Machine.virtio_wrote(-R: Type, p: P.PsciState, u: Uart.Pl011, ui: Bool, lines: +List<Bool>, rt: Rtc.Pl031, ri: Bool, nt: Nt.Slirp, fl: Pf.Pflash, w: Wrote) -> V.Op<R, Machine>:
   match w:
     case Wrote{devs, bs, fs, vc}:
       do V.Op<R, Machine>:
         Machine.print(R, bs)
         Machine.vsock_cmds(R, vc)
-        Machine.slirp(R, p, u, ui, devs, lines, rt, ri, Machine.guest_frames(nt, fs))
+        Machine.slirp(R, p, u, ui, devs, lines, rt, ri, fl, Machine.guest_frames(nt, fs))
 
 # The 32-bit write of v to bus device n at off.
 def Machine.dev_write(-R: Type, n: Nat, m: Machine, off: U32, v: U32) -> V.Op<R, Machine>:
   match n m:
-    case 0n Machine{p, u, ui, devs, lines, rt, ri, nt}:
-      Machine.uart_write(R, p, ui, devs, lines, rt, ri, nt, Uart.Pl011.write(u, off, v))
-    case 1n+k Machine{p, u, ui, devs, lines, rt, ri, nt}:
+    case 0n Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      Machine.uart_write(R, p, ui, devs, lines, rt, ri, nt, fl, Uart.Pl011.write(u, off, v))
+    case 1n+k Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
       do V.Op<R, Machine>:
         w : Wrote <- Machine.devs_write(R, devs, k, off, v)
-        Machine.virtio_wrote(R, p, u, ui, lines, rt, ri, nt, w)
+        Machine.virtio_wrote(R, p, u, ui, lines, rt, ri, nt, fl, w)
 
 # MMIO
 
@@ -423,20 +424,20 @@ def Machine.route(hit: Maybe<&2, L.Hit>, m: Machine, ipa: U.U64, write: Bool, si
 
 # The RTC
 
-def Machine.rtc_read.fin(p: P.PsciState, u: Uart.Pl011, ui: Bool, devs: +List<D.Dev>, lines: +List<Bool>, ri: Bool, nt: Nt.Slirp, r: Rtc.Pl031 & U32) -> Machine & U32:
+def Machine.rtc_read.fin(p: P.PsciState, u: Uart.Pl011, ui: Bool, devs: +List<D.Dev>, lines: +List<Bool>, ri: Bool, nt: Nt.Slirp, fl: Pf.Pflash, r: Rtc.Pl031 & U32) -> Machine & U32:
   match r:
     case (rt, v):
-      (Machine{p, u, ui, devs, lines, rt, ri, nt}, v)
+      (Machine{p, u, ui, devs, lines, rt, ri, nt, fl}, v)
 
 def Machine.rtc_read(m: Machine, off: U32, now: U32) -> Machine & U32:
   match m:
-    case Machine{p, u, ui, devs, lines, rt, ri, nt}:
-      Machine.rtc_read.fin(p, u, ui, devs, lines, ri, nt, Rtc.Pl031.read(rt, off, now))
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      Machine.rtc_read.fin(p, u, ui, devs, lines, ri, nt, fl, Rtc.Pl031.read(rt, off, now))
 
 def Machine.rtc_write(m: Machine, off: U32, v: U32, now: U32) -> Machine:
   match m:
-    case Machine{p, u, ui, devs, lines, rt, ri, nt}:
-      Machine{p, u, ui, devs, lines, Rtc.Pl031.write(rt, off, v, now), ri, nt}
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      Machine{p, u, ui, devs, lines, Rtc.Pl031.write(rt, off, v, now), ri, nt, fl}
 
 # An RTC read has happened: the register, the lines, the PC.
 def Machine.rtc_loaded(r: Machine & U32, +size: U32, srt: U32, sse: Bool, sf: Bool, +now: U32) -> V.Op<Step, Step>:
@@ -475,9 +476,72 @@ def Machine.decode(rtc: Maybe<&2, L.Hit>, m: Machine, ipa: U.U64, write: Bool, s
       +ipa = ipa
       Machine.route(L.Bus.find(Machine.bus(m), ipa), m, ipa, write, size, srt, value, sse, sf)
 
+# The UEFI variable flash (bank 1)
+
+def Machine.with_flash(m: Machine, fl: Pf.Pflash) -> Machine:
+  match m:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, old}:
+      Machine{p, u, ui, devs, lines, rt, ri, nt, fl}
+
+def Machine.flash_of(m: Machine) -> Pf.Pflash:
+  match m:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      fl
+
+# Runs flash commands in order.
+def Machine.flash_cmds(-R: Type, cs: +List<V.FlashCmd>) -> V.Op<R, Unit>:
+  match cs:
+    case Nil{}:
+      V.Op.pure(R, Unit, Unit{})
+    case c <> t:
+      do V.Op<R, Unit>:
+        _ : U32 <- V.Op.flash(R, c)
+        Machine.flash_cmds(R, t)
+
+def Machine.flash_wrote(m: Machine, o: Pf.PfOut) -> V.Op<Step, Step>:
+  match o:
+    case Pf.PfOut{fl, cs}:
+      do V.Op<Step, Step>:
+        Machine.flash_cmds(Step, cs)
+        V.Op.advance_pc(Step)
+        return Step{Machine.with_flash(m, fl), Run{}}
+
+# A read in read-array mode reaches the host's bytes; any other mode answers
+# its register.
+def Machine.flash_value(-R: Type, r: Maybe<&2, U32>, off: U32, size: U32) -> V.Op<R, U32>:
+  match r:
+    case Some{v}:
+      V.Op.pure(R, U32, v)
+    case None{}:
+      V.Op.flash(R, V.FlashRead{off, size})
+
+def Machine.flash_access(write: Bool, m: Machine, +off: U32, +size: U32, srt: U32, value: U.U64, sse: Bool, sf: Bool) -> V.Op<Step, Step>:
+  match write:
+    case True{}:
+      +m = m
+      Machine.flash_wrote(m, Pf.Pflash.write(Machine.flash_of(m), off, U.U64.lo(value)))
+    case False{}:
+      +m = m
+      do V.Op<Step, Step>:
+        v : U32 <- Machine.flash_value(Step, Pf.Pflash.read(Machine.flash_of(m), off), off, size)
+        Machine.put_reg(Step, srt, Machine.extend(v, size, sse, sf))
+        V.Op.advance_pc(Step)
+        return Step{m, Run{}}
+
+def Machine.flash_hit(+ipa: U.U64) -> Maybe<&2, L.Hit>:
+  L.Bus.hit(L.Region{L.Layout.flash1_base(), U.U64{0, L.Layout.flash_size()}, 0}, ipa)
+
+# The flash access when bank 1 holds ipa, else the RTC or the bus.
+def Machine.decode.flash(flash: Maybe<&2, L.Hit>, m: Machine, +ipa: U.U64, write: Bool, size: U32, srt: U32, value: U.U64, sse: Bool, sf: Bool) -> V.Op<Step, Step>:
+  match flash:
+    case Some{L.Hit{dev, off}}:
+      Machine.flash_access(write, m, U.U64.lo(off), size, srt, value, sse, sf)
+    case None{}:
+      Machine.decode(Machine.rtc_hit(ipa), m, ipa, write, size, srt, value, sse, sf)
+
 def Machine.mmio(m: Machine, ipa: U.U64, write: Bool, size: U32, srt: U32, value: U.U64, sse: Bool, sf: Bool) -> V.Op<Step, Step>:
   +ipa = ipa
-  Machine.decode(Machine.rtc_hit(ipa), m, ipa, write, size, srt, value, sse, sf)
+  Machine.decode.flash(Machine.flash_hit(ipa), m, ipa, write, size, srt, value, sse, sf)
 
 # PSCI
 
@@ -500,18 +564,18 @@ def Machine.psci.effect(e: P.PsciEffect, m: Machine) -> V.Op<Step, Step>:
         V.Op.power(Step, V.PowerReset{})
         return Step{m, Stop{1}}
 
-def Machine.psci.fin(r: P.PsciResult, u: Uart.Pl011, ui: Bool, devs: +List<D.Dev>, lines: +List<Bool>, rt: Rtc.Pl031, ri: Bool, nt: Nt.Slirp) -> V.Op<Step, Step>:
+def Machine.psci.fin(r: P.PsciResult, u: Uart.Pl011, ui: Bool, devs: +List<D.Dev>, lines: +List<Bool>, rt: Rtc.Pl031, ri: Bool, nt: Nt.Slirp, fl: Pf.Pflash) -> V.Op<Step, Step>:
   match r:
     case P.PsciResult{p, x0, e}:
       do V.Op<Step, Step>:
         V.Op.set_reg(Step, 0, x0)
-        Machine.psci.effect(e, Machine{p, u, ui, devs, lines, rt, ri, nt})
+        Machine.psci.effect(e, Machine{p, u, ui, devs, lines, rt, ri, nt, fl})
 
 # A PSCI call (HVC #0, or any SMC) from cpu.
 def Machine.psci(cpu: U32, m: Machine, x0: U.U64, x1: U.U64, x2: U.U64, x3: U.U64) -> V.Op<Step, Step>:
   match m:
-    case Machine{p, u, ui, devs, lines, rt, ri, nt}:
-      Machine.psci.fin(P.Psci.handle(cpu, p, P.Psci.decode(x0, x1, x2, x3)), u, ui, devs, lines, rt, ri, nt)
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      Machine.psci.fin(P.Psci.handle(cpu, p, P.Psci.decode(x0, x1, x2, x3)), u, ui, devs, lines, rt, ri, nt, fl)
 
 def Machine.hvc(zero: Bool, cpu: U32, m: Machine, x0: U.U64, x1: U.U64, x2: U.U64, x3: U.U64) -> V.Op<Step, Step>:
   match zero:
@@ -567,6 +631,12 @@ def Machine.on_exit(cpu: U32, m: Machine, e: V.RawExit) -> V.Vm<Step>:
     case V.UnknownExit{reason}:
       V.VmLog{"unknown exit reason " ++ U32.show(reason), V.VmRet{Step{m, Stop{5}}}}
 
+# How many bytes of console input the UART's receive FIFO takes now.
+def Machine.uart_room(m: Machine) -> Nat:
+  match m:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      Uart.Pl011.room(u)
+
 # Console input to every device (D.Dev.input: console devices take it).
 def Machine.devs_input(-R: Type, devs: +List<D.Dev>, +bytes: +List<U32>) -> V.Op<R, +List<D.Dev>>:
   match devs:
@@ -580,10 +650,10 @@ def Machine.devs_input(-R: Type, devs: +List<D.Dev>, +bytes: +List<U32>) -> V.Op
 
 def Machine.input.go(-R: Type, m: Machine, +bytes: +List<U32>) -> V.Op<R, Machine>:
   match m:
-    case Machine{p, u, ui, devs, lines, rt, ri, nt}:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
       do V.Op<R, Machine>:
         devs : +List<D.Dev> <- Machine.devs_input(R, devs, bytes)
-        Machine.irqs(R, Machine{p, Uart.Pl011.push_rx(u, bytes), ui, devs, lines, rt, ri, nt})
+        Machine.irqs(R, Machine{p, Uart.Pl011.push_rx(u, bytes), ui, devs, lines, rt, ri, nt, fl})
 
 # Bytes typed on the host console: queued in the UART (Uart.Pl011.push_rx)
 # and given to every ConsoleKind device (D.Dev.input), then the interrupt
@@ -593,9 +663,9 @@ def Machine.input(m: Machine, bytes: +List<U32>) -> V.Vm<Machine>:
 
 def Machine.net_event.go(-R: Type, m: Machine, ev: V.NetEvent) -> V.Op<R, Machine>:
   match m:
-    case Machine{p, u, ui, devs, lines, rt, ri, nt}:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
       do V.Op<R, Machine>:
-        m : Machine <- Machine.slirp(R, p, u, ui, devs, lines, rt, ri, Nt.Slirp.host_event(nt, ev))
+        m : Machine <- Machine.slirp(R, p, u, ui, devs, lines, rt, ri, fl, Nt.Slirp.host_event(nt, ev))
         Machine.irqs(R, m)
 
 # A network event from the host: Slirp.host_event, its frames delivered to
@@ -618,7 +688,7 @@ def Machine.backlog(devs: +List<D.Dev>) -> U32:
 # NAT assumes a lossless link to the guest.
 def Machine.net_backlog(m: Machine) -> U32:
   match m:
-    case Machine{p, u, ui, devs, lines, rt, ri, nt}:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
       Machine.backlog(devs)
 
 def Machine.vsock_devs.out(-R: Type, o: D.DevOut, t: +List<D.Dev>) -> V.Op<R, +List<D.Dev>>:
@@ -657,10 +727,10 @@ def Machine.vsock_devs(-R: Type, +devs: +List<D.Dev>, ev: V.VsockEvent) -> V.Op<
 
 def Machine.vsock_event.go(-R: Type, m: Machine, ev: V.VsockEvent) -> V.Op<R, Machine>:
   match m:
-    case Machine{p, u, ui, devs, lines, rt, ri, nt}:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
       do V.Op<R, Machine>:
         devs : +List<D.Dev> <- Machine.vsock_devs(R, devs, ev)
-        Machine.irqs(R, Machine{p, u, ui, devs, lines, rt, ri, nt})
+        Machine.irqs(R, Machine{p, u, ui, devs, lines, rt, ri, nt, fl})
 
 def Machine.vsock_event(m: Machine, ev: V.VsockEvent) -> V.Vm<Machine>:
   V.Op.finish(Machine, Machine.vsock_event.go(Machine, m, ev))
@@ -675,7 +745,7 @@ def Machine.vsock_backlog.of(devs: +List<D.Dev>) -> U32:
 # The vsock device's backlog (D.Dev.vsock_backlog), for host backpressure.
 def Machine.vsock_backlog(m: Machine) -> U32:
   match m:
-    case Machine{p, u, ui, devs, lines, rt, ri, nt}:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
       Machine.vsock_backlog.of(devs)
 
 # A keyboard or pointer report to every device (D.Dev.hid: input devices
@@ -692,10 +762,10 @@ def Machine.devs_hid(-R: Type, devs: +List<D.Dev>, +ev: In.Hid) -> V.Op<R, +List
 
 def Machine.hid.go(-R: Type, m: Machine, ev: In.Hid) -> V.Op<R, Machine>:
   match m:
-    case Machine{p, u, ui, devs, lines, rt, ri, nt}:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
       do V.Op<R, Machine>:
         devs : +List<D.Dev> <- Machine.devs_hid(R, devs, ev)
-        Machine.irqs(R, Machine{p, u, ui, devs, lines, rt, ri, nt})
+        Machine.irqs(R, Machine{p, u, ui, devs, lines, rt, ri, nt, fl})
 
 # A key, pointer move or button from the host's window: given to every
 # InputKind device (D.Dev.hid), then the interrupt lines are updated as after

@@ -60,7 +60,7 @@ type Display is Data:
   Display{width: U32, height: U32}
 
 type DtbCfg is Data:
-  DtbCfg{ncpus: Nat, ram_size: U.U64, bootargs: String, initrd: Maybe<&2, Initrd>, virtio_slots: Nat, display: Maybe<&2, Display>}
+  DtbCfg{ncpus: Nat, ram_size: U.U64, bootargs: String, initrd: Maybe<&2, Initrd>, virtio_slots: Nat, display: Maybe<&2, Display>, flash: Bool}
 
 # Lowercase hex without a 0x prefix or leading zeros: the unit address of a node.
 def Dtb.unit(a: U.U64) -> String:
@@ -168,10 +168,25 @@ def Dtb.fbs(d: Maybe<&2, Display>) -> +List<F.Node>:
     case Some{x}:
       [Dtb.fb(x)]
 
+# The two UEFI flash banks (--firmware), one cfi-flash node as on QEMU's
+# virt machine: bank 0 the firmware, bank 1 the variable store.
+def Dtb.flash() -> F.Node:
+  +a = Lay.Layout.flash1_base()
+  +n = Lay.Layout.flash_size()
+  +props = {[F.Prop.str("compatible", "cfi-flash"), F.Prop.cells("reg", [0, 0, 0, n, U.U64.hi(a), U.U64.lo(a), 0, n]), F.Prop.u32("bank-width", 4)] : +List<F.Prop>}
+  F.Node{"flash@0", props, []}
+
+def Dtb.flashes(on: Bool) -> +List<F.Node>:
+  match on:
+    case True{}:
+      [Dtb.flash()]
+    case False{}:
+      []
+
 def Dtb.tree(cfg: DtbCfg) -> F.Node:
   match cfg:
-    case DtbCfg{ncpus, ram_size, bootargs, initrd, +slots, disp}:
-      +fixed = {List.append(&2, F.Node, [Dtb.chosen(bootargs, initrd), Dtb.memory(ram_size), Dtb.cpus(ncpus), Dtb.psci(), Dtb.timer(), Dtb.intc(), Dtb.clock(), Dtb.uart(), Dtb.rtc()], Dtb.fbs(disp)) : +List<F.Node>}
+    case DtbCfg{ncpus, ram_size, bootargs, initrd, +slots, disp, fl}:
+      +fixed = {List.append(&2, F.Node, [Dtb.chosen(bootargs, initrd), Dtb.memory(ram_size), Dtb.cpus(ncpus), Dtb.psci(), Dtb.timer(), Dtb.intc(), Dtb.clock(), Dtb.uart(), Dtb.rtc()], List.append(&2, F.Node, Dtb.flashes(fl), Dtb.fbs(disp))) : +List<F.Node>}
       F.Node{"", Dtb.root_props(), List.append(&2, F.Node, fixed, Dtb.range(~(n => Dtb.virtio(n)), slots, 0, slots))}
 
 def Dtb.build(cfg: DtbCfg) -> +List<U32>:

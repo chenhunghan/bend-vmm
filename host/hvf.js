@@ -54,3 +54,6 @@ io_eff(CID(Hvf.vsock_base), () => "");
 io_eff(CID(Hvf.fb_init), () => 1);
 io_eff(CID(Hvf.fb_dump), hvf_unavailable);
 io_eff(CID(Hvf.fb_present), (w) => io_tup(w, { $: CID(Nil) }));
+io_eff(CID(Hvf.fw_load), hvf_unavailable);
+io_eff(CID(Hvf.flash), () => 0);
+io_eff(CID(Hvf.out_flush), () => 0);

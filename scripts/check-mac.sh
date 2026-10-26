@@ -9,6 +9,8 @@
 #   5. lifecycle: pause, resume, snapshot, restore.
 #   6. display: screendump, and the virtio keyboard and tablet driven through
 #      the control socket's type and pointer commands.
+#   7. UEFI: edk2 firmware boots Alpine's ISO (GRUB, Linux); an EFI variable
+#      written by Linux survives a reboot in the --vars file.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 [ "$(uname -s)-$(uname -m)" = "Darwin-arm64" ] || { echo "check-mac: needs macOS on arm64"; exit 2; }
@@ -118,6 +120,19 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   log=$(tr -d '\r' < "$t/run.log")
   grep -q "KEYS-42" <<<"$log" && grn "ok: virtio keyboard (typed into the framebuffer console)" || { red "failed: virtio keyboard"; tail -5 <<<"$log"; fail=1; }
   grep -q "03 00 00 00 39 30 00 00" <<<"$log" && grep -q "03 00 01 00 ff 7f 00 00" <<<"$log" && grn "ok: virtio tablet (ABS_X 12345, ABS_Y 32767)" || { red "failed: virtio tablet"; tail -5 <<<"$log"; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 7. UEFI: firmware, an ISO, EFI variables"
+  scripts/uefi-assets.sh >/dev/null
+  t=$(mktemp -d); cp out/uefi/vars.fd "$t/vars.fd"
+  efivar=/sys/firmware/efi/efivars/BendTest-12345678-1234-1234-1234-123456789abc
+  out=$( ( (sleep 22; printf 'root\n'; sleep 3; printf 'printf "\\007\\000\\000\\000bend-ok" > %s; echo SET-$((6*7)); reboot\n' "$efivar"; sleep 30; printf 'root\n'; sleep 3; printf 'tail -c 7 %s; echo; echo AFTER-REBOOT; poweroff\n' "$efivar"; sleep 10) | perl -e 'alarm 100; exec @ARGV' ./out/bend-vmm --firmware out/uefi/code.fd --vars "$t/vars.fd" --mem 1024 --cpus 2 --disk out/uefi/alpine.iso:ro) 2>&1 | tr -d '\r' )
+  grep -q "Welcome to Alpine" <<<"$out" && grn "ok: UEFI boots the Alpine ISO (edk2, GRUB, Linux $(grep -ao 'Linux [0-9][^ ]*' <<<"$out" | head -1 | cut -d' ' -f2))" || { red "failed: UEFI boot"; tail -5 <<<"$out"; fail=1; }
+  grep -q "SET-42" <<<"$out" && [ "$(grep -c 'Welcome to Alpine Linux' <<<"$out")" = 2 ] && grn "ok: UEFI reboot" || { red "failed: UEFI reboot"; fail=1; }
+  grep -B1 "AFTER-REBOOT" <<<"$out" | grep -q "^bend-ok" && grep -q "bend-ok" "$t/vars.fd" && grn "ok: EFI variable persists (flash, --vars)" || { red "failed: EFI variable"; grep -a -B2 AFTER-REBOOT <<<"$out"; fail=1; }
+  grep -q "reboot: Power down" <<<"$out" && grn "ok: UEFI power off" || { red "failed: UEFI power off"; fail=1; }
   rm -rf "$t"
 fi
 

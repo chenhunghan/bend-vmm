@@ -11,10 +11,10 @@ def w(x: U32) -> U.U64:
   U.U64{0, x}
 
 def cfg(ncpus: Nat, slots: Nat) -> D.DtbCfg:
-  D.DtbCfg{ncpus, w(134217728), "", None{}, slots, None{}}
+  D.DtbCfg{ncpus, w(134217728), "", None{}, slots, None{}, False{}}
 
 def with_initrd() -> D.DtbCfg:
-  D.DtbCfg{1n, w(134217728), "quiet", Some{D.Initrd{w(1109393408), w(1110441984)}}, 1n, None{}}
+  D.DtbCfg{1n, w(134217728), "quiet", Some{D.Initrd{w(1109393408), w(1110441984)}}, 1n, None{}, False{}}
 
 # Nodes in the whole tree.
 def count(c: D.DtbCfg) -> U32:

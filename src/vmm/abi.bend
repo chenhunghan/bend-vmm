@@ -122,6 +122,17 @@ type VsockEvent is Data:
   # A host client asks to connect to guest port `port` (it sent "CONNECT port").
   VsIncoming{conn: U32, port: U32}
 
+# Host commands of the UEFI variable flash (src/dev/pflash.bend); offsets
+# are within the bank.
+type FlashCmd is Data:
+  # Reads size bytes (a trapped read in read-array mode; little-endian).
+  FlashRead{off: U32, size: U32}
+  FlashWrite{off: U32, bytes: +List<U32>}
+  # Sets len bytes to 0xFF.
+  FlashErase{off: U32, len: U32}
+  # Maps the bank into the guest read-only (on) or unmaps it.
+  FlashMap{on: Bool}
+
 # A program of host effects that ends with a value of type A. Each effect
 # applies to the vCPU whose exit is being handled, unless it names a cpu.
 type Vm<-A: Type> is Type:
@@ -160,6 +171,9 @@ type Vm<-A: Type> is Type:
   VmFs{share: U32, op: FsOp, k: FsResult -> Vm<A>}
   # A vsock command for the host's Unix sockets.
   VmVsock{cmd: VsockCmd, next: Vm<A>}
+  # A flash command; continues with the value a FlashRead read (0 for the
+  # others).
+  VmFlash{cmd: FlashCmd, k: U32 -> Vm<A>}
 
 # Device code is written in Op, a continuation monad over Vm: its bind needs
 # no recursion, so `do Op<R, A>:` blocks pass Bend's termination check. R is
@@ -232,3 +246,6 @@ def Op.fs(-R: Type, share: U32, op: FsOp) -> Op<R, FsResult>:
 
 def Op.vsock(-R: Type, cmd: VsockCmd) -> Op<R, Unit>:
   Op{k => VmVsock{cmd, k(Unit{})}}
+
+def Op.flash(-R: Type, cmd: FlashCmd) -> Op<R, U32>:
+  Op{k => VmFlash{cmd, k}}

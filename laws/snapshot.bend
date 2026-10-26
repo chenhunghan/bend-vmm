@@ -3,6 +3,7 @@ import ../src/lib/u64.bend as U
 import ../src/arm64/psci.bend as P
 import ../src/dev/pl011.bend as Uart
 import ../src/dev/pl031.bend as Rtc
+import ../src/dev/pflash.bend as Pf
 import ../src/net/nat.bend as Nt
 import ../src/virtio/mmio.bend as M
 import ../src/virtio/queue.bend as Q
@@ -31,7 +32,7 @@ def busy_p9() -> D.Dev:
   D.Dev{D.P9Kind{2, "home"}, M.VirtioMmio{9, U.U64{1, 1}, U.U64{1, 1}, 0, 0, 0, [M.QueueCfg{256, 64, True{}, w(1), w(2), w(3)}], 15, 0, 0, [4, 0, 104, 111, 109, 101]}, [], D.P9Dev{F.P9State{65536, [F.Fid{0, "", False{}}, F.Fid{7, "a/b.txt", True{}}]}}}
 
 def busy() -> Mc.Machine:
-  Mc.Machine{P.PsciState{[True{}, False{}, True{}]}, Uart.Pl011{1, 2, 112, 769, 18, 80, [104, 105]}, True{}, [busy_dev(), busy_p9()], [True{}, False{}], Rtc.Pl031{4294967295, 10, 100, 1, 2}, False{}, Nt.Slirp{[Nt.Conn{0, 40000, 16909060, 80, 1, 1000, 2}, Nt.Conn{3, 5353, 167772675, 53, 3, 7, 9}], 4}}
+  Mc.Machine{P.PsciState{[True{}, False{}, True{}]}, Uart.Pl011{1, 2, 112, 769, 18, 80, [104, 105]}, True{}, [busy_dev(), busy_p9()], [True{}, False{}], Rtc.Pl031{4294967295, 10, 100, 1, 2}, False{}, Nt.Slirp{[Nt.Conn{0, 40000, 16909060, 80, 1, 1000, 2}, Nt.Conn{3, 5353, 167772675, 53, 3, 7, 9}], 4}, Pf.Pflash{6, 4096, 2, [1, 2, 3, 4]}}
 
 law snapshot.roundtrip_fresh:
   {S.Snap.decode(S.Snap.encode(fresh())) == Some{fresh()} : Maybe<&2, Mc.Machine>}
@@ -40,13 +41,13 @@ law snapshot.roundtrip_busy:
   {S.Snap.decode(S.Snap.encode(busy())) == Some{busy()} : Maybe<&2, Mc.Machine>}
 
 law snapshot.magic_first:
-  {List.take(&2, U32, S.Snap.encode(fresh()), 2n) == [1112428109, 1] : +List<U32>}
+  {List.take(&2, U32, S.Snap.encode(fresh()), 2n) == [1112428109, 2] : +List<U32>}
 
 law snapshot.bad_magic:
   {S.Snap.decode(List.set(&2, U32, S.Snap.encode(fresh()), 0n, 7)) == None{} : Maybe<&2, Mc.Machine>}
 
 law snapshot.bad_version:
-  {S.Snap.decode(List.set(&2, U32, S.Snap.encode(fresh()), 1n, 2)) == None{} : Maybe<&2, Mc.Machine>}
+  {S.Snap.decode(List.set(&2, U32, S.Snap.encode(fresh()), 1n, 99)) == None{} : Maybe<&2, Mc.Machine>}
 
 law snapshot.truncated:
   {S.Snap.decode(List.take(&2, U32, S.Snap.encode(busy()), 40n)) == None{} : Maybe<&2, Mc.Machine>}
@@ -60,14 +61,14 @@ law snapshot.empty:
 # A machine with a vsock device holding a connection, pending host data and
 # a packet for the guest.
 def vsock_machine() -> Mc.Machine:
-  Mc.Machine{P.PsciState{[True{}]}, Uart.Pl011.new(), False{}, [D.Dev{D.VsockKind{w(3)}, M.VirtioMmio.new(19, U.U64{1, 0}, 3n, 256, [3, 0, 0, 0, 0, 0, 0, 0]), [], D.VsState{Vs.Vsock{w(3), [Vs.VConn{0, 40000, 1234, 1, 10, 4096, 4, 7, 0, [1, 2, 3], True{}}], 1, 1024, [[9, 8]]}}}], [False{}], Rtc.Pl031.new(), False{}, Nt.Slirp.new()}
+  Mc.Machine{P.PsciState{[True{}]}, Uart.Pl011.new(), False{}, [D.Dev{D.VsockKind{w(3)}, M.VirtioMmio.new(19, U.U64{1, 0}, 3n, 256, [3, 0, 0, 0, 0, 0, 0, 0]), [], D.VsState{Vs.Vsock{w(3), [Vs.VConn{0, 40000, 1234, 1, 10, 4096, 4, 7, 0, [1, 2, 3], True{}}], 1, 1024, [[9, 8]]}}}], [False{}], Rtc.Pl031.new(), False{}, Nt.Slirp.new(), Pf.Pflash.new()}
 
 law snapshot.roundtrip_vsock:
   {S.Snap.decode(S.Snap.encode(vsock_machine())) == Some{vsock_machine()} : Maybe<&2, Mc.Machine>}
 
 # A machine with a tablet that has a selector set and events pending.
 def input_machine() -> Mc.Machine:
-  Mc.Machine{P.PsciState{[True{}]}, Uart.Pl011.new(), False{}, [D.Dev.new(D.InputKind{False{}}), D.Dev{D.InputKind{True{}}, M.VirtioMmio.new(18, U.U64{1, 0}, 2n, 256, In.Input.config(True{}, 18, 1)), [], D.InDev{In.InputState{18, 1, [[3, 0, 0, 0, 44, 1, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0]]}}}], [False{}, False{}], Rtc.Pl031.new(), False{}, Nt.Slirp.new()}
+  Mc.Machine{P.PsciState{[True{}]}, Uart.Pl011.new(), False{}, [D.Dev.new(D.InputKind{False{}}), D.Dev{D.InputKind{True{}}, M.VirtioMmio.new(18, U.U64{1, 0}, 2n, 256, In.Input.config(True{}, 18, 1)), [], D.InDev{In.InputState{18, 1, [[3, 0, 0, 0, 44, 1, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0]]}}}], [False{}, False{}], Rtc.Pl031.new(), False{}, Nt.Slirp.new(), Pf.Pflash.new()}
 
 law snapshot.roundtrip_input:
   {S.Snap.decode(S.Snap.encode(input_machine())) == Some{input_machine()} : Maybe<&2, Mc.Machine>}

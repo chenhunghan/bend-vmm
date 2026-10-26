@@ -49,6 +49,10 @@ def Hvf.out(bytes: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.out_flush() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.stdin(max: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
@@ -192,6 +196,15 @@ def Hvf.vsock_base() -> IO(String):
   import "./hvf.js"
 
 def Hvf.vsock_accept() -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+# UEFI flash (host/hvf.c): the firmware and variable banks.
+def Hvf.fw_load(code: String, vars: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.flash(op: U32, a: U32, b: U32, bytes: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 

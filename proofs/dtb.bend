@@ -12,3 +12,6 @@ def L.dtb.minimal():
 
 def L.dtb.display():
   {==}
+
+def L.dtb.flash():
+  {==}

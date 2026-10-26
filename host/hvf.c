@@ -20,6 +20,7 @@
 #include <Hypervisor/Hypervisor.h>
 #include <crt_externs.h>
 #include <mach/mach_time.h>
+#include <poll.h>
 #include <stdatomic.h>
 #include <mach-o/dyld.h>
 
@@ -31,6 +32,7 @@ static struct {
   void* lib;
   __typeof__(&hv_vm_create) vm_create;
   __typeof__(&hv_vm_map) vm_map;
+  __typeof__(&hv_vm_unmap) vm_unmap;
   __typeof__(&hv_vcpu_create) vcpu_create;
   __typeof__(&hv_vcpu_run) vcpu_run;
   __typeof__(&hv_vcpu_get_reg) get_reg;
@@ -67,6 +69,7 @@ static int hvf_open(void) {
 #define HV_SYM(field, name) hv.field = (__typeof__(hv.field))dlsym(hv.lib, #name)
   HV_SYM(vm_create, hv_vm_create);
   HV_SYM(vm_map, hv_vm_map);
+  HV_SYM(vm_unmap, hv_vm_unmap);
   HV_SYM(vcpu_create, hv_vcpu_create);
   HV_SYM(vcpu_run, hv_vcpu_run);
   HV_SYM(get_reg, hv_vcpu_get_reg);
@@ -868,8 +871,15 @@ static void hvf_out_flush(void) {
   hvf_obuf = NULL;
   hvf_on = hvf_ocap = 0;
   pthread_mutex_unlock(&hvf_out_mu);
+  // stdout may be non-blocking (the runtime's IO loop) and a slow pipe
+  // reader fills it: wait until it drains rather than drop output.
   for (size_t at = 0; at < n;) {
     ssize_t k = write(1, buf + at, n - at);
+    if (k < 0 && (errno == EAGAIN || errno == EINTR)) {
+      struct pollfd p = {1, POLLOUT, 0};
+      poll(&p, 1, 100);
+      continue;
+    }
     if (k <= 0) {
       break;
     }
@@ -916,6 +926,13 @@ Term hvf_out_run(Env e, Term* f, IoWork* w) {
   pthread_cond_signal(&hvf_out_cv);
   pthread_mutex_unlock(&hvf_out_mu);
   free(buf);
+  return (Term)0;
+}
+
+// Hvf.out_flush() -> U32: writes the queued console output now, so a
+// message on stderr after it keeps its place in a merged log.
+Term hvf_out_flush_run(Env e, Term* f, IoWork* w) {
+  hvf_out_flush();
   return (Term)0;
 }
 
@@ -2173,6 +2190,119 @@ Term hvf_vsock_accept_run(Env e, Term* f, IoWork* w) {
   return hvf_vs_accept(e, w);
 }
 
+// UEFI flash
+// ==========
+//
+// --firmware maps the firmware image as flash bank 0 at guest address 0,
+// read-only and executable (it runs in place), padded to 64 MiB with 0xFF.
+// Bank 1, the variable store, is 64 MiB of host memory at 0x0400_0000,
+// loaded from --vars when given (and written back to it as the guest
+// programs it) and erased (0xFF) otherwise. src/dev/pflash.bend models its
+// command set; this side holds the bytes and maps them into the guest
+// read-only while the bank reads as an array (Hvf.flash op 3).
+
+#define HVF_FLASH_SIZE  0x4000000ull
+#define HVF_FLASH1_BASE 0x4000000ull
+
+static uint8_t* hvf_flash0;
+static uint8_t* hvf_flash1;
+static int      hvf_vars_fd = -1;
+static int      hvf_flash1_mapped;
+
+// Reads a file into a 64 MiB 0xFF-filled buffer; 0, or an errno.
+static int hvf_flash_file(const char* path, uint8_t* to) {
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) {
+    return errno;
+  }
+  ssize_t k, at = 0;
+  while (at < (ssize_t)HVF_FLASH_SIZE && (k = read(fd, to + at, HVF_FLASH_SIZE - at)) > 0) {
+    at += k;
+  }
+  close(fd);
+  return k < 0 ? EIO : 0;
+}
+
+// Hvf.fw_load(code, vars) -> U32: 0, or a step code (1 code file, 2 vars
+// file, 3 mapping).
+Term hvf_fw_load_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* code = io_cstr(e, f[0], &n);
+  char* vars = io_cstr(e, f[1], &n);
+  hvf_flash0 = mmap(NULL, HVF_FLASH_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+  hvf_flash1 = mmap(NULL, HVF_FLASH_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+  int rc = 0;
+  if (hvf_flash0 == MAP_FAILED || hvf_flash1 == MAP_FAILED) {
+    rc = 3;
+  } else {
+    memset(hvf_flash0, 0xFF, HVF_FLASH_SIZE);
+    memset(hvf_flash1, 0xFF, HVF_FLASH_SIZE);
+    if (hvf_flash_file(code, hvf_flash0) != 0) {
+      rc = 1;
+    } else if (vars[0] && (hvf_flash_file(vars, hvf_flash1) != 0 || (hvf_vars_fd = open(vars, O_RDWR)) < 0)) {
+      rc = 2;
+    } else if (hv.vm_map(hvf_flash0, 0, HVF_FLASH_SIZE, HV_MEMORY_READ | HV_MEMORY_EXEC) != HV_SUCCESS
+               || hv.vm_map(hvf_flash1, HVF_FLASH1_BASE, HVF_FLASH_SIZE, HV_MEMORY_READ) != HV_SUCCESS) {
+      rc = 3;
+    } else {
+      hvf_flash1_mapped = 1;
+    }
+  }
+  free(code);
+  free(vars);
+  return (Term)(u32)rc;
+}
+
+// Persists [off, off+len) of bank 1 to the --vars file.
+static void hvf_flash_sync(uint64_t off, uint64_t len) {
+  if (hvf_vars_fd >= 0 && pwrite(hvf_vars_fd, hvf_flash1 + off, len, (off_t)off) != (ssize_t)len) {
+    fprintf(stderr, "bend-vmm: cannot write the UEFI variables back\n");
+  }
+}
+
+// Hvf.flash(op, a, b, bytes) -> U32 on bank 1: op 0 reads b bytes at a
+// (little-endian), 1 writes bytes at a, 2 erases b bytes at a, 3 maps the
+// bank into the guest read-only (a = 1) or unmaps it (a = 0).
+Term hvf_flash_run(Env e, Term* f, IoWork* w) {
+  u32 op = (u32)f[0], a = (u32)f[1], b = (u32)f[2];
+  if (!hvf_flash1) {
+    return (Term)(u32)0xFFFFFFFFu;
+  }
+  switch (op) {
+    case 0: {
+      u32 v = 0;
+      if (a < HVF_FLASH_SIZE && b <= 4 && a + b <= HVF_FLASH_SIZE) {
+        memcpy(&v, hvf_flash1 + a, b);
+      }
+      return (Term)v;
+    }
+    case 1: {
+      u64   n;
+      char* buf = io_cbuf(e, f[3], &n, CID(Con));
+      if (buf && a < HVF_FLASH_SIZE && n <= HVF_FLASH_SIZE - a) {
+        memcpy(hvf_flash1 + a, buf, n);
+        hvf_flash_sync(a, n);
+      }
+      free(buf);
+      return (Term)0;
+    }
+    case 2:
+      if (a < HVF_FLASH_SIZE && b <= HVF_FLASH_SIZE - a) {
+        memset(hvf_flash1 + a, 0xFF, b);
+        hvf_flash_sync(a, b);
+      }
+      return (Term)0;
+    case 3:
+      if (a && !hvf_flash1_mapped) {
+        hvf_flash1_mapped = hv.vm_map(hvf_flash1, HVF_FLASH1_BASE, HVF_FLASH_SIZE, HV_MEMORY_READ) == HV_SUCCESS;
+      } else if (!a && hvf_flash1_mapped) {
+        hvf_flash1_mapped = hv.vm_unmap(HVF_FLASH1_BASE, HVF_FLASH_SIZE) != HV_SUCCESS;
+      }
+      return (Term)0;
+  }
+  return (Term)0;
+}
+
 // The framebuffer and the display window
 // =======================================
 //
@@ -2421,6 +2551,12 @@ static void __attribute__((constructor)) hvf_use(void) {
 #ifdef CID(Hvf.vsock_accept)
   io_eff(CID(Hvf.vsock_accept), hvf_vsock_accept_run);
 #endif
+#ifdef CID(Hvf.fw_load)
+  io_eff(CID(Hvf.fw_load), hvf_fw_load_run);
+#endif
+#ifdef CID(Hvf.flash)
+  io_eff(CID(Hvf.flash), hvf_flash_run);
+#endif
 #ifdef CID(Hvf.fb_init)
   io_eff(CID(Hvf.fb_init), hvf_fb_init_run);
 #endif
@@ -2444,6 +2580,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.out)
   io_eff(CID(Hvf.out), hvf_out_run);
+#endif
+#ifdef CID(Hvf.out_flush)
+  io_eff(CID(Hvf.out_flush), hvf_out_flush_run);
 #endif
 #ifdef CID(Hvf.stdin)
   io_eff(CID(Hvf.stdin), hvf_stdin_run);

@@ -15,6 +15,8 @@ echo "GUEST: up, kernel $(uname -r), $(nproc) cpus"
 if grep -q bendtest /proc/cmdline; then
   sh /tests.sh
   echo "GUEST-TESTS-DONE"
+  # poweroff -f halts at once: let the tty send the last line to the UART.
+  sleep 0.3
   poweroff -f
 fi
 # Interactive mode: networking via DHCP from the NAT, and a --share directory

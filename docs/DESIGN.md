@@ -48,10 +48,14 @@ UART and the virtio slots, so it moves to 0x0C00_0000.
 
 | Region | Base | Size | IRQ |
 |---|---|---|---|
+| flash bank 0 (UEFI firmware, host memory, RX) | 0x0000_0000 | 64 MiB | |
+| flash bank 1 (UEFI variables, CFI flash model) | 0x0400_0000 | 64 MiB | |
 | GIC distributor | 0x0800_0000 | 64 KiB | |
 | GIC redistributors | 0x0C00_0000 | 32 MiB region (128 KiB / CPU) | |
 | PL011 UART | 0x0900_0000 | 4 KiB | SPI 1 (INTID 33) |
+| PL031 RTC | 0x0901_0000 | 4 KiB | SPI 2 (INTID 34) |
 | virtio-mmio slot n | 0x0A00_0000 + n·0x200 | 512 B | SPI 16+n (INTID 48+n) |
+| framebuffer (`--display`) | 0x1000_0000 | 16 MiB | |
 | RAM | 0x4000_0000 | configurable | |
 
 GICv3 is Hypervisor.framework's in-kernel GIC (`hv_gic_create`, macOS 15+),
@@ -130,22 +134,22 @@ gathering and scattering independent virtio descriptors; processing
 independent virtqueues; checksums over large buffers (halving recursion);
 one `IO.fork` per vCPU at the host level.
 
-## Status (2026-10-26)
+## Status (2026-10-27)
 
-- Every module in `src/` is implemented and proven: `bend PROOF.bend` prints
-  ALL PROOFS CHECK, and `scripts/check.sh --strict` passes 488 tests.
-- On macOS (Apple Silicon, macOS 27), `scripts/check-mac.sh` passes. Debian
-  bookworm's arm64 kernel (6.1) boots to `/init` in about 3 s, with GICv3, the
-  virtual timer, the PL011 console and PSCI. It boots 4 CPUs through
-  CPU_ON, each on its own vCPU thread, and powers off through SYSTEM_OFF.
-- With Hypervisor.framework's GIC the virtual timer reaches the guest by itself:
-  Linux keeps time with no VTIMER exits handled by the VMM.
+- Every module in `src/` is implemented and proven (`bend PROOF.bend`: ALL
+  PROOFS CHECK; `VERDICT=1 scripts/check.sh` re-checks the done modules with
+  the Lean-proven kernel), 600+ simulator tests.
+- `scripts/check-mac.sh` boots real guests on Hypervisor.framework: Ubuntu's
+  6.8 kernel with a busybox userspace (virtio blk/rng/console/net/9p/vsock,
+  the RTC, up to 8 CPUs and 4 GiB, reboot), pause/resume, snapshot/restore,
+  the display with virtio keyboard and tablet, and UEFI: edk2 boots Alpine's
+  ISO through GRUB, with EFI variables kept in a CFI flash model.
+- Cold boot to a shell about 0.55 s; a snapshot restores in about 30 ms.
 
 ## Next
 
-- Virtio in a real guest: Debian builds virtio-mmio as a module, so boot a
-  kernel with it built in (or ship the modules in the initramfs), then test
-  virtio-blk and virtio-rng from Linux.
-- Idle: WFI sleeps 1 ms; wait on the vtimer deadline or an interrupt instead.
-- Console input end to end (stdin in raw mode, UART RX interrupt).
-- `bend PROOF.bend --verdict` in CI (needs Lean 4.34).
+- Linux host: a KVM twin of host/hvf.c (vCPU run/registers, memory, the
+  in-kernel GIC, irqfd-free SPI levels), checked inside a Lima VM with nested
+  virtualization.
+- UEFI: a fw_cfg device (boot order, kernel loading) and a graphics output
+  (ramfb) for the firmware's own screens.

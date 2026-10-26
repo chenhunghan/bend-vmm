@@ -149,6 +149,12 @@ def Pl011.push_rx(s: Pl011, bytes: +List<U32>) -> Pl011:
       n = Nat.max(32n, List.length(&2, U32, rx))
       Pl011{i, f, l, c, fl, m, List.take(&2, U32, List.append(&2, U32, rx, bytes), n)}
 
+# How many more bytes the receive FIFO takes.
+def Pl011.room(s: Pl011) -> Nat:
+  match s:
+    case Pl011{i, f, l, c, fl, m, rx}:
+      Nat.sub(32n, List.length(&2, U32, rx))
+
 # The interrupt line's level: MIS (RIS & IMSC) is non-zero.
 def Pl011.irq(s: Pl011) -> Bool:
   match s:

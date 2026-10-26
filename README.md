@@ -24,6 +24,10 @@ the same code on any OS. A thin C layer (`host/`) drives Hypervisor.framework.
 - virtio-vsock to Unix sockets on the Mac (`--vsock PATH`, Firecracker's
   convention: the guest's connection to host port P reaches `PATH_P`; a host
   client connects to `PATH` and sends `CONNECT <port>` to reach a guest port).
+- UEFI boot (`--firmware`): edk2's arm64 firmware (ArmVirtQemu, as QEMU
+  uses) runs in place from flash, with its variable store on a CFI flash
+  model written back to a `--vars` file, so distribution ISOs and disk images
+  boot through their own bootloader (GRUB) and EFI variables persist.
 - A graphical console (`--display WxH`): a simple-framebuffer the guest's
   `simpledrm`/fbcon draws on, shown in a macOS window through Metal straight
   from guest memory, with a virtio keyboard and a virtio tablet (absolute
@@ -63,9 +67,26 @@ Options:
 | `--share DIR` | a host directory over virtio-9p (`mount -t 9p -o trans=virtio,version=9p2000.L share /mnt`) |
 | `--payload FILE` | a bare-metal binary entered at the start of RAM |
 | `--vsock PATH` | virtio-vsock (guest CID 3) bridged to Unix sockets under PATH |
+| `--firmware FILE` | UEFI firmware (`out/uefi/code.fd` from `scripts/uefi-assets.sh`) instead of `--kernel` |
+| `--vars FILE` | the UEFI variable store (copy `out/uefi/vars.fd` per VM); without it variables last one run |
 | `--display WxH` | a window showing the guest's framebuffer, with a virtio keyboard and tablet |
 | `--control SOCK` | a Unix socket for management commands (below) |
 | `--restore FILE` | start from a snapshot (same disks and shares as when it was taken) |
+
+UEFI:
+
+```sh
+scripts/uefi-assets.sh                # edk2 firmware and a variable store template (Ubuntu's AAVMF), Alpine's ISO
+cp out/uefi/vars.fd my-vars.fd
+out/bend-vmm --firmware out/uefi/code.fd --vars my-vars.fd --mem 1024 --cpus 2 \
+             --disk out/uefi/alpine.iso:ro
+```
+
+The firmware waits 5 seconds in its boot manager by default; from Linux,
+`efibootmgr -t 0` (or writing `07 00 00 00 00 00` to
+`/sys/firmware/efi/efivars/Timeout-8be4df61-93ca-11d2-aa0d-00e098032b8c`)
+sets that to 0 for good in the `--vars` file: the firmware then reaches GRUB
+in 0.2 s and Alpine its login prompt in about 5 s.
 
 Management: on the console, `Ctrl-A p` pauses or resumes, `Ctrl-A s` writes
 `./bend-vmm.snap`, `Ctrl-A x` quits, `Ctrl-A h` lists the keys. Over
@@ -115,7 +136,8 @@ then a busybox userspace that runs an in-guest test suite: disk reads and
 writes, entropy, timers, interrupts, console input, reboot, networking, 9p,
 vsock both ways, pause/resume, snapshot/restore, and the display (a
 screendump, keys typed into the framebuffer console, tablet events read from
-the guest's evdev).
+the guest's evdev), and UEFI: edk2 booting Alpine's ISO, an EFI variable
+written from Linux surviving a reboot.
 
 ## Layout
 

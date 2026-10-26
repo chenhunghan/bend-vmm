@@ -22,7 +22,8 @@ type CpuOn is Data:
 # simulator models; others read as empty and ignore writes). Entropy is the
 # counter sequence seed, seed+1, ... (mod 256), so tests can predict it. fs is
 # the shared directory of share 0 (src/vmm/simfs.bend; an empty root unless a
-# test sets it with Sim.with_fs); other shares answer ENOSYS.
+# test sets it with Sim.with_fs); other shares answer ENOSYS. The UEFI flash
+# reads as erased (0xFFFFFFFF) and ignores the rest.
 type Sim is Data:
   Sim{
     base: U.U64,
@@ -288,6 +289,8 @@ def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
           Sim.run(f, A, Sim.net_cmd(s, cmd), next)
         case V.VmVsock{cmd, next}:
           Sim.run(f, A, Sim.vsock_cmd(s, cmd), next)
+        case V.VmFlash{cmd, k}:
+          Sim.run(f, A, s, k(4294967295))
         case V.VmFs{+sh, +op, k}:
           +s = s
           Sim.run(f, A, Sim.fs_next(s, sh, op), k(Sim.fs_answer(s, sh, op)))

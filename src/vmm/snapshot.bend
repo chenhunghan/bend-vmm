@@ -4,6 +4,7 @@ import ../lib/dec.bend as X
 import ../arm64/psci.bend as P
 import ../dev/pl011.bend as Uart
 import ../dev/pl031.bend as Rtc
+import ../dev/pflash.bend as Pf
 import ../net/nat.bend as Nt
 import ../virtio/mmio.bend as M
 import ../virtio/queue.bend as Q
@@ -16,7 +17,7 @@ import ./machine.bend as Mc
 # The machine's device state as a stream of 32-bit words, for snapshots.
 # Snap.encode and Snap.decode are inverses (laws/snapshot.bend). The stream
 # starts with the magic 1112428109 ("BVMS" read as a little-endian word, 0x534d5642)
-# and the format version 1; lists and strings are length-prefixed; a sum type
+# and the format version 2 (2 added the UEFI flash state); lists and strings are length-prefixed; a sum type
 # writes its constructor's index first. The host stores this next to guest
 # RAM, vCPU registers and the GIC state (host/hvf.c, "Snapshots").
 
@@ -24,7 +25,7 @@ def Snap.magic() -> U32:
   1112428109
 
 def Snap.version() -> U32:
-  1
+  2
 
 # Encoders
 # ========
@@ -159,12 +160,17 @@ def Enc.devs(ds: +List<D.Dev>) -> +List<U32>:
     case Con{d, rest}:
       List.append(&2, U32, Enc.dev(d), Enc.devs(rest))
 
+def Enc.pflash(f: Pf.Pflash) -> +List<U32>:
+  match f:
+    case Pf.Pflash{m, at, n, d}:
+      List.append(&2, U32, [m, at, n], X.Enc.bytes(d))
+
 def Snap.encode(m: Mc.Machine) -> +List<U32>:
   match m:
-    case Mc.Machine{ps, uart, uirq, +devs, +lines, rtc, rirq, net}:
+    case Mc.Machine{ps, uart, uirq, +devs, +lines, rtc, rirq, net, fl}:
       +a = {List.append(&2, U32, [Snap.magic(), Snap.version()], List.append(&2, U32, Enc.psci(ps), Enc.pl011(uart))) : +List<U32>}
       +b = {List.append(&2, U32, [Bool.to_u32(uirq), Enc.len(D.Dev, devs)], Enc.devs(devs)) : +List<U32>}
-      +c = {List.append(&2, U32, Enc.len(Bool, lines) <> Enc.bools(lines), List.append(&2, U32, Enc.pl031(rtc), Bool.to_u32(rirq) <> Enc.slirp(net))) : +List<U32>}
+      +c = {List.append(&2, U32, Enc.len(Bool, lines) <> Enc.bools(lines), List.append(&2, U32, Enc.pl031(rtc), Bool.to_u32(rirq) <> List.append(&2, U32, Enc.slirp(net), Enc.pflash(fl)))) : +List<U32>}
       List.append(&2, U32, a, List.append(&2, U32, b, c))
 
 # Decoders
@@ -467,6 +473,14 @@ def Dec.header.ok(ok: Bool) -> X.Dec<Unit>:
     case False{}:
       X.Dec.fail(Unit)
 
+def Dec.pflash() -> X.Dec<Pf.Pflash>:
+  do X.Dec<Pf.Pflash>:
+    m : U32 <- X.Dec.u32()
+    at : U32 <- X.Dec.u32()
+    n : U32 <- X.Dec.u32()
+    d : +List<U32> <- X.Dec.bytes()
+    return Pf.Pflash{m, at, n, d}
+
 def Dec.machine() -> X.Dec<Mc.Machine>:
   do X.Dec<Mc.Machine>:
     magic : U32 <- X.Dec.u32()
@@ -482,7 +496,8 @@ def Dec.machine() -> X.Dec<Mc.Machine>:
     rtc : Rtc.Pl031 <- Dec.pl031()
     rirq : Bool <- X.Dec.bool()
     net : Nt.Slirp <- Dec.slirp()
-    return Mc.Machine{ps, uart, uirq, devs, lines, rtc, rirq, net}
+    fl : Pf.Pflash <- Dec.pflash()
+    return Mc.Machine{ps, uart, uirq, devs, lines, rtc, rirq, net, fl}
 
 def Snap.decode.end(m: Mc.Machine, rest: +List<U32>) -> Maybe<&2, Mc.Machine>:
   match rest:

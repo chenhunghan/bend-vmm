@@ -6,6 +6,10 @@ import ../lib/u64.bend as U
 # it can, except for the GIC redistributors: Hypervisor.framework's GIC
 # reserves a 32 MiB redistributor region, which at QEMU's 0x080A_0000 would
 # swallow the UART and the virtio slots, so it sits at 0x0C00_0000:
+#   flash bank 0       0 (0x0000_0000), 64 MiB: UEFI firmware (--firmware),
+#                      host memory, read-only and executable
+#   flash bank 1       67108864 (0x0400_0000), 64 MiB: UEFI variables, a
+#                      CFI flash (src/dev/pflash.bend)
 #   GIC distributor    134217728 (0x0800_0000), 64 KiB
 #   GIC redistributors 201326592 (0x0C00_0000), 32 MiB region, 128 KiB per CPU
 #   PL011 UART         150994944 (0x0900_0000), 4 KiB, SPI 1 (INTID 33)
@@ -47,6 +51,16 @@ def Layout.fb_base() -> U.U64:
 
 def Layout.fb_size() -> U32:
   16777216
+
+# The two 64 MiB flash banks of a UEFI boot (--firmware).
+def Layout.flash0_base() -> U.U64:
+  U.U64{0, 0}
+
+def Layout.flash1_base() -> U.U64:
+  U.U64{0, 67108864}
+
+def Layout.flash_size() -> U32:
+  67108864
 
 def Layout.virtio_base() -> U.U64:
   U.U64{0, 167772160}
