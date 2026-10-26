@@ -4,7 +4,7 @@
 #   1. smoke: a bare-metal payload prints through UART traps and powers off
 #      through PSCI, driven by host/smoke.bend (host effects only).
 #   2. (when host/main.bend exists) the same payloads on the full machine.
-#   3. (when a kernel is configured) Linux boots to its init marker.
+#   3. Linux (scripts/linux-assets.sh) boots to its init marker and powers off.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 [ "$(uname -s)-$(uname -m)" = "Darwin-arm64" ] || { echo "check-mac: needs macOS on arm64"; exit 2; }
@@ -33,9 +33,10 @@ if [ -f host/main.bend ]; then
   expect "machine hello" 20 "hello from the guest" ./out/bend-vmm --payload out/guest/hello.bin
 fi
 
-if [ -n "${BEND_VMM_KERNEL:-}" ] && [ -f host/main.bend ]; then
+if [ -f host/main.bend ] && [ "${SKIP_LINUX:-0}" != 1 ]; then
   echo "== 3. linux boot"
-  expect "linux boots" 120 "${BEND_VMM_MARKER:-BEND-VMM-BOOT-OK}" ./out/bend-vmm --kernel "$BEND_VMM_KERNEL" ${BEND_VMM_INITRD:+--initrd "$BEND_VMM_INITRD"}
+  scripts/linux-assets.sh >/dev/null || { red "linux assets failed"; exit 1; }
+  expect "linux boots to init" 120 "BEND-VMM-BOOT-OK" ./out/bend-vmm --kernel out/linux/linux --initrd out/linux/initrd.cpio
 fi
 
 if [ $fail = 0 ]; then grn "CHECK-MAC OK"; else red "CHECK-MAC FAILED"; fi
