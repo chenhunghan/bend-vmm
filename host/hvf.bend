@@ -243,15 +243,20 @@ def Host.vtimer_mask(cpu: U32, masked: U32) -> IO(U32):
     ws : +List<U32> <- Hvf.vcpu(cpu, Op.set_vtimer_mask(), 0, masked, 0, 0)
     return Host.first(ws)
 
-# The i-th 64-bit value of an exit record (after the kind word).
-def Host.word64(+ws: +List<U32>, i: Nat) -> U.U64:
-  +at = Nat.add(1n, Nat.mul(i, 2n))
-  U.U64{Host.first(List.drop(&2, U32, ws, at)), Host.first(List.drop(&2, U32, ws, Nat.add(at, 1n)))}
+# An exit record: [kind, esr, far, ipa, x0, x1, x2, x3, xt], each 64-bit
+# value as (hi, lo). One pattern match decodes it (walking the list per field
+# was the hottest code on the exit path).
+def Host.exception(ws: +List<U32>) -> V.RawExit:
+  match ws:
+    case Con{eh, Con{el, Con{fh, Con{fl, Con{ih, Con{il, Con{ah, Con{al, Con{bh, Con{bl, Con{ch, Con{cl, Con{dh, Con{dl, Con{th, Con{tl, rest}}}}}}}}}}}}}}}}:
+      V.Exception{U.U64{eh, el}, U.U64{fh, fl}, U.U64{ih, il}, U.U64{ah, al}, U.U64{bh, bl}, U.U64{ch, cl}, U.U64{dh, dl}, U.U64{th, tl}}
+    case _:
+      V.UnknownExit{4294967295}
 
-def Host.decode_exit.pick(is0: Bool, is1: Bool, is2: Bool, kind: U32, +ws: +List<U32>) -> V.RawExit:
+def Host.decode_exit.kind(is0: Bool, is1: Bool, is2: Bool, kind: U32, rest: +List<U32>) -> V.RawExit:
   match is0 is1 is2:
     case True{} _ _:
-      V.Exception{Host.word64(ws, 0n), Host.word64(ws, 1n), Host.word64(ws, 2n), Host.word64(ws, 3n), Host.word64(ws, 4n), Host.word64(ws, 5n), Host.word64(ws, 6n), Host.word64(ws, 7n)}
+      Host.exception(rest)
     case False{} True{} _:
       V.VtimerActivated{}
     case False{} False{} True{}:
@@ -259,12 +264,13 @@ def Host.decode_exit.pick(is0: Bool, is1: Bool, is2: Bool, kind: U32, +ws: +List
     case False{} False{} False{}:
       V.UnknownExit{kind}
 
-def Host.decode_exit.kind(+kind: U32, +ws: +List<U32>) -> V.RawExit:
-  Host.decode_exit.pick(U32.is_eq(kind, 0), U32.is_eq(kind, 1), U32.is_eq(kind, 2), kind, ws)
-
 # Decodes Hvf.vcpu(.., Op.run(), ..) words into a RawExit.
-def Host.decode_exit(+ws: +List<U32>) -> V.RawExit:
-  Host.decode_exit.kind(Host.first(ws), ws)
+def Host.decode_exit(ws: +List<U32>) -> V.RawExit:
+  match ws:
+    case Nil{}:
+      V.UnknownExit{4294967295}
+    case Con{+kind, rest}:
+      Host.decode_exit.kind(U32.is_eq(kind, 0), U32.is_eq(kind, 1), U32.is_eq(kind, 2), kind, rest)
 
 def Host.run(cpu: U32) -> IO(V.RawExit):
   do IO<V.RawExit>:

@@ -153,11 +153,27 @@ def Machine.irqs.at(-R: Type, +now: U32, m: Machine) -> V.Op<R, Machine>:
         ri : Bool <- Machine.line(R, L.Layout.rtc_intid(), ri, Rtc.Pl031.irq(rt, now))
         return Machine{p, u, ui, devs, lines, rt, ri, nt}
 
-# The same, at the time Op.now answers.
-def Machine.irqs(-R: Type, m: Machine) -> V.Op<R, Machine>:
-  do V.Op<R, Machine>:
-    t : U.U64 <- V.Op.now(R)
-    Machine.irqs.at(R, U.U64.lo(t), m)
+# Whether the RTC's alarm interrupt is unmasked (IMSC bit 0): only then does
+# its line depend on the time.
+def Machine.alarm_armed(m: Machine) -> Bool:
+  match m:
+    case Machine{p, u, ui, devs, lines, Rtc.Pl031{o, mr, lr, imsc, r}, ri, nt}:
+      U32.is_ne((imsc .&. 1 : U32), 0)
+
+def Machine.irqs.go(-R: Type, armed: Bool, m: Machine) -> V.Op<R, Machine>:
+  match armed:
+    case True{}:
+      do V.Op<R, Machine>:
+        t : U.U64 <- V.Op.now(R)
+        Machine.irqs.at(R, U.U64.lo(t), m)
+    case False{}:
+      # a masked alarm keeps the line low at any time: no clock read
+      Machine.irqs.at(R, 0, m)
+
+# The same, at the time Op.now answers (read only when the alarm is armed,
+# which keeps a host clock call off every exit).
+def Machine.irqs(-R: Type, +m: Machine) -> V.Op<R, Machine>:
+  Machine.irqs.go(R, Machine.alarm_armed(m), m)
 
 # Device access
 

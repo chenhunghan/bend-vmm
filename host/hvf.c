@@ -20,6 +20,7 @@
 #include <Hypervisor/Hypervisor.h>
 #include <crt_externs.h>
 #include <mach/mach_time.h>
+#include <stdatomic.h>
 #include <mach-o/dyld.h>
 
 #define HVF_MAX_CPUS 64
@@ -141,7 +142,9 @@ typedef struct {
   pthread_mutex_t mu;
   pthread_cond_t  cv;
   int             pipe[2];
-  int             busy;     // a request waits for the thread
+  _Atomic int     state;    // 0 idle, 1 a request waits, 2 its answer is ready
+  _Atomic int     parked;   // the Bend side sleeps on the pipe for the answer
+  _Atomic int     sleeping; // the vCPU thread sleeps on cv for a request
   int             op;
   uint64_t        a, b;
   uint32_t        out[20];  // the answer, in words
@@ -501,16 +504,38 @@ static void hvf_do(HvfCpu* c, int cpu) {
   }
 }
 
+// The handoff between the Bend event loop and a vCPU thread spins briefly
+// before it sleeps: an MMIO exit usually comes back within microseconds, and
+// a futex or pipe round trip costs more than that.
+#define HVF_SPIN_NS 40000
+
+static inline void hvf_relax(void) {
+  __asm__ volatile("yield");
+}
+
+static uint64_t hvf_ns(void) {
+  static mach_timebase_info_data_t tb;
+  if (!tb.denom) {
+    mach_timebase_info(&tb);
+  }
+  return mach_absolute_time() * tb.numer / tb.denom;
+}
+
 static void* hvf_thread(void* arg) {
   int     cpu = (int)(intptr_t)arg;
   HvfCpu* c   = &hvf_cpus[cpu];
-  pthread_mutex_lock(&c->mu);
   for (;;) {
-    while (!c->busy) {
-      pthread_mutex_unlock(&c->mu);
+    uint64_t until = hvf_ns() + HVF_SPIN_NS;
+    while (atomic_load(&c->state) != 1) {
+      if (hvf_ns() < until) {
+        hvf_relax();
+        continue;
+      }
+      // idle: answer snapshot requests, then sleep until a request
       hvf_service(c);
       pthread_mutex_lock(&c->mu);
-      if (!c->busy) {
+      atomic_store(&c->sleeping, 1);
+      if (atomic_load(&c->state) != 1) {
         struct timespec t;
         clock_gettime(CLOCK_REALTIME, &t);
         t.tv_nsec += 20000000;
@@ -520,13 +545,15 @@ static void* hvf_thread(void* arg) {
         }
         pthread_cond_timedwait(&c->cv, &c->mu, &t);
       }
+      atomic_store(&c->sleeping, 0);
+      pthread_mutex_unlock(&c->mu);
     }
-    pthread_mutex_unlock(&c->mu);
     hvf_do(c, cpu);
-    pthread_mutex_lock(&c->mu);
-    c->busy = 0;
-    char b = 1;
-    (void)!write(c->pipe[1], &b, 1);
+    atomic_store(&c->state, 2);
+    if (atomic_load(&c->parked)) {
+      char b = 1;
+      (void)!write(c->pipe[1], &b, 1);
+    }
   }
   return NULL;
 }
@@ -720,10 +747,15 @@ Term hvf_read_run(Env e, Term* f, IoWork* w) {
 
 static Term hvf_vcpu_more(Env e, IoWork* w) {
   HvfCpu* c = &hvf_cpus[w->hand];
-  char    b;
-  if (read(c->pipe[0], &b, 1) != 1) {
+  char    b[16];
+  while (read(c->pipe[0], b, sizeof b) > 0) {
+  }
+  if (atomic_load(&c->state) != 2) {
+    // a stale wakeup from an earlier answer taken by spinning
     return io_wait_on(w, c->pipe[0], POLLIN, 0, hvf_vcpu_more);
   }
+  atomic_store(&c->parked, 0);
+  atomic_store(&c->state, 0);
   return hvf_words(e, c->out, c->nout);
 }
 
@@ -747,13 +779,30 @@ Term hvf_vcpu_run(Env e, Term* f, IoWork* w) {
     c->live = 1;
     pthread_create(&c->thread, NULL, hvf_thread, (void*)(intptr_t)cpu);
   }
-  pthread_mutex_lock(&c->mu);
-  c->op   = (int)(u32)f[1];
-  c->a    = hvf_u64(f[2], f[3]);
-  c->b    = hvf_u64(f[4], f[5]);
-  c->busy = 1;
-  pthread_cond_signal(&c->cv);
-  pthread_mutex_unlock(&c->mu);
+  c->op = (int)(u32)f[1];
+  c->a  = hvf_u64(f[2], f[3]);
+  c->b  = hvf_u64(f[4], f[5]);
+  atomic_store(&c->state, 1);
+  if (atomic_load(&c->sleeping)) {
+    pthread_mutex_lock(&c->mu);
+    pthread_cond_signal(&c->cv);
+    pthread_mutex_unlock(&c->mu);
+  }
+  // spin for a quick answer; else sleep on the pipe
+  uint64_t until = hvf_ns() + HVF_SPIN_NS;
+  while (hvf_ns() < until) {
+    if (atomic_load(&c->state) == 2) {
+      atomic_store(&c->state, 0);
+      return hvf_words(e, c->out, c->nout);
+    }
+    hvf_relax();
+  }
+  atomic_store(&c->parked, 1);
+  if (atomic_load(&c->state) == 2) {
+    atomic_store(&c->parked, 0);
+    atomic_store(&c->state, 0);
+    return hvf_words(e, c->out, c->nout);
+  }
   w->hand = (intptr_t)cpu;
   return io_wait_on(w, c->pipe[0], POLLIN, 0, hvf_vcpu_more);
 }
@@ -800,17 +849,72 @@ Term hvf_kick_run(Env e, Term* f, IoWork* w) {
 // Console and disks
 // =================
 
-// Hvf.out(bytes) -> U32: writes raw bytes to stdout (guest console output is
-// bytes, not text: IO.write would re-encode them as UTF-8).
+// Console output is buffered and written by a flusher thread within a
+// millisecond, so a guest printing byte by byte costs no syscall per byte.
+static pthread_mutex_t hvf_out_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  hvf_out_cv = PTHREAD_COND_INITIALIZER;
+static char*           hvf_obuf;
+static size_t          hvf_on, hvf_ocap;
+static int             hvf_out_started;
+
+// Serializes writers, so the flush at exit waits for one in flight.
+static pthread_mutex_t hvf_out_wmu = PTHREAD_MUTEX_INITIALIZER;
+
+static void hvf_out_flush(void) {
+  pthread_mutex_lock(&hvf_out_wmu);
+  pthread_mutex_lock(&hvf_out_mu);
+  char*  buf = hvf_obuf;
+  size_t n   = hvf_on;
+  hvf_obuf = NULL;
+  hvf_on = hvf_ocap = 0;
+  pthread_mutex_unlock(&hvf_out_mu);
+  for (size_t at = 0; at < n;) {
+    ssize_t k = write(1, buf + at, n - at);
+    if (k <= 0) {
+      break;
+    }
+    at += (size_t)k;
+  }
+  free(buf);
+  pthread_mutex_unlock(&hvf_out_wmu);
+}
+
+static void* hvf_out_thread(void* arg) {
+  for (;;) {
+    pthread_mutex_lock(&hvf_out_mu);
+    while (hvf_on == 0) {
+      pthread_cond_wait(&hvf_out_cv, &hvf_out_mu);
+    }
+    pthread_mutex_unlock(&hvf_out_mu);
+    usleep(1000);
+    hvf_out_flush();
+  }
+  return NULL;
+}
+
+// Hvf.out(bytes) -> U32: queues raw bytes for stdout (guest console output
+// is bytes, not text: IO.write would re-encode them as UTF-8).
 Term hvf_out_run(Env e, Term* f, IoWork* w) {
   u64   n;
   char* buf = io_cbuf(e, f[0], &n, CID(Con));
   if (buf == NULL) {
     return (Term)HVF_ERR;
   }
-  io_sync();
-  io_out(stdout, buf, n);
-  io_sync();
+  pthread_mutex_lock(&hvf_out_mu);
+  if (!hvf_out_started) {
+    pthread_t t;
+    hvf_out_started = 1;
+    pthread_create(&t, NULL, hvf_out_thread, NULL);
+    atexit(hvf_out_flush);
+  }
+  if (hvf_on + n > hvf_ocap) {
+    hvf_ocap = (hvf_on + n) * 2 + 4096;
+    hvf_obuf = io_mem(realloc(hvf_obuf, hvf_ocap));
+  }
+  memcpy(hvf_obuf + hvf_on, buf, n);
+  hvf_on += n;
+  pthread_cond_signal(&hvf_out_cv);
+  pthread_mutex_unlock(&hvf_out_mu);
   free(buf);
   return (Term)0;
 }

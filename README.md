@@ -68,6 +68,26 @@ not survive a restore.
 Debugging: `BEND_VMM_TRACE=1` prints every trapped exit, `=2` console input
 and interrupt line changes.
 
+## Start time
+
+Measured on an M-series Mac with Ubuntu's 6.8 arm64 kernel:
+
+| Start | Time |
+|---|---|
+| VMM up to the first guest instruction | ~30 ms |
+| Cold boot to the busybox shell (default options, full boot log) | ~0.55 s |
+| Cold boot, `quiet`, to `/init` | ~0.33 s |
+| `--restore` of a booted snapshot to a responsive shell | ~20-40 ms |
+
+For the fastest start, boot once with `--control SOCK`, take
+`echo snapshot base.snap | nc -U SOCK`, and start later VMs with
+`--restore base.snap`: guest RAM maps copy-on-write from the file, so nothing
+is read or zeroed up front. A trapped exit costs ~3 µs (`tests/guest/spam.S`):
+the vCPU thread and the Bend event loop hand requests over with a short spin
+before sleeping, register writes ride along with the next run, console
+output is batched, and the host clock is read only while the RTC alarm is
+armed.
+
 ## How it is verified
 
 | Level | Command | Where |
