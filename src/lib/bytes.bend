@@ -7,13 +7,14 @@ import ./u64.bend as U
 def Bytes.zeros(n: Nat) -> +List<U32>:
   List.replicate(U32, n, 0)
 
-# The low n bytes of x, least significant first (n <= 4).
+# The low n bytes of x, least significant first (n <= 4). The mask comes first
+# in `.&.` so that the proofs of the round trips reduce bit by bit.
 def Bytes.le(n: Nat, +x: U32) -> +List<U32>:
   match n:
     case 0n:
       []
     case 1n+p:
-      (x .&. 255 : U32) <> Bytes.le(p, (x >> 8n : U32))
+      (255 .&. x : U32) <> Bytes.le(p, (x >> 8n : U32))
 
 # The low n bytes of x, most significant first (n <= 4).
 def Bytes.be(n: Nat, x: U32) -> +List<U32>:
@@ -48,7 +49,7 @@ def Bytes.read_le(n: Nat, bs: +List<U32>) -> U32:
         case Nil{}:
           0
         case Con{b, rest}:
-          ((b .&. 255) .|. (Bytes.read_le(p, rest) << 8n) : U32)
+          ((255 .&. b) .|. (Bytes.read_le(p, rest) << 8n) : U32)
 
 # Reads up to 4 bytes big-endian; missing bytes read as zero.
 def Bytes.read_be(+n: Nat, bs: +List<U32>) -> U32:
