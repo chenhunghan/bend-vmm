@@ -17,6 +17,8 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <Hypervisor/Hypervisor.h>
+#include <crt_externs.h>
+#include <mach-o/dyld.h>
 
 #define HVF_MAX_CPUS 64
 #define HVF_ERR      0xFFFFFFFFu
@@ -259,8 +261,73 @@ Term hvf_init_run(Env e, Term* f, IoWork* w) {
   return (Term)0;
 }
 
-// Hvf.load(path, gpa_hi, gpa_lo) -> U32: copies a file into RAM; its size,
-// or 0xFFFFFFFF.
+static void hvf_tty_restore(void);
+
+// zlib, opened on first use (a gzip-compressed kernel such as Ubuntu's
+// vmlinuz). zlib.h clashes with names in Bend's generated C, so its stable
+// z_stream ABI is declared here.
+typedef struct {
+  const uint8_t* next_in;
+  unsigned       avail_in;
+  unsigned long  total_in;
+  uint8_t*       next_out;
+  unsigned       avail_out;
+  unsigned long  total_out;
+  const char*    msg;
+  void*          state;
+  void*          zalloc;
+  void*          zfree;
+  void*          opaque;
+  int            data_type;
+  unsigned long  adler;
+  unsigned long  reserved;
+} hvf_zstream;
+
+#define HVF_Z_OK         0
+#define HVF_Z_STREAM_END 1
+#define HVF_Z_NO_FLUSH   0
+
+static struct {
+  void* lib;
+  int (*init2)(hvf_zstream*, int, const char*, int);
+  int (*inflate)(hvf_zstream*, int);
+  int (*end)(hvf_zstream*);
+} hvf_z;
+
+// Inflates a gzip file of n bytes at src into dst (room bytes); the output
+// size, or -1.
+static int64_t hvf_gunzip(uint8_t* src, uint64_t n, uint8_t* dst, uint64_t room) {
+  if (!hvf_z.lib) {
+    hvf_z.lib = dlopen("/usr/lib/libz.1.dylib", RTLD_NOW);
+    if (!hvf_z.lib) {
+      return -1;
+    }
+    hvf_z.init2   = dlsym(hvf_z.lib, "inflateInit2_");
+    hvf_z.inflate = dlsym(hvf_z.lib, "inflate");
+    hvf_z.end     = dlsym(hvf_z.lib, "inflateEnd");
+  }
+  hvf_zstream z = {0};
+  z.next_in  = src;
+  z.avail_in = (unsigned)n;
+  // windowBits 15 + 16: a gzip wrapper
+  if (!hvf_z.init2 || hvf_z.init2(&z, 31, "1.2.12", (int)sizeof z) != HVF_Z_OK) {
+    return -1;
+  }
+  uint64_t out = 0;
+  int      r   = HVF_Z_OK;
+  while (r == HVF_Z_OK && out < room) {
+    uint64_t chunk = room - out > 0x40000000 ? 0x40000000 : room - out;
+    z.next_out  = dst + out;
+    z.avail_out = (unsigned)chunk;
+    r = hvf_z.inflate(&z, HVF_Z_NO_FLUSH);
+    out += chunk - z.avail_out;
+  }
+  hvf_z.end(&z);
+  return r == HVF_Z_STREAM_END ? (int64_t)out : -1;
+}
+
+// Hvf.load(path, gpa_hi, gpa_lo) -> U32: copies a file into RAM, inflating
+// it first when it is gzip-compressed; the size in RAM, or 0xFFFFFFFF.
 Term hvf_load_run(Env e, Term* f, IoWork* w) {
   u64   n;
   char* path = io_cstr(e, f[0], &n);
@@ -270,17 +337,44 @@ Term hvf_load_run(Env e, Term* f, IoWork* w) {
     return (Term)HVF_ERR;
   }
   struct stat st;
-  uint8_t*    dst = fstat(fd, &st) == 0 ? hvf_ptr(hvf_u64(f[1], f[2]), (uint64_t)st.st_size) : NULL;
-  uint64_t    got = 0;
-  while (dst && got < (uint64_t)st.st_size) {
-    ssize_t k = read(fd, dst + got, (size_t)st.st_size - got);
-    if (k <= 0) {
-      break;
-    }
-    got += (uint64_t)k;
+  if (fstat(fd, &st) != 0) {
+    close(fd);
+    return (Term)HVF_ERR;
   }
+  uint8_t* file = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
   close(fd);
-  return (Term)(dst && got == (uint64_t)st.st_size && got < HVF_ERR ? (u32)got : HVF_ERR);
+  if (file == MAP_FAILED) {
+    return (Term)HVF_ERR;
+  }
+  uint64_t gpa = hvf_u64(f[1], f[2]);
+  int64_t  got = -1;
+  if (st.st_size > 2 && file[0] == 0x1f && file[1] == 0x8b) {
+    uint8_t* dst = hvf_ptr(gpa, 1);
+    if (dst) {
+      got = hvf_gunzip(file, (uint64_t)st.st_size, dst, hvf_ram_size - (gpa - hvf_ram_base));
+    }
+  } else {
+    uint8_t* dst = hvf_ptr(gpa, (uint64_t)st.st_size);
+    if (dst) {
+      memcpy(dst, file, (size_t)st.st_size);
+      got = st.st_size;
+    }
+  }
+  munmap(file, (size_t)st.st_size);
+  return (Term)(got >= 0 && got < HVF_ERR ? (u32)got : HVF_ERR);
+}
+
+// Hvf.reexec() -> U32: restarts this program with its original arguments
+// (PSCI SYSTEM_RESET: a fresh VM is the simplest correct reset).
+Term hvf_reexec_run(Env e, Term* f, IoWork* w) {
+  char     path[4096];
+  uint32_t size = sizeof path;
+  hvf_tty_restore();
+  fflush(stdout);
+  if (_NSGetExecutablePath(path, &size) == 0) {
+    execv(path, *_NSGetArgv());
+  }
+  return (Term)HVF_ERR;
 }
 
 // Hvf.file_size(path) -> U32: a file's size, or 0xFFFFFFFF (also past 4 GiB).
@@ -588,6 +682,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.kick)
   io_eff(CID(Hvf.kick), hvf_kick_run);
+#endif
+#ifdef CID(Hvf.reexec)
+  io_eff(CID(Hvf.reexec), hvf_reexec_run);
 #endif
 #ifdef CID(Hvf.file_size)
   io_eff(CID(Hvf.file_size), hvf_file_size_run);

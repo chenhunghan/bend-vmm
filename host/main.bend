@@ -321,6 +321,22 @@ def boot(payload: Bool, o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
     case False{}:
       boot_linux(o, nslots)
 
+# Stop code 1 is a guest reset: start over in a fresh process.
+def stopped.reset(reset: Bool, +code: U32) -> IO(Unit):
+  match reset:
+    case True{}:
+      do IO<Unit>:
+        IO.print_err("bend-vmm: reset")
+        _ : U32 <- H.Hvf.reexec()
+        IO.die(Unit, 1, "bend-vmm: cannot restart")
+    case False{}:
+      do IO<Unit>:
+        IO.print_err("bend-vmm: stopped (" ++ U32.show(code) ++ ")")
+        IO.exit(code)
+
+def stopped(+code: U32) -> IO(Unit):
+  stopped.reset(U32.is_eq(code, 1), code)
+
 @unsafe def start.go(cpus: U32, kinds: +List<D.DevKind>, pc: U.U64, dtb: U.U64) -> IO(Unit):
   do IO<Unit>:
     rc : U32 <- H.Host.vcpu_create(0)
@@ -332,9 +348,8 @@ def boot(payload: Bool, o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
     IO.spawn(Unit, vcpu_loop(0, mc, done))
     IO.spawn(Unit, input_loop(mc, done))
     got : Maybe<&1, U32> <- Chan.recv(U32, done)
-    +code : U32 = Maybe.default(&1, U32, got, 1)
-    IO.print_err("bend-vmm: stopped (" ++ U32.show(code) ++ ")")
-    IO.exit(Bool.pick(U32, U32.is_lt(code, 2), 0, code))
+    +code : U32 = Maybe.default(&1, U32, got, 2)
+    stopped(code)
 
 @unsafe def start(o: Opts, kinds: +List<D.DevKind>, entry: U.U64 & U.U64) -> IO(Unit):
   match o:

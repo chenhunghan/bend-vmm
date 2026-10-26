@@ -57,6 +57,8 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   fi
   out=$( ( (sleep 20; printf 'echo hi-$((40+2))\n'; sleep 2; printf 'poweroff -f\n'; sleep 5) | perl -e 'alarm 60; exec @ARGV' ./out/bend-vmm --mem 1024 --kernel out/guest/Image --initrd out/guest/guest.cpio) 2>&1 )
   if grep -q "^hi-42" <<<"$out"; then grn "ok: console input"; else red "failed: console input"; tail -5 <<<"$out"; fail=1; fi
+  out=$( ( (sleep 20; printf 'reboot -f\n'; sleep 25; printf 'poweroff -f\n'; sleep 5) | perl -e 'alarm 90; exec @ARGV' ./out/bend-vmm --mem 1024 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio) 2>&1 )
+  if [ "$(grep -c 'GUEST: up' <<<"$out")" = 2 ] && grep -q "stopped (0)" <<<"$out"; then grn "ok: reboot (gzip kernel)"; else red "failed: reboot"; grep -a -E "GUEST|reset|stopped" <<<"$out"; fail=1; fi
 fi
 
 if [ $fail = 0 ]; then grn "CHECK-MAC OK"; else red "CHECK-MAC FAILED"; fi

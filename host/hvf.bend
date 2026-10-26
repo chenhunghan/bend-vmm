@@ -33,6 +33,10 @@ def Hvf.kick(cpu: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.reexec() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.file_size(path: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
