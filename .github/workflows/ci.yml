@@ -66,3 +66,27 @@ jobs:
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
       - name: Verdict
         run: VERDICT=1 scripts/check.sh
+
+  host-linux:
+    # The host layer (KVM backend) builds on Linux arm64. Runners have no
+    # /dev/kvm, so guests run in scripts/check-host.sh on a KVM host instead.
+    runs-on: ubuntu-24.04-arm
+    env:
+      BEND_VERSION: 2.0.39
+      BEND_SHA_LINUX_ARM64: 71b43e1bb9313dd14ac2b0553b854e41c39d65ecaa47040796ebff4a46f54a97
+      BEND_NO_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bend and the toolchain
+        run: |
+          sudo apt-get update && sudo apt-get install -y clang libx11-dev
+          name="bend-$BEND_VERSION-linux-arm64.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "/tmp/$name" "https://github.com/bendlang/bend/releases/download/v$BEND_VERSION/$name"
+          echo "$BEND_SHA_LINUX_ARM64  /tmp/$name" | sha256sum -c -
+          tar -xzf "/tmp/$name" -C /tmp
+          mkdir -p "$HOME/.bend/bin"
+          mv /tmp/bend/bend2 /tmp/bend/guide "$HOME/.bend/"
+          mv /tmp/bend/bin/bend "$HOME/.bend/bin/bend"
+          echo "$HOME/.bend/bin" >> "$GITHUB_PATH"
+      - name: Build bend-vmm
+        run: scripts/build.sh host/main.bend out/bend-vmm && scripts/build.sh host/smoke.bend out/smoke

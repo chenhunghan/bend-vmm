@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Level 4 of the verification ladder (docs/DESIGN.md): builds the host layer
+# and runs real guests on this host's hypervisor: Hypervisor.framework on
+# macOS (Apple Silicon), KVM on Linux (arm64, /dev/kvm). On Linux, snapshots
+# are not supported yet, so the lifecycle section checks pause and resume.
+# CHECK_SLOW=N stretches every timeout and pause N times (an emulated host,
+# such as scripts/lima/linux-host.sh on an M1/M2 Mac); SKIP_NATIVE=1 skips
+# the native test build.
+#   1. smoke: a bare-metal payload prints through UART traps and powers off
+#      through PSCI, driven by host/smoke.bend (host effects only).
+#   2. (when host/main.bend exists) the same payloads on the full machine.
+#   3. Linux (scripts/linux-assets.sh) boots to its init marker and powers off.
+#   4. the guest suite (tests/guest/rootfs/tests.sh), net, 9p, vsock, console.
+#   5. lifecycle: pause, resume, snapshot, restore.
+#   6. display: screendump, and the virtio keyboard and tablet driven through
+#      the control socket's type and pointer commands.
+#   7. UEFI: edk2 firmware boots Alpine's ISO (GRUB, Linux); an EFI variable
+#      written by Linux survives a reboot in the --vars file.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+host=$(uname -s)-$(uname -m)
+case "$host" in
+  Darwin-arm64) ;;
+  Linux-aarch64) [ -w /dev/kvm ] || { echo "check-host: needs /dev/kvm"; exit 2; } ;;
+  *) echo "check-host: needs macOS on Apple Silicon or Linux on arm64 with KVM"; exit 2 ;;
+esac
+SLOW=${CHECK_SLOW:-1}
+# sleep and alarm, stretched by CHECK_SLOW
+slp() { sleep $(( $1 * SLOW )); }
+alarm() { local t=$1; shift; perl -e 'alarm shift; exec @ARGV' $(( t * SLOW )) "$@"; }
+fail=0
+# Build artifacts go when the check ends (scripts/clean.sh keeps downloaded assets).
+trap 'scripts/clean.sh' EXIT
+red() { printf '\033[31m%s\033[0m\n' "$*"; }
+grn() { printf '\033[32m%s\033[0m\n' "$*"; }
+
+# expect <name> <timeout-s> <pattern> <cmd...>: runs cmd, requires pattern in its output.
+expect() {
+  name=$1 secs=$2 pat=$3; shift 3
+  out=$( (alarm "$secs" "$@") 2>&1 )
+  if grep -q -- "$pat" <<<"$out"; then grn "ok: $name"; else red "failed: $name"; echo "$out" | tail -20; fail=1; fi
+}
+
+if [ "${SKIP_NATIVE:-0}" != 1 ]; then
+  echo "== native tests"
+  scripts/check-native.sh 2 | tail -1 | grep -q "CHECK-NATIVE OK" || { red "native tests failed (scripts/check-native.sh)"; fail=1; }
+fi
+
+echo "== build"
+for g in tests/guest/*.S; do scripts/guest.sh "$(basename "$g" .S)" >/dev/null || fail=1; done
+scripts/build.sh host/smoke.bend out/smoke >/dev/null || { red "smoke build failed"; exit 1; }
+
+echo "== 1. host smoke"
+expect "smoke prints" 20 "hello from the guest" ./out/smoke out/guest/hello.bin
+expect "smoke powers off" 20 "smoke: done 1" ./out/smoke out/guest/hello.bin
+
+if [ -f host/main.bend ]; then
+  echo "== 2. machine"
+  scripts/build.sh host/main.bend out/bend-vmm >/dev/null || { red "bend-vmm build failed"; exit 1; }
+  expect "machine hello" 20 "hello from the guest" ./out/bend-vmm --payload out/guest/hello.bin
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_LINUX:-0}" != 1 ]; then
+  echo "== 3. linux boot"
+  scripts/linux-assets.sh >/dev/null || { red "linux assets failed"; exit 1; }
+  expect "linux boots to init" 120 "BEND-VMM-BOOT-OK" ./out/bend-vmm --kernel out/linux/linux --initrd out/linux/initrd.cpio
+  expect "linux powers off" 120 "stopped (0)" ./out/bend-vmm --kernel out/linux/linux --initrd out/linux/initrd.cpio
+  expect "linux smp (4 cpus)" 120 "Brought up 1 node, 4 CPUs" ./out/bend-vmm --cpus 4 --kernel out/linux/linux --initrd out/linux/initrd.cpio
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 4. guest userspace (Ubuntu kernel, busybox)"
+  scripts/guest-assets.sh >/dev/null || { red "guest assets failed"; exit 1; }
+  dd if=/dev/zero of=out/guest/disk.img bs=1048576 count=8 2>/dev/null
+  printf 'BEND-DISK-SECTOR0' | dd of=out/guest/disk.img conv=notrunc 2>/dev/null
+  cp out/guest/disk.img out/guest/disk2.img
+  out=$( (alarm 180 ./out/bend-vmm --mem 1024 --cpus 2 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk out/guest/disk.img,out/guest/disk2.img:ro --cmdline "console=ttyAMA0 bendtest bendcpus=2") 2>&1 )
+  if grep -q GUEST-TESTS-DONE <<<"$out" && ! grep -q "GUEST-TEST FAIL" <<<"$out"; then
+    grn "ok: guest tests ($(grep -c 'GUEST-TEST PASS' <<<"$out") passed, $(grep -c 'GUEST-TEST SKIP' <<<"$out") skipped)"
+  else
+    red "failed: guest tests"; grep -a "GUEST" <<<"$out" | tail -20; fail=1
+  fi
+  # devices: a host HTTP server and a shared directory for the net and 9p tests
+  www=$(mktemp -d); share=$(mktemp -d)
+  echo BEND-HTTP-OK > "$www/hello.txt"; echo BEND-9P-OK > "$share/hello.txt"
+  port=$((20000 + RANDOM % 20000))
+  (cd "$www" && exec python3 -m http.server "$port" --bind 127.0.0.1 >/dev/null 2>&1) & http=$!
+  slp 1
+  out=$( (alarm 120 ./out/bend-vmm --mem 1024 --cpus 2 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --share "$share" --cmdline "console=ttyAMA0 bendtest benchttp=$port benchdns bendshare quiet") 2>&1 )
+  kill $http 2>/dev/null
+  for t in rtc hvc0-write net-dhcp net-ping-gateway net-http net-dns p9-mount p9-read p9-write p9-mkdir; do
+    if grep -q "GUEST-TEST PASS $t" <<<"$out"; then grn "ok: guest $t"; else red "failed: guest $t"; fail=1; fi
+  done
+  grep -q HVC0-MARKER-OK <<<"$out" && grn "ok: hvc0 output reaches the host" || { red "failed: hvc0 output"; fail=1; }
+  [ "$(cat "$share/guest.txt" 2>/dev/null)" = from-guest ] && grn "ok: 9p write reaches the host" || { red "failed: 9p write on the host"; fail=1; }
+  rm -rf "$www" "$share"
+  vs=$(mktemp -d)/v.sock
+  out=$( (alarm 120 python3 scripts/vsock-test.py "$vs" ./out/bend-vmm --mem 512 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --vsock "$vs" --cmdline "console=ttyAMA0 bendtest bendvsock quiet") 2>&1 )
+  grep -q "GUEST-TEST PASS vsock-client" <<<"$out" && grn "ok: vsock guest -> host (Unix socket ${vs##*/}_1234)" || { red "failed: vsock guest -> host"; fail=1; }
+  grep -q "GUEST-TEST PASS vsock-server" <<<"$out" && grep -q HOST-VSOCK-OK <<<"$out" && grn "ok: vsock host -> guest (CONNECT 5000)" || { red "failed: vsock host -> guest"; grep -a -i vsock <<<"$out" | tail -5; fail=1; }
+  rm -rf "$(dirname "$vs")"
+  out=$( (alarm 120 ./out/bend-vmm --mem 4096 --cpus 8 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --disk out/guest/disk.img --cmdline "console=ttyAMA0 bendtest bendcpus=8 quiet") 2>&1 )
+  if grep -q GUEST-TESTS-DONE <<<"$out" && ! grep -q "GUEST-TEST FAIL" <<<"$out"; then grn "ok: 8 cpus, 4 GiB (RAM past 4 GiB)"; else red "failed: 8 cpus, 4 GiB"; grep -a GUEST <<<"$out" | tail; fail=1; fi
+  out=$( ( (slp 20; printf 'echo hi-$((40+2))\n'; slp 2; printf 'poweroff -f\n'; slp 5) | alarm 60 ./out/bend-vmm --mem 1024 --kernel out/guest/Image --initrd out/guest/guest.cpio) 2>&1 )
+  if grep -q "^hi-42" <<<"$out"; then grn "ok: console input"; else red "failed: console input"; tail -5 <<<"$out"; fail=1; fi
+  out=$( ( (slp 20; printf 'reboot -f\n'; slp 25; printf 'poweroff -f\n'; slp 5) | alarm 90 ./out/bend-vmm --mem 1024 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio) 2>&1 )
+  if [ "$(grep -c 'GUEST: up' <<<"$out")" = 2 ] && grep -q "stopped (0)" <<<"$out"; then grn "ok: reboot (gzip kernel)"; else red "failed: reboot"; grep -a -E "GUEST|reset|stopped" <<<"$out"; fail=1; fi
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5. lifecycle: pause, resume, snapshot, restore"
+  t=$(mktemp -d); sock=$t/vm.sock
+  ( (slp 8; printf 'echo MARK-$((6*7)) > /tmp/m\n'; slp 40) | ./out/bend-vmm --mem 512 --cpus 2 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --control "$sock" --cmdline "console=ttyAMA0 quiet" > "$t/run.log" 2>&1 & )
+  slp 12
+  [ "$(echo pause | nc -U "$sock")" = paused ] && [ "$(echo status | nc -U "$sock")" = paused ] && grn "ok: pause" || { red "failed: pause"; fail=1; }
+  [ "$(echo resume | nc -U "$sock")" = running ] && grn "ok: resume" || { red "failed: resume"; fail=1; }
+  if [ "$host" = Darwin-arm64 ]; then
+    [ "$(echo "snapshot $t/vm.snap" | nc -U "$sock")" = saved ] && grn "ok: snapshot ($(du -h "$t/vm.snap" | cut -f1) on disk)" || { red "failed: snapshot"; fail=1; }
+    echo quit | nc -U "$sock" >/dev/null; slp 1
+    out=$( ( (slp 3; printf 'cat /tmp/m\n'; slp 2; printf 'poweroff -f\n'; slp 3) | alarm 40 ./out/bend-vmm --restore "$t/vm.snap") 2>&1 )
+    grep -q "^MARK-42" <<<"$(tr -d '\r' <<<"$out")" && grep -q "stopped (0)" <<<"$out" && grn "ok: restore (guest RAM and CPUs continue)" || { red "failed: restore"; tail -5 <<<"$out"; fail=1; }
+  else
+    echo quit | nc -U "$sock" >/dev/null; slp 1
+  fi
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 6. display: framebuffer, virtio keyboard and tablet"
+  t=$(mktemp -d); sock=$t/vm.sock
+  ( (slp 40) | alarm 40 ./out/bend-vmm --mem 512 --cpus 2 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --control "$sock" --display 640x480 --cmdline "console=ttyAMA0 quiet" > "$t/run.log" 2>&1 & )
+  slp 7
+  # typed on tty1 (the framebuffer console) through the virtio keyboard
+  printf '%s\n' 'type echo KEYS-$((6*7)) > /dev/ttyAMA0\n' | nc -U "$sock" >/dev/null; slp 1
+  printf '%s\n' 'type dd if=/dev/input/event1 bs=24 count=3 2>/dev/null | hexdump -C > /dev/ttyAMA0 &\n' | nc -U "$sock" >/dev/null; slp 1
+  [ "$(printf 'pointer 12345 32767\n' | nc -U "$sock")" = moved ] || { red "failed: pointer command"; fail=1; }
+  slp 1
+  [ "$(echo "screendump $t/s.ppm" | nc -U "$sock")" = saved ] && [ "$(head -c 15 "$t/s.ppm" | tr '\n' ' ')" = "P6 640 480 255 " ] && grn "ok: screendump (640x480)" || { red "failed: screendump"; fail=1; }
+  echo quit | nc -U "$sock" >/dev/null; slp 1
+  log=$(tr -d '\r' < "$t/run.log")
+  grep -q "KEYS-42" <<<"$log" && grn "ok: virtio keyboard (typed into the framebuffer console)" || { red "failed: virtio keyboard"; tail -5 <<<"$log"; fail=1; }
+  grep -q "03 00 00 00 39 30 00 00" <<<"$log" && grep -q "03 00 01 00 ff 7f 00 00" <<<"$log" && grn "ok: virtio tablet (ABS_X 12345, ABS_Y 32767)" || { red "failed: virtio tablet"; tail -5 <<<"$log"; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 7. UEFI: firmware, an ISO, EFI variables"
+  scripts/uefi-assets.sh >/dev/null
+  t=$(mktemp -d); cp out/uefi/vars.fd "$t/vars.fd"
+  efivar=/sys/firmware/efi/efivars/BendTest-12345678-1234-1234-1234-123456789abc
+  out=$( ( (slp 22; printf 'root\n'; slp 3; printf 'printf "\\007\\000\\000\\000bend-ok" > %s; echo SET-$((6*7)); reboot\n' "$efivar"; slp 30; printf 'root\n'; slp 3; printf 'tail -c 7 %s; echo; echo AFTER-REBOOT; poweroff\n' "$efivar"; slp 10) | alarm 100 ./out/bend-vmm --firmware out/uefi/code.fd --vars "$t/vars.fd" --mem 1024 --cpus 2 --disk out/uefi/alpine.iso:ro) 2>&1 | tr -d '\r' )
+  grep -q "Welcome to Alpine" <<<"$out" && grn "ok: UEFI boots the Alpine ISO (edk2, GRUB, Linux $(grep -ao 'Linux [0-9][^ ]*' <<<"$out" | head -1 | cut -d' ' -f2))" || { red "failed: UEFI boot"; tail -5 <<<"$out"; fail=1; }
+  grep -q "SET-42" <<<"$out" && [ "$(grep -c 'Welcome to Alpine Linux' <<<"$out")" = 2 ] && grn "ok: UEFI reboot" || { red "failed: UEFI reboot"; fail=1; }
+  grep -B1 "AFTER-REBOOT" <<<"$out" | grep -q "^bend-ok" && grep -q "bend-ok" "$t/vars.fd" && grn "ok: EFI variable persists (flash, --vars)" || { red "failed: EFI variable"; grep -a -B2 AFTER-REBOOT <<<"$out"; fail=1; }
+  grep -q "reboot: Power down" <<<"$out" && grn "ok: UEFI power off" || { red "failed: UEFI power off"; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ $fail = 0 ]; then grn "CHECK-MAC OK"; else red "CHECK-MAC FAILED"; fi
+exit $fail

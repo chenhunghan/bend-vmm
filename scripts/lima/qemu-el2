@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# qemu-system-aarch64 for Lima with virtualization extensions (EL2) emulated,
+# so the guest has a working /dev/kvm on Macs whose Virtualization.framework
+# offers no nested virtualization (before M3). Lima starts QEMU with HVF;
+# this swaps it for multi-threaded TCG with `-cpu max` and turns on EL2 in
+# the virt machine. Slow, but a faithful arm64 KVM host.
+# Used through QEMU_SYSTEM_AARCH64 (scripts/lima/linux-host.sh).
+real=${QEMU_EL2_REAL:-$(command -v qemu-system-aarch64)}
+# Lima also runs QEMU to probe its features: those keep their arguments.
+case " $* " in
+  *" -pidfile "*|*" -drive "*) ;;
+  *) exec "$real" "$@" ;;
+esac
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -accel)
+      shift; args+=(-accel tcg,thread=multi,tb-size=1024) ;;
+    -cpu)
+      shift; args+=(-cpu max,pauth-impdef=on) ;;
+    -machine|-M)
+      shift; m=$1
+      case "$m" in
+        virt*) m="${m/accel=hvf/accel=tcg},virtualization=on,gic-version=3" ;;
+      esac
+      args+=(-machine "$m") ;;
+    *)
+      args+=("$1") ;;
+  esac
+  shift
+done
+exec "$real" "${args[@]}"

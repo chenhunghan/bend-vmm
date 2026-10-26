@@ -145,11 +145,14 @@ one `IO.fork` per vCPU at the host level.
   the display with virtio keyboard and tablet, and UEFI: edk2 boots Alpine's
   ISO through GRUB, with EFI variables kept in a CFI flash model.
 - Cold boot to a shell about 0.55 s; a snapshot restores in about 30 ms.
+- Linux hosts: host/hvf.c's backends interface has a KVM implementation
+  (vGICv3, PSCI forwarded to the machine by the SMCCC filter, MMIO exits
+  rewritten as data aborts with a valid syndrome), and `scripts/check-host.sh`
+  passes on Ubuntu 24.04 arm64 (run by `scripts/lima/linux-host.sh`; on an
+  M1/M2 Mac the KVM host is emulated by QEMU), snapshots excepted.
 
 ## Next
 
-- Linux host: a KVM twin of host/hvf.c (vCPU run/registers, memory, the
-  in-kernel GIC, irqfd-free SPI levels), checked inside a Lima VM with nested
-  virtualization.
+- Snapshots on KVM (registers by KVM_GET_REG_LIST, the vGIC's state).
 - UEFI: a fw_cfg device (boot order, kernel loading) and a graphics output
   (ramfb) for the firmware's own screens.

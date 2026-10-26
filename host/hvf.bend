@@ -5,7 +5,7 @@ import ../src/vmm/abi.bend as V
 # Hypervisor.framework effects (host/hvf.c) and their typed wrappers.
 # Words cross the boundary as U32; 64-bit values as (hi, lo) pairs.
 
-def Hvf.init(ram_mb: U32, gicd_hi: U32, gicd_lo: U32, gicr_hi: U32, gicr_lo: U32, ram_hi: U32, ram_lo: U32) -> IO(U32):
+def Hvf.init(ram_mb: U32, gicd_hi: U32, gicd_lo: U32, gicr_hi: U32, gicr_lo: U32, ram_hi: U32, ram_lo: U32, cpus: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -239,10 +239,10 @@ def Op.advance_pc() -> U32:
 def Reg.cpsr() -> U32:
   32
 
-def Host.vm_init(ram_mb: U32, gicd: U.U64, gicr: U.U64, ram: U.U64) -> IO(U32):
+def Host.vm_init(ram_mb: U32, gicd: U.U64, gicr: U.U64, ram: U.U64, cpus: U32) -> IO(U32):
   match gicd gicr ram:
     case U.U64{dh, dl} U.U64{rh, rl} U.U64{mh, ml}:
-      Hvf.init(ram_mb, dh, dl, rh, rl, mh, ml)
+      Hvf.init(ram_mb, dh, dl, rh, rl, mh, ml, cpus)
 
 def Host.load(path: String, gpa: U.U64) -> IO(U32):
   match gpa:

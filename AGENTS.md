@@ -6,8 +6,8 @@ When using Bend:
 
 # bend-vmm
 
-A virtual machine monitor for macOS on Apple Silicon, written in Bend. It
-boots arm64 guests (Linux) on Hypervisor.framework. Read docs/DESIGN.md
+A virtual machine monitor for arm64, written in Bend. It boots arm64 guests
+(Linux) on Hypervisor.framework (macOS, Apple Silicon) and KVM (Linux). Read docs/DESIGN.md
 before your first change. `openvmm/` (when present, git-ignored) is a
 reference only: we do not follow its design or API.
 
@@ -15,8 +15,10 @@ reference only: we do not follow its design or API.
 
 - `src/` — the pure VMM: every device model, decoder, loader and the exit
   handler. No IO. Runs and proves on Linux and macOS.
-- `host/` — the macOS layer: C effects over Hypervisor.framework and the
-  `main` that drives vCPUs. Builds only on macOS (Apple Silicon).
+- `host/` — the host layer: C effects over the hypervisor (host/hvf.c:
+  Hypervisor.framework on macOS, KVM on Linux, behind its "Backends"
+  interface) and the `main` that drives vCPUs. Builds on macOS (Apple
+  Silicon) and Linux arm64 (`scripts/build.sh`).
 - `laws/<module>.bend` — the spec of each module, as Bend laws.
 - `proofs/<module>.bend` — the proof of each law, as a def of the same name.
 - `LAWS.bend`, `PROOF.bend` — gather every laws/proofs file.
@@ -86,7 +88,9 @@ scripts/check.sh               # the whole gate (what CI runs)
 scripts/check-native.sh        # every test compiled native, run on all threads
 ```
 
-On macOS only, `scripts/check-mac.sh` builds `host/` and boots guests
+`scripts/check-host.sh` builds `host/` and boots guests on this host's
+hypervisor (macOS or Linux with /dev/kvm; `scripts/lima/linux-host.sh` runs
+it on Linux from a Mac)
 (see docs/DESIGN.md, level 4).
 
 Clean up after every iteration: build outputs live only under `out/`

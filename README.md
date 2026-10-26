@@ -1,14 +1,16 @@
 # bend-vmm
 
-A virtual machine monitor for macOS on Apple Silicon, written in
-[Bend](https://bend-lang.com). It boots arm64 Linux on Hypervisor.framework.
+A virtual machine monitor for arm64, written in
+[Bend](https://bend-lang.com). It boots arm64 Linux on Hypervisor.framework
+(macOS on Apple Silicon) and on KVM (Linux on arm64).
 
 All of the VMM's logic is pure Bend under `src/`: trap decoding, PSCI, the
 device tree, the PL011 UART, the PL031 RTC, virtio (blk, net, console, rng,
 9p), the user-mode network stack, and the exit handler that ties them
 together. Laws state what each module must do, and proofs check them,
 re-checked by a kernel whose soundness is proven in Lean. A simulator runs
-the same code on any OS. A thin C layer (`host/`) drives Hypervisor.framework.
+the same code on any OS. A thin C layer (`host/`) drives the hypervisor:
+Hypervisor.framework on macOS, KVM on Linux, behind one small interface.
 
 ## What it runs
 
@@ -73,6 +75,13 @@ Options:
 | `--control SOCK` | a Unix socket for management commands (below) |
 | `--restore FILE` | start from a snapshot (same disks and shares as when it was taken) |
 
+Linux (KVM): the same binary builds on Linux arm64 (clang, `libx11-dev` for
+`--display`) with `scripts/build.sh`, and runs with `/dev/kvm`. Snapshots are
+macOS-only for now. From a Mac, `scripts/lima/linux-host.sh [command]` makes
+a Lima VM to try it: on M3 and later it nests KVM through
+Virtualization.framework; on M1/M2, which cannot nest, QEMU emulates the
+CPU's virtualization extensions (slow, but a real KVM host).
+
 UEFI:
 
 ```sh
@@ -129,9 +138,10 @@ armed.
 | Tests on the simulator (500+) | `scripts/check.sh` | anywhere, CI |
 | Same tests compiled native, on all threads | `scripts/check-native.sh` | macOS / Linux with clang |
 | Proofs re-checked by the Lean-proven kernel | `VERDICT=1 scripts/check.sh` | CI (`verdict` job) |
-| Real guests on Hypervisor.framework | `scripts/check-mac.sh` | this Mac |
+| Real guests on the host's hypervisor | `scripts/check-host.sh` | macOS (Hypervisor.framework), Linux arm64 (KVM) |
+| The same on a Linux KVM host from a Mac | `scripts/lima/linux-host.sh 'CHECK_SLOW=5 SKIP_NATIVE=1 scripts/check-host.sh'` | a Lima VM |
 
-`scripts/check-mac.sh` boots a bare-metal payload, then Linux (1 and 4 CPUs),
+`scripts/check-host.sh` boots a bare-metal payload, then Linux (1 and 4 CPUs),
 then a busybox userspace that runs an in-guest test suite: disk reads and
 writes, entropy, timers, interrupts, console input, reboot, networking, 9p,
 vsock both ways, pause/resume, snapshot/restore, and the display (a

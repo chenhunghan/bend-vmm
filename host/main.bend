@@ -1187,7 +1187,7 @@ def restore.flash_mode(m: Maybe<&2, M.Machine>) -> IO(U32):
     die_if(U32.is_ne(rc, 0), "cannot read the snapshot (" ++ U32.show(rc) ++ ")")
     saved : List<String> <- H.Hvf.snap_args()
     +o : Opts = restore.opts(saved, now)
-    +vm : U32 <- H.Host.vm_init(Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), ram())
+    +vm : U32 <- H.Host.vm_init(Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), ram(), Opts.cpus(o))
     die_if(U32.is_ne(vm, 0), "cannot create the VM (step " ++ U32.show(vm) ++ ")")
     display.map(display_of(Opts.display(o)))
     restore.flash(String.is_empty(Opts.firmware(o)), o)
@@ -1199,7 +1199,7 @@ def restore.flash_mode(m: Maybe<&2, M.Machine>) -> IO(U32):
 
 @unsafe def boot_fresh(+o: Opts) -> IO(Unit):
   do IO<Unit>:
-    +rc : U32 <- H.Host.vm_init(Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), ram())
+    +rc : U32 <- H.Host.vm_init(Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), ram(), Opts.cpus(o))
     die_if(U32.is_ne(rc, 0), "cannot create the VM (step " ++ U32.show(rc) ++ ")")
     display.map(display_of(Opts.display(o)))
     +kinds : +List<D.DevKind> <- devices(o)

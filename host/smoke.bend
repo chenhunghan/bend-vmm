@@ -15,10 +15,9 @@ def ram() -> U.U64:
 def char_of(x: U.U64) -> String:
   SCon{Char.from_u32((U.U64.lo(x) .&. 255 : U32)), SNil{}}
 
+# Past the trapped store (on KVM the completed MMIO access already moves it).
 def advance(+cpu: U32) -> IO(U32):
-  do IO<U32>:
-    pc : U.U64 <- H.Host.get_reg(cpu, V.Reg.pc())
-    H.Host.set_reg(cpu, V.Reg.pc(), U.U64.add_u32(pc, 4))
+  H.Host.advance_pc(cpu)
 
 # What one exception exit means here: 0 keep going, 1 powered off, 2 unknown.
 def on_exception.pick(dabt: Bool, hvc: Bool, x0: U.U64, xt: U.U64) -> IO(U32):
@@ -69,7 +68,7 @@ def main() -> IO(Unit):
   do IO<Unit>:
     args : List<String> <- IO.args()
     path : String = Maybe.default(&1, String, List.get(&1, String, args, 1n), "tests/guest/hello.bin")
-    rc : U32 <- H.Host.vm_init(64, U.U64{0, 134217728}, U.U64{0, 201326592}, ram())
+    rc : U32 <- H.Host.vm_init(64, U.U64{0, 134217728}, U.U64{0, 201326592}, ram(), 1)
     IO.print_err("vm_init " ++ U32.show(rc))
     n : U32 <- H.Host.load(path, ram())
     IO.print_err("loaded " ++ U32.show(n) ++ " bytes")

@@ -1,4 +1,6 @@
-// bend-vmm host layer: Hypervisor.framework effects for Bend (macOS, arm64).
+// bend-vmm host layer: hypervisor effects for Bend on arm64, over
+// Hypervisor.framework on macOS and KVM on Linux (the "Backends" section;
+// everything else is shared POSIX code).
 //
 // One VM per process. Guest RAM is one anonymous mapping at a fixed IPA.
 // Each vCPU lives on its own pthread, because Hypervisor.framework only
@@ -17,16 +19,33 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <netinet/tcp.h>
+#include <poll.h>
+#include <stdatomic.h>
+#include <signal.h>
+#ifdef __APPLE__
 #include <Hypervisor/Hypervisor.h>
 #include <crt_externs.h>
 #include <mach/mach_time.h>
-#include <poll.h>
-#include <stdatomic.h>
 #include <mach-o/dyld.h>
+#else
+#include <linux/kvm.h>
+#include <sys/ioctl.h>
+#endif
 
 #define HVF_MAX_CPUS 64
+
+#ifdef __APPLE__
+#define HVF_ATIME(st) (st).st_atimespec.tv_sec
+#define HVF_MTIME(st) (st).st_mtimespec.tv_sec
+#define HVF_CTIME(st) (st).st_ctimespec.tv_sec
+#else
+#define HVF_ATIME(st) (st).st_atim.tv_sec
+#define HVF_MTIME(st) (st).st_mtim.tv_sec
+#define HVF_CTIME(st) (st).st_ctim.tv_sec
+#endif
 #define HVF_ERR      0xFFFFFFFFu
 
+#ifdef __APPLE__
 // Hypervisor.framework entry points, resolved once.
 static struct {
   void* lib;
@@ -97,6 +116,8 @@ static int hvf_open(void) {
   return hv.vm_create && hv.gic_create ? 0 : -1;
 }
 
+#endif
+
 // Guest RAM
 // =========
 
@@ -160,8 +181,16 @@ typedef struct {
   size_t          nsaved;
   const uint8_t*  icc;      // GIC CPU registers to restore before the first run
   size_t          nicc;
+#ifdef __APPLE__
   hv_vcpu_t       vcpu;
   hv_vcpu_exit_t* exit;
+#else
+  int             fd;       // the KVM vCPU
+  struct kvm_run* run;
+  pthread_t       tid;      // its thread, for kicks
+  int             in_mmio;  // the last exit was KVM_EXIT_MMIO: the machine's
+                            // X0 write is the load's data, its PC advance KVM's
+#endif
 } HvfCpu;
 
 static HvfCpu hvf_cpus[HVF_MAX_CPUS];
@@ -175,6 +204,25 @@ static void hvf_put64(HvfCpu* c, uint64_t v) {
   c->out[c->nout++] = (uint32_t)v;
 }
 
+// Backends
+// ========
+//
+// The hypervisor behind a small interface, in our register numbering (0..30
+// Xn, 31 PC, 32 CPSR):
+//   vmb_create(gicd, gicr, ncpus)   the VM and its GICv3
+//   vmb_map(host, gpa, size, prot)  guest memory (prot: VMB_R | VMB_W | VMB_X)
+//   vmb_unmap(gpa, size)
+//   vmb_vcpu_create(c, cpu)         on the vCPU's thread
+//   vmb_get(c, r), vmb_set(c, r, v), vmb_advance_pc(c)
+//   vmb_exit(c)                     runs the guest, encodes the exit (hvf_run)
+//   vmb_vtimer_mask(c, on), vmb_spi(intid, level), vmb_kick(c)
+
+enum { VMB_R = 1, VMB_W = 2, VMB_X = 4 };
+
+static uint64_t hvf_ns(void);
+
+#ifdef __APPLE__
+
 static uint64_t hvf_reg(HvfCpu* c, hv_reg_t r) {
   uint64_t v = 0;
   hv.get_reg(c->vcpu, r, &v);
@@ -185,12 +233,263 @@ static hv_reg_t hvf_reg_of(uint64_t r) {
   return r <= 30 ? (hv_reg_t)(HV_REG_X0 + r) : r == 31 ? HV_REG_PC : HV_REG_CPSR;
 }
 
+static uint64_t vmb_get(HvfCpu* c, uint64_t r) {
+  return hvf_reg(c, hvf_reg_of(r));
+}
+
+static int vmb_set(HvfCpu* c, uint64_t r, uint64_t v) {
+  return hv.set_reg(c->vcpu, hvf_reg_of(r), v) == HV_SUCCESS ? 0 : -1;
+}
+
+static void vmb_advance_pc(HvfCpu* c) {
+  hv.set_reg(c->vcpu, HV_REG_PC, hvf_reg(c, HV_REG_PC) + 4);
+}
+
+static int vmb_open(void) {
+  return hvf_open();
+}
+
+static int vmb_create(uint64_t gicd, uint64_t gicr, uint32_t ncpus) {
+  if (hv.vm_create(NULL) != HV_SUCCESS) {
+    return 2;
+  }
+  hv_gic_config_t gic = hv.gic_config_create();
+  if (hv.gic_set_dist(gic, gicd) != HV_SUCCESS || hv.gic_set_redist(gic, gicr) != HV_SUCCESS
+      || hv.gic_create(gic) != HV_SUCCESS) {
+    return 3;
+  }
+  return 0;
+}
+
+static int vmb_map(void* host, uint64_t gpa, uint64_t size, int prot) {
+  hv_memory_flags_t fl = ((prot & VMB_R) ? HV_MEMORY_READ : 0) | ((prot & VMB_W) ? HV_MEMORY_WRITE : 0)
+                         | ((prot & VMB_X) ? HV_MEMORY_EXEC : 0);
+  return hv.vm_map(host, gpa, size, fl) == HV_SUCCESS ? 0 : -1;
+}
+
+static int vmb_unmap(uint64_t gpa, uint64_t size) {
+  return hv.vm_unmap(gpa, size) == HV_SUCCESS ? 0 : -1;
+}
+
+static int vmb_vcpu_create(HvfCpu* c, int cpu) {
+  hv_return_t r = hv.vcpu_create(&c->vcpu, &c->exit, NULL);
+  if (r == HV_SUCCESS) {
+    // Aff0 = cpu index; bit 31 is RES1. The GIC routes by affinity.
+    r = hv.set_sys_reg(c->vcpu, HV_SYS_REG_MPIDR_EL1, (1ull << 31) | (uint64_t)cpu);
+  }
+  return r == HV_SUCCESS ? 0 : (int)r;
+}
+
+static int vmb_vtimer_mask(HvfCpu* c, int on) {
+  return hv.set_vtimer_mask(c->vcpu, on) == HV_SUCCESS ? 0 : -1;
+}
+
+static int vmb_spi(uint32_t intid, int level) {
+  return hv.gic_set_spi(intid, level) == HV_SUCCESS ? 0 : -1;
+}
+
+static int vmb_kick(HvfCpu* c) {
+  return hv.vcpus_exit(&c->vcpu, 1) == HV_SUCCESS ? 0 : -1;
+}
+
+#else // KVM
+
+static int      kvm_fd = -1, kvm_vm = -1, kvm_gic = -1;
+static size_t   kvm_run_size;
+static uint32_t kvm_ncpus;
+
+static uint64_t kvm_core(uint64_t off) {
+  return KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM_CORE | (off / sizeof(uint32_t));
+}
+
+static uint64_t kvm_reg_id(uint64_t r) {
+  return r <= 30 ? kvm_core(offsetof(struct kvm_regs, regs.regs) + 8 * r)
+         : r == 31 ? kvm_core(offsetof(struct kvm_regs, regs.pc))
+                   : kvm_core(offsetof(struct kvm_regs, regs.pstate));
+}
+
+static uint64_t vmb_get(HvfCpu* c, uint64_t r) {
+  uint64_t            v   = 0;
+  struct kvm_one_reg  one = {kvm_reg_id(r), (uint64_t)(uintptr_t)&v};
+  ioctl(c->fd, KVM_GET_ONE_REG, &one);
+  return v;
+}
+
+static int vmb_set(HvfCpu* c, uint64_t r, uint64_t v) {
+  if (c->in_mmio && r == 0) {
+    // the machine answers a trapped load in X0 (SRT 0, see vmb_exit): KVM
+    // writes the real target register from mmio.data on the next KVM_RUN
+    memcpy(c->run->mmio.data, &v, sizeof c->run->mmio.data);
+    return 0;
+  }
+  struct kvm_one_reg one = {kvm_reg_id(r), (uint64_t)(uintptr_t)&v};
+  return ioctl(c->fd, KVM_SET_ONE_REG, &one) == 0 ? 0 : -1;
+}
+
+static void vmb_advance_pc(HvfCpu* c) {
+  if (!c->in_mmio) {
+    vmb_set(c, 31, vmb_get(c, 31) + 4);
+  }
+}
+
+static int vmb_open(void) {
+  if (kvm_fd >= 0) {
+    return 0;
+  }
+  kvm_fd = open("/dev/kvm", O_RDWR | O_CLOEXEC);
+  return kvm_fd >= 0 && ioctl(kvm_fd, KVM_GET_API_VERSION, 0) == KVM_API_VERSION ? 0 : -1;
+}
+
+static void kvm_signal(int sig) {
+  (void)sig;
+}
+
+static int kvm_gic_attr(uint32_t group, uint64_t attr, void* addr) {
+  struct kvm_device_attr a = {0, group, attr, (uint64_t)(uintptr_t)addr};
+  return ioctl(kvm_gic, KVM_SET_DEVICE_ATTR, &a);
+}
+
+// The VM's IPA space is KVM's default 40 bits, so the vCPUs must not claim
+// more: ID_AA64MMFR0_EL1's PARange is clamped to 40 bits and the 52-bit
+// (LPA2) granule claims dropped. A guest that believed them (edk2 does)
+// would build 52-bit page tables. KVM 6.7+ lets userspace lower these
+// fields before the first run; older kernels keep the host's values.
+static void kvm_clamp_pa(HvfCpu* c) {
+  uint64_t           v   = 0;
+  struct kvm_one_reg one = {ARM64_SYS_REG(3, 0, 0, 7, 0), (uint64_t)(uintptr_t)&v};
+  if (ioctl(c->fd, KVM_GET_ONE_REG, &one) != 0) {
+    return;
+  }
+  uint64_t pa = v & 0xf, tgran16 = (v >> 20) & 0xf, tgran4 = (v >> 28) & 0xf;
+  v = (v & ~0xfull) | (pa > 2 ? 2 : pa);
+  if (tgran16 == 2) {
+    v = (v & ~(0xfull << 20)) | (1ull << 20);
+  }
+  if (tgran4 == 1) {
+    v &= ~(0xfull << 28);
+  }
+  if (ioctl(c->fd, KVM_SET_ONE_REG, &one) != 0 && (hvf_trace & 1)) {
+    fprintf(stderr, "[trace] cannot clamp ID_AA64MMFR0_EL1: %s\n", strerror(errno));
+  }
+}
+
+// Every vCPU exists before the vGIC initializes, so all ncpus are created
+// here (their threads come later); PSCI calls go to the machine (the SMCCC
+// filter), as Hypervisor.framework gives them.
+static int vmb_create(uint64_t gicd, uint64_t gicr, uint32_t ncpus) {
+  kvm_vm = ioctl(kvm_fd, KVM_CREATE_VM, 0);
+  if (kvm_vm < 0) {
+    return 2;
+  }
+  kvm_run_size = (size_t)ioctl(kvm_fd, KVM_GET_VCPU_MMAP_SIZE, 0);
+  struct kvm_create_device dev = {KVM_DEV_TYPE_ARM_VGIC_V3, 0, 0};
+  if (ioctl(kvm_vm, KVM_CREATE_DEVICE, &dev) != 0) {
+    return 3;
+  }
+  kvm_gic = (int)dev.fd;
+  if (kvm_gic_attr(KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_VGIC_V3_ADDR_TYPE_DIST, &gicd) != 0
+      || kvm_gic_attr(KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_VGIC_V3_ADDR_TYPE_REDIST, &gicr) != 0) {
+    return 3;
+  }
+  struct kvm_vcpu_init init;
+  if (ioctl(kvm_vm, KVM_ARM_PREFERRED_TARGET, &init) != 0) {
+    return 6;
+  }
+  init.features[0] |= 1u << KVM_ARM_VCPU_PSCI_0_2;
+  kvm_ncpus = ncpus ? ncpus : 1;
+  for (uint32_t i = 0; i < kvm_ncpus && i < HVF_MAX_CPUS; i++) {
+    HvfCpu* c = &hvf_cpus[i];
+    c->fd     = ioctl(kvm_vm, KVM_CREATE_VCPU, (unsigned long)i);
+    if (c->fd < 0 || ioctl(c->fd, KVM_ARM_VCPU_INIT, &init) != 0) {
+      return 7;
+    }
+    c->run = mmap(NULL, kvm_run_size, PROT_READ | PROT_WRITE, MAP_SHARED, c->fd, 0);
+    if (c->run == MAP_FAILED) {
+      return 7;
+    }
+    kvm_clamp_pa(c);
+  }
+  uint32_t nirqs = 256;
+  if (kvm_gic_attr(KVM_DEV_ARM_VGIC_GRP_NR_IRQS, 0, &nirqs) != 0
+      || kvm_gic_attr(KVM_DEV_ARM_VGIC_GRP_CTRL, KVM_DEV_ARM_VGIC_CTRL_INIT, NULL) != 0) {
+    return 8;
+  }
+#ifdef KVM_ARM_VM_SMCCC_FILTER
+  struct kvm_smccc_filter psci32 = {0x84000000u, 32, KVM_SMCCC_FILTER_FWD_TO_USER, {0}};
+  struct kvm_smccc_filter psci64 = {0xC4000000u, 32, KVM_SMCCC_FILTER_FWD_TO_USER, {0}};
+  struct kvm_device_attr  f32    = {0, KVM_ARM_VM_SMCCC_CTRL, KVM_ARM_VM_SMCCC_FILTER, (uint64_t)(uintptr_t)&psci32};
+  struct kvm_device_attr  f64    = {0, KVM_ARM_VM_SMCCC_CTRL, KVM_ARM_VM_SMCCC_FILTER, (uint64_t)(uintptr_t)&psci64};
+  if (ioctl(kvm_vm, KVM_SET_DEVICE_ATTR, &f32) != 0 || ioctl(kvm_vm, KVM_SET_DEVICE_ATTR, &f64) != 0) {
+    return 9;
+  }
+#else
+  return 9;
+#endif
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = kvm_signal;
+  sigaction(SIGUSR1, &sa, NULL);
+  return 0;
+}
+
+// Memory slots by guest base: RAM, the flash banks, the framebuffer.
+static uint32_t kvm_slot(uint64_t gpa) {
+  return gpa == 0 ? 1 : gpa == 0x4000000ull ? 2 : gpa == 0x10000000ull ? 3 : 0;
+}
+
+static int vmb_map(void* host, uint64_t gpa, uint64_t size, int prot) {
+  struct kvm_userspace_memory_region m = {kvm_slot(gpa), (prot & VMB_W) ? 0 : KVM_MEM_READONLY, gpa, size,
+                                          (uint64_t)(uintptr_t)host};
+  return ioctl(kvm_vm, KVM_SET_USER_MEMORY_REGION, &m) == 0 ? 0 : -1;
+}
+
+static int vmb_unmap(uint64_t gpa, uint64_t size) {
+  struct kvm_userspace_memory_region m = {kvm_slot(gpa), 0, gpa, 0, 0};
+  (void)size;
+  return ioctl(kvm_vm, KVM_SET_USER_MEMORY_REGION, &m) == 0 ? 0 : -1;
+}
+
+static int vmb_vcpu_create(HvfCpu* c, int cpu) {
+  if ((uint32_t)cpu >= kvm_ncpus || c->fd <= 0) {
+    return -1;
+  }
+  c->tid = pthread_self();
+  // MPIDR: Aff0 = cpu index (bit 31 RES1), as the device tree numbers CPUs
+  uint64_t           mpidr = (1ull << 31) | (uint64_t)cpu;
+  struct kvm_one_reg one   = {ARM64_SYS_REG(3, 0, 0, 0, 5), (uint64_t)(uintptr_t)&mpidr};
+  ioctl(c->fd, KVM_SET_ONE_REG, &one);
+  return 0;
+}
+
+static int vmb_vtimer_mask(HvfCpu* c, int on) {
+  (void)c;
+  (void)on;
+  return 0; // KVM drives the virtual timer itself
+}
+
+static int vmb_spi(uint32_t intid, int level) {
+  struct kvm_irq_level l;
+  l.irq   = (KVM_ARM_IRQ_TYPE_SPI << KVM_ARM_IRQ_TYPE_SHIFT) | intid;
+  l.level = level ? 1 : 0;
+  return ioctl(kvm_vm, KVM_IRQ_LINE, &l) == 0 ? 0 : -1;
+}
+
+static int vmb_kick(HvfCpu* c) {
+  if (!c->run) {
+    return -1;
+  }
+  c->run->immediate_exit = 1;
+  return pthread_kill(c->tid, SIGUSR1) == 0 ? 0 : -1;
+}
+
+#endif
+
 // Applies one queued register write or PC advance.
 static void hvf_apply(HvfCpu* c, HvfQueued* q) {
   if (q->op == OP_SET_REG) {
-    hv.set_reg(c->vcpu, hvf_reg_of(q->a), q->b);
+    vmb_set(c, q->a, q->b);
   } else if (q->op == OP_ADVANCE_PC) {
-    hv.set_reg(c->vcpu, HV_REG_PC, hvf_reg(c, HV_REG_PC) + 4);
+    vmb_advance_pc(c);
   }
 }
 
@@ -207,9 +506,11 @@ static pthread_mutex_t hvf_gate_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  hvf_gate_cv = PTHREAD_COND_INITIALIZER;
 static int             hvf_paused;
 static int             hvf_running;     // vCPUs inside hv_vcpu_run
-static uint64_t        hvf_pause_start; // mach_absolute_time at pause
+static uint64_t        hvf_pause_start; // the host clock at pause (mach_absolute_time on macOS)
 static int             hvf_save_gen;    // bumped by each snapshot
 static int             hvf_saving;      // vCPU threads still to save
+
+#ifdef __APPLE__
 
 // Every register a snapshot keeps besides X0..X30, PC, CPSR, FPCR, FPSR and
 // Q0..Q31. Registers this macOS lacks fail to read and are skipped.
@@ -310,6 +611,23 @@ static void hvf_load_regs(HvfCpu* c, const uint8_t* blob, size_t size) {
   }
 }
 
+#else
+
+// Snapshots of KVM guests are not supported yet: no registers are kept.
+static void hvf_save_regs(HvfCpu* c) {
+  free(c->saved);
+  c->saved  = NULL;
+  c->nsaved = 0;
+}
+
+static void hvf_load_regs(HvfCpu* c, const uint8_t* blob, size_t size) {
+  (void)c;
+  (void)blob;
+  (void)size;
+}
+
+#endif
+
 // Saves this vCPU's registers when a snapshot asked for them. Called by the
 // vCPU's own thread wherever it waits.
 static void hvf_service(HvfCpu* c) {
@@ -366,6 +684,7 @@ static void hvf_restore_cpu(HvfCpu* c, int cpu) {
 
 // The saved GIC CPU registers (entries of kind 5), on the vCPU's thread.
 static void hvf_restore_icc(HvfCpu* c) {
+#ifdef __APPLE__
   const HvfRegEntry* e = (const HvfRegEntry*)c->icc;
   size_t             n = c->nicc / sizeof *e;
   for (size_t i = 0; hv.set_icc && i < n; i++) {
@@ -373,6 +692,7 @@ static void hvf_restore_icc(HvfCpu* c) {
       hv.set_icc(c->vcpu, (hv_gic_icc_reg_t)(e[i].key & 0xffff), e[i].val);
     }
   }
+#endif
   c->icc  = NULL;
   c->nicc = 0;
 }
@@ -396,11 +716,16 @@ static void hvf_gate(HvfCpu* c) {
   uint64_t start = hvf_pause_start;
   hvf_running++;
   pthread_mutex_unlock(&hvf_gate_mu);
+#ifdef __APPLE__
   if (waited && start) {
     uint64_t off = 0;
     hv.get_vtimer_offset(c->vcpu, &off);
     hv.set_vtimer_offset(c->vcpu, off + (mach_absolute_time() - start));
   }
+#else
+  (void)waited;
+  (void)start;
+#endif
 }
 
 static void hvf_ungate(void) {
@@ -409,6 +734,8 @@ static void hvf_ungate(void) {
   pthread_cond_broadcast(&hvf_gate_cv);
   pthread_mutex_unlock(&hvf_gate_mu);
 }
+
+#ifdef __APPLE__
 
 // Runs the guest until an exit and encodes it as
 // [kind, esr, far, ipa, x0, x1, x2, x3, xt] (each 64-bit value as hi, lo):
@@ -457,6 +784,97 @@ static void hvf_run(HvfCpu* c) {
   }
 }
 
+#else
+
+static void hvf_put_exception(HvfCpu* c, uint64_t esr, uint64_t ipa, const uint64_t x[4], uint64_t xt) {
+  c->out[c->nout++] = 0;
+  hvf_put64(c, esr);
+  hvf_put64(c, 0);
+  hvf_put64(c, ipa);
+  for (int i = 0; i < 4; i++) {
+    hvf_put64(c, x[i]);
+  }
+  hvf_put64(c, xt);
+  if (hvf_trace & 1) {
+    fprintf(stderr, "[trace] esr=%08llx ipa=%09llx x0=%llx xt=%llx pc=%llx\n", (unsigned long long)esr,
+      (unsigned long long)ipa, (unsigned long long)x[0], (unsigned long long)xt,
+      (unsigned long long)vmb_get(c, 31));
+  }
+}
+
+// KVM's exits in Hypervisor.framework's terms, so the machine sees one
+// hypervisor: an MMIO exit becomes a data abort with a valid syndrome (the
+// access size, direction, SRT 0 and the stored value), a forwarded PSCI call
+// an HVC (or SMC) with X0..X3, a PSCI system event (kernels without the
+// SMCCC filter) an HVC of SYSTEM_OFF or SYSTEM_RESET, a signal a cancel.
+static void hvf_run(HvfCpu* c) {
+  hvf_gate(c);
+  c->in_mmio = 0;
+  int r   = ioctl(c->fd, KVM_RUN, 0);
+  int err = errno;
+  hvf_ungate();
+  c->run->immediate_exit = 0;
+  if (r < 0) {
+    if (hvf_trace & 1) {
+      // the guest's EL1 state: ESR, ELR, FAR, SCTLR, TCR, TTBR0, MMFR0
+      static const char* names[] = {"esr", "elr", "far", "sctlr", "tcr", "ttbr0", "mmfr0"};
+      uint64_t           ids[7]  = {ARM64_SYS_REG(3, 0, 5, 2, 0), ARM64_SYS_REG(3, 0, 4, 0, 1),
+                  ARM64_SYS_REG(3, 0, 6, 0, 0), ARM64_SYS_REG(3, 0, 1, 0, 0), ARM64_SYS_REG(3, 0, 2, 0, 2),
+                  ARM64_SYS_REG(3, 0, 2, 0, 0), ARM64_SYS_REG(3, 0, 0, 7, 0)};
+      fprintf(stderr, "[trace] kvm_run: %s, pc=%llx lr=%llx", strerror(err), (unsigned long long)vmb_get(c, 31),
+        (unsigned long long)vmb_get(c, 30));
+      for (int i = 0; i < 7; i++) {
+        uint64_t           v   = 0;
+        struct kvm_one_reg one = {ids[i], (uint64_t)(uintptr_t)&v};
+        ioctl(c->fd, KVM_GET_ONE_REG, &one);
+        fprintf(stderr, " %s=%llx", names[i], (unsigned long long)v);
+      }
+      fprintf(stderr, "\n");
+    }
+    c->out[c->nout++] = err == EINTR || err == EAGAIN ? 2 : 1000 + (uint32_t)err;
+    return;
+  }
+  uint64_t x[4] = {0, 0, 0, 0};
+  switch (c->run->exit_reason) {
+    case KVM_EXIT_MMIO: {
+      uint32_t len = c->run->mmio.len;
+      uint64_t sas = len == 1 ? 0 : len == 2 ? 1 : len == 4 ? 2 : 3;
+      uint64_t esr = (0x24ull << 26) | (1ull << 25) | (1ull << 24) | (sas << 22) | (len == 8 ? 1ull << 15 : 0)
+                     | (c->run->mmio.is_write ? 1ull << 6 : 0);
+      uint64_t xt = 0;
+      if (c->run->mmio.is_write) {
+        memcpy(&xt, c->run->mmio.data, len <= 8 ? len : 8);
+      }
+      c->in_mmio = 1;
+      hvf_put_exception(c, esr, c->run->mmio.phys_addr, x, xt);
+      break;
+    }
+    case KVM_EXIT_HYPERCALL: {
+      int smc = 0;
+#ifdef KVM_HYPERCALL_EXIT_SMC
+      smc = (c->run->hypercall.flags & KVM_HYPERCALL_EXIT_SMC) != 0;
+#endif
+      for (int i = 0; i < 4; i++) {
+        x[i] = vmb_get(c, (uint64_t)i);
+      }
+      hvf_put_exception(c, ((smc ? 0x17ull : 0x16ull) << 26) | (1ull << 25), 0, x, 0);
+      break;
+    }
+    case KVM_EXIT_SYSTEM_EVENT:
+      x[0] = c->run->system_event.type == KVM_SYSTEM_EVENT_RESET ? 0x84000009u : 0x84000008u;
+      hvf_put_exception(c, (0x16ull << 26) | (1ull << 25), 0, x, 0);
+      break;
+    case KVM_EXIT_INTR:
+      c->out[c->nout++] = 2;
+      break;
+    default:
+      c->out[c->nout++] = 3 + c->run->exit_reason;
+      break;
+  }
+}
+
+#endif
+
 static void hvf_do(HvfCpu* c, int cpu) {
   c->nout = 0;
   pthread_mutex_lock(&c->mu);
@@ -474,35 +892,29 @@ static void hvf_do(HvfCpu* c, int cpu) {
         c->out[c->nout++] = 0;
         break;
       }
-      hv_return_t r = hv.vcpu_create(&c->vcpu, &c->exit, NULL);
-      if (r == HV_SUCCESS) {
-        // Aff0 = cpu index; bit 31 is RES1. The GIC routes by affinity.
-        r = hv.set_sys_reg(c->vcpu, HV_SYS_REG_MPIDR_EL1, (1ull << 31) | (uint64_t)cpu);
+      int r = vmb_vcpu_create(c, cpu);
+      if (r == 0) {
         c->created = 1;
         pthread_mutex_lock(&hvf_gate_mu);
         c->saved_gen = hvf_save_gen;
         pthread_mutex_unlock(&hvf_gate_mu);
         hvf_restore_cpu(c, cpu);
       }
-      c->out[c->nout++] = r == HV_SUCCESS ? 0 : (uint32_t)r;
+      c->out[c->nout++] = (uint32_t)r;
       break;
     }
     case OP_RUN:
       hvf_run(c);
       break;
-    case OP_SET_REG: {
+    case OP_SET_REG:
       // a: our register number (0..30 Xn, 31 PC, 32 CPSR), b: value
-      hv_reg_t reg = c->a <= 30 ? (hv_reg_t)(HV_REG_X0 + c->a) : c->a == 31 ? HV_REG_PC : HV_REG_CPSR;
-      c->out[c->nout++] = hv.set_reg(c->vcpu, reg, c->b) == HV_SUCCESS ? 0 : HVF_ERR;
+      c->out[c->nout++] = vmb_set(c, c->a, c->b) == 0 ? 0 : HVF_ERR;
       break;
-    }
-    case OP_GET_REG: {
-      hv_reg_t reg = c->a <= 30 ? (hv_reg_t)(HV_REG_X0 + c->a) : c->a == 31 ? HV_REG_PC : HV_REG_CPSR;
-      hvf_put64(c, hvf_reg(c, reg));
+    case OP_GET_REG:
+      hvf_put64(c, vmb_get(c, c->a));
       break;
-    }
     case OP_SET_VTIMER_MASK:
-      c->out[c->nout++] = hv.set_vtimer_mask(c->vcpu, c->a != 0) == HV_SUCCESS ? 0 : HVF_ERR;
+      c->out[c->nout++] = vmb_vtimer_mask(c, c->a != 0) == 0 ? 0 : HVF_ERR;
       break;
   }
 }
@@ -517,11 +929,17 @@ static inline void hvf_relax(void) {
 }
 
 static uint64_t hvf_ns(void) {
+#ifdef __APPLE__
   static mach_timebase_info_data_t tb;
   if (!tb.denom) {
     mach_timebase_info(&tb);
   }
   return mach_absolute_time() * tb.numer / tb.denom;
+#else
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+#endif
 }
 
 static void* hvf_thread(void* arg) {
@@ -564,21 +982,16 @@ static void* hvf_thread(void* arg) {
 // Effects
 // =======
 
-// Hvf.init(ram_mb, gicd_hi, gicd_lo, gicr_hi, gicr_lo, ram_hi, ram_lo) -> U32:
-// creates the VM, its GICv3 and RAM. 0 on success, else a step code.
+// Hvf.init(ram_mb, gicd_hi, gicd_lo, gicr_hi, gicr_lo, ram_hi, ram_lo, cpus)
+// -> U32: creates the VM, its GICv3 and RAM. 0 on success, else a step code.
 Term hvf_init_run(Env e, Term* f, IoWork* w) {
-  if (hvf_open() != 0) {
+  if (vmb_open() != 0) {
     return (Term)1;
   }
   hvf_trace = getenv("BEND_VMM_TRACE") ? atoi(getenv("BEND_VMM_TRACE")) : 0;
-  if (hv.vm_create(NULL) != HV_SUCCESS) {
-    return (Term)2;
-  }
-  hv_gic_config_t gic = hv.gic_config_create();
-  if (hv.gic_set_dist(gic, hvf_u64(f[1], f[2])) != HV_SUCCESS
-      || hv.gic_set_redist(gic, hvf_u64(f[3], f[4])) != HV_SUCCESS
-      || hv.gic_create(gic) != HV_SUCCESS) {
-    return (Term)3;
+  int rc = vmb_create(hvf_u64(f[1], f[2]), hvf_u64(f[3], f[4]), (u32)f[7]);
+  if (rc != 0) {
+    return (Term)(u32)rc;
   }
   hvf_ram_size = (uint64_t)(u32)f[0] << 20;
   hvf_ram_base = hvf_u64(f[5], f[6]);
@@ -593,8 +1006,7 @@ Term hvf_init_run(Env e, Term* f, IoWork* w) {
   if (hvf_ram == MAP_FAILED) {
     return (Term)4;
   }
-  if (hv.vm_map(hvf_ram, hvf_ram_base, hvf_ram_size,
-        HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC) != HV_SUCCESS) {
+  if (vmb_map(hvf_ram, hvf_ram_base, hvf_ram_size, VMB_R | VMB_W | VMB_X) != 0) {
     return (Term)5;
   }
   return (Term)0;
@@ -637,7 +1049,11 @@ static struct {
 // size, or -1.
 static int64_t hvf_gunzip(uint8_t* src, uint64_t n, uint8_t* dst, uint64_t room) {
   if (!hvf_z.lib) {
+#ifdef __APPLE__
     hvf_z.lib = dlopen("/usr/lib/libz.1.dylib", RTLD_NOW);
+#else
+    hvf_z.lib = dlopen("libz.so.1", RTLD_NOW);
+#endif
     if (!hvf_z.lib) {
       return -1;
     }
@@ -710,9 +1126,30 @@ Term hvf_reexec_run(Env e, Term* f, IoWork* w) {
   uint32_t size = sizeof path;
   hvf_tty_restore();
   fflush(stdout);
+#ifdef __APPLE__
   if (_NSGetExecutablePath(path, &size) == 0) {
     execv(path, *_NSGetArgv());
   }
+#else
+  // argv from /proc/self/cmdline (NUL-separated)
+  (void)size;
+  static char args[65536];
+  int         fd = open("/proc/self/cmdline", O_RDONLY);
+  ssize_t     n  = fd >= 0 ? read(fd, args, sizeof args - 1) : -1;
+  if (fd >= 0) {
+    close(fd);
+  }
+  if (n > 0 && readlink("/proc/self/exe", path, sizeof path - 1) > 0) {
+    path[sizeof path - 1] = 0;
+    char* argv[1024];
+    int   argc = 0;
+    for (ssize_t at = 0; at < n && argc < 1023; at += (ssize_t)strlen(args + at) + 1) {
+      argv[argc++] = args + at;
+    }
+    argv[argc] = NULL;
+    execv(path, argv);
+  }
+#endif
   return (Term)HVF_ERR;
 }
 
@@ -833,11 +1270,11 @@ Term hvf_vcpu_queue_run(Env e, Term* f, IoWork* w) {
 
 // Hvf.irq(intid, level) -> U32: sets an SPI's level (0 low, else high).
 Term hvf_irq_run(Env e, Term* f, IoWork* w) {
-  hv_return_t r = hv.gic_set_spi((u32)f[0], (u32)f[1] != 0);
+  int r = vmb_spi((u32)f[0], (u32)f[1] != 0);
   if (hvf_trace & 2) {
     fprintf(stderr, "[trace] irq %u -> %u (%d)\n", (u32)f[0], (u32)f[1], r);
   }
-  return (Term)(r == HV_SUCCESS ? 0 : HVF_ERR);
+  return (Term)(r == 0 ? 0 : HVF_ERR);
 }
 
 // Hvf.kick(cpu) -> U32: forces a running vCPU out of the guest.
@@ -846,7 +1283,7 @@ Term hvf_kick_run(Env e, Term* f, IoWork* w) {
   if (cpu >= HVF_MAX_CPUS || !hvf_cpus[cpu].live) {
     return (Term)HVF_ERR;
   }
-  return (Term)(hv.vcpus_exit(&hvf_cpus[cpu].vcpu, 1) == HV_SUCCESS ? 0 : HVF_ERR);
+  return (Term)(vmb_kick(&hvf_cpus[cpu]) == 0 ? 0 : HVF_ERR);
 }
 
 // Console and disks
@@ -1242,7 +1679,9 @@ Term hvf_tcp_connect_run(Env e, Term* f, IoWork* w) {
   }
   fcntl(fd, F_SETFL, O_NONBLOCK);
   int one = 1;
+#ifdef SO_NOSIGPIPE
   setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
   struct sockaddr_in a = hvf_addr((u32)f[1], (u32)f[2]);
   if (connect(fd, (struct sockaddr*)&a, sizeof a) != 0 && errno != EINPROGRESS) {
@@ -1424,7 +1863,11 @@ Term hvf_udp_recv_run(Env e, Term* f, IoWork* w) {
 //   [7, bsize, blocks, bfree, bavail, files, ffree (64-bit as hi, lo)]
 
 #include <dirent.h>
+#ifdef __APPLE__
 #include <sys/mount.h>
+#else
+#include <sys/vfs.h>
+#endif
 #include <limits.h>
 
 #define HVF_MAX_SHARES 8
@@ -1565,9 +2008,9 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
       hvf_w64(&out, (uint64_t)st.st_size);
       hvf_w64(&out, (uint64_t)st.st_ino);
       hvf_w64(&out, (uint64_t)st.st_blocks);
-      hvf_w64(&out, (uint64_t)st.st_atimespec.tv_sec);
-      hvf_w64(&out, (uint64_t)st.st_mtimespec.tv_sec);
-      hvf_w64(&out, (uint64_t)st.st_ctimespec.tv_sec);
+      hvf_w64(&out, (uint64_t)HVF_ATIME(st));
+      hvf_w64(&out, (uint64_t)HVF_MTIME(st));
+      hvf_w64(&out, (uint64_t)HVF_CTIME(st));
       res = hvf_fs_done(e, &out);
     }
   } else if (op == 1) {
@@ -1695,7 +2138,7 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
 static void hvf_kick_all(void) {
   for (int i = 0; i < HVF_MAX_CPUS; i++) {
     if (hvf_cpus[i].live && hvf_cpus[i].created) {
-      hv.vcpus_exit(&hvf_cpus[i].vcpu, 1);
+      vmb_kick(&hvf_cpus[i]);
     }
   }
 }
@@ -1707,7 +2150,11 @@ Term hvf_pause_run(Env e, Term* f, IoWork* w) {
   int was = hvf_paused;
   if (!was) {
     hvf_paused      = 1;
+#ifdef __APPLE__
     hvf_pause_start = mach_absolute_time();
+#else
+    hvf_pause_start = hvf_ns();
+#endif
   }
   pthread_mutex_unlock(&hvf_gate_mu);
   hvf_kick_all();
@@ -1771,6 +2218,7 @@ static int hvf_put_ram(int fd, off_t at) {
 //   args (u64 length, NUL-separated argv), machine (u64 count, u32 words),
 //   GIC state (u64 size, bytes), per vCPU (u64 size, register entries; 0 when
 //   absent), then RAM at the next 16 KiB boundary. 0, or an errno.
+#ifdef __APPLE__
 Term hvf_snap_write_run(Env e, Term* f, IoWork* w) {
   u64   n;
   char* path = io_cstr(e, f[0], &n);
@@ -1870,6 +2318,14 @@ Term hvf_snap_write_run(Env e, Term* f, IoWork* w) {
   free(gic);
   return (Term)(u32)err;
 }
+#else
+Term hvf_snap_write_run(Env e, Term* f, IoWork* w) {
+  (void)e;
+  (void)f;
+  (void)w;
+  return (Term)(u32)ENOTSUP; // snapshots of KVM guests: not yet
+}
+#endif
 
 static int hvf_get(int fd, void* p, size_t n) {
   return read(fd, p, n) == (ssize_t)n ? 0 : -1;
@@ -1958,7 +2414,11 @@ Term hvf_snap_gic_run(Env e, Term* f, IoWork* w) {
   if (!hvf_snap.ngic) {
     return (Term)0;
   }
+#ifdef __APPLE__
   return (Term)(hv.gic_set_state && hv.gic_set_state(hvf_snap.gic, hvf_snap.ngic) == HV_SUCCESS ? 0 : HVF_ERR);
+#else
+  return (Term)HVF_ERR;
+#endif
 }
 
 // The control socket
@@ -2091,7 +2551,9 @@ Term hvf_unix_connect_run(Env e, Term* f, IoWork* w) {
   }
   fcntl(fd, F_SETFL, O_NONBLOCK);
   int one = 1;
+#ifdef SO_NOSIGPIPE
   setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
   if (connect(fd, (struct sockaddr*)&a, sizeof a) != 0 && errno != EINPROGRESS) {
     int err = errno;
     close(fd);
@@ -2140,7 +2602,9 @@ static Term hvf_vs_accept(Env e, IoWork* w) {
   }
   fcntl(c, F_SETFL, O_NONBLOCK);
   int one = 1;
+#ifdef SO_NOSIGPIPE
   setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
   w->hand = c;
   w->made = 0;
   return hvf_vs_line(e, w);
@@ -2241,8 +2705,8 @@ Term hvf_fw_load_run(Env e, Term* f, IoWork* w) {
       rc = 1;
     } else if (vars[0] && (hvf_flash_file(vars, hvf_flash1) != 0 || (hvf_vars_fd = open(vars, O_RDWR)) < 0)) {
       rc = 2;
-    } else if (hv.vm_map(hvf_flash0, 0, HVF_FLASH_SIZE, HV_MEMORY_READ | HV_MEMORY_EXEC) != HV_SUCCESS
-               || hv.vm_map(hvf_flash1, HVF_FLASH1_BASE, HVF_FLASH_SIZE, HV_MEMORY_READ) != HV_SUCCESS) {
+    } else if (vmb_map(hvf_flash0, 0, HVF_FLASH_SIZE, VMB_R | VMB_X) != 0
+               || vmb_map(hvf_flash1, HVF_FLASH1_BASE, HVF_FLASH_SIZE, VMB_R) != 0) {
       rc = 3;
     } else {
       hvf_flash1_mapped = 1;
@@ -2294,9 +2758,9 @@ Term hvf_flash_run(Env e, Term* f, IoWork* w) {
       return (Term)0;
     case 3:
       if (a && !hvf_flash1_mapped) {
-        hvf_flash1_mapped = hv.vm_map(hvf_flash1, HVF_FLASH1_BASE, HVF_FLASH_SIZE, HV_MEMORY_READ) == HV_SUCCESS;
+        hvf_flash1_mapped = vmb_map(hvf_flash1, HVF_FLASH1_BASE, HVF_FLASH_SIZE, VMB_R) == 0;
       } else if (!a && hvf_flash1_mapped) {
-        hvf_flash1_mapped = hv.vm_unmap(HVF_FLASH1_BASE, HVF_FLASH_SIZE) != HV_SUCCESS;
+        hvf_flash1_mapped = vmb_unmap(HVF_FLASH1_BASE, HVF_FLASH_SIZE) != 0;
       }
       return (Term)0;
   }
@@ -2329,7 +2793,7 @@ Term hvf_fb_init_run(Env e, Term* f, IoWork* w) {
     hvf_fb = NULL;
     return (Term)2;
   }
-  if (hv.vm_map(hvf_fb, HVF_FB_BASE, HVF_FB_SIZE, HV_MEMORY_READ | HV_MEMORY_WRITE) != HV_SUCCESS) {
+  if (vmb_map(hvf_fb, HVF_FB_BASE, HVF_FB_SIZE, VMB_R | VMB_W) != 0) {
     return (Term)3;
   }
   hvf_fb_w = fw;
