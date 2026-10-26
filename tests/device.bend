@@ -134,7 +134,29 @@ def ids() -> IO(Unit):
     T.eq_u32("device blk capacity high", rd(b, 260), 0)
     T.ok("device irq low", Bool.not(D.Dev.irq(r)))
 
+# DeviceFeatures words (selector 1, then 0) and the id and capacity of a kind.
+def feats(k: D.DevKind) -> V.Op<+List<U32>, +List<U32>>:
+  do V.Op<+List<U32>, +List<U32>>:
+    +d : D.Dev <- D.Dev.write(+List<U32>, D.Dev.new(k), 20, 1)
+    +hi : U32 = rd(d, 16)
+    +d : D.Dev <- D.Dev.write(+List<U32>, d, 20, 0)
+    return [hi, rd(d, 16), rd(d, 8), rd(d, 256)]
+
+def feats_of(r: Maybe<&1, S.Sim & +List<U32>>) -> +List<U32>:
+  match r:
+    case None{}:
+      []
+    case Some{(s, xs)}:
+      xs
+
+def kinds() -> IO(Unit):
+  do IO<Unit>:
+    T.eq_str("device rng features hi, lo, id, config", show(feats_of(S.Sim.exec(+List<U32>, mem(), feats(D.RngKind{})))), "[1, 0, 4, 0]")
+    T.eq_str("device blk features hi, lo, id, capacity", show(feats_of(S.Sim.exec(+List<U32>, mem(), feats(D.BlkKind{0, u64(2048)})))), "[1, 512, 2, 2048]")
+    T.eq_str("device blk ro features hi, lo, id, capacity", show(feats_of(S.Sim.exec(+List<U32>, mem(), feats(D.BlkRoKind{0, u64(2048)})))), "[1, 544, 2, 2048]")
+
 def main() -> IO(Unit):
   do IO<Unit>:
     ids()
+    kinds()
     check(S.Sim.exec(Out, mem(), probe()))

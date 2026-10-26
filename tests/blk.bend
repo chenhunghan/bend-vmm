@@ -5,6 +5,7 @@ import ../src/vmm/abi.bend as V
 import ../src/vmm/sim.bend as S
 import ../src/virtio/queue.bend as Q
 import ../src/virtio/blk.bend as K
+import ../src/virtio/device.bend as D
 import ./t.bend as T
 
 # virtio-blk requests on the simulator. Layout (decimal): memory 4096..20480;
@@ -138,10 +139,10 @@ def get_id() -> IO(Unit):
   +s = S.Sim.write(machine(t, 1, [0]), u64(16384), hdr(8, 0))
   check("blk get_id", run(s), 16400, cat(id(), [0]), used(1, [0, 21]), True{}, 1, disk())
 
-# 5. FLUSH (type 4) is not offered: UNSUPP, data untouched.
+# 5. An unknown type (5): UNSUPP, data untouched.
 def unsupported() -> IO(Unit):
   +t = cat(desc(16384, 16, 1, 1), cat(desc(16400, 4, 3, 2), desc(16404, 1, 2, 0)))
-  +s = S.Sim.write(machine(t, 1, [0]), u64(16384), hdr(4, 0))
+  +s = S.Sim.write(machine(t, 1, [0]), u64(16384), hdr(5, 0))
   check("blk unsupported", run(s), 16400, [0, 0, 0, 0, 2], used(1, [0, 1]), True{}, 1, disk())
 
 # 6. IN sector 3, 1024 bytes: ends past capacity (4 sectors): IOERR.
@@ -177,6 +178,70 @@ def no_status() -> IO(Unit):
   +s = S.Sim.write(machine(desc(16384, 16, 0, 0), 1, [0]), u64(16384), hdr(0, 0))
   check("blk no status", run(s), 16384, hdr(0, 0), used(1, [0, 0]), True{}, 1, disk())
 
+def run_ro(s: S.Sim) -> Maybe<&1, S.Sim & (Q.Vq & Bool)>:
+  S.Sim.exec(Q.Vq & Bool, s, K.Blk.serve(Q.Vq & Bool, 0, u64(4), True{}, queue()))
+
+def run_rw(s: S.Sim) -> Maybe<&1, S.Sim & (Q.Vq & Bool)>:
+  S.Sim.exec(Q.Vq & Bool, s, K.Blk.serve(Q.Vq & Bool, 0, u64(4), False{}, queue()))
+
+def run_dev(k: D.DevKind, s: S.Sim) -> Maybe<&1, S.Sim & (Q.Vq & Bool)>:
+  S.Sim.exec(Q.Vq & Bool, s, D.Dev.process(Q.Vq & Bool, k, queue()))
+
+# The number of flushes the run made (99 when it did not run).
+def flushes(r: Maybe<&1, S.Sim & (Q.Vq & Bool)>) -> U32:
+  match r:
+    case None{}:
+      99
+    case Some{(s, x)}:
+      U32.from_nat(S.Sim.flushes(s))
+
+def feats(f: U.U64) -> +List<U32>:
+  match f:
+    case U.U64{h, l}:
+      [h, l]
+
+# A FLUSH request: header and status (16400).
+def flush_sim() -> S.Sim:
+  +t = cat(desc(16384, 16, 1, 1), desc(16400, 1, 2, 0))
+  S.Sim.write(machine(t, 1, [0]), u64(16384), hdr(4, 0))
+
+# 11. FLUSH (type 4): one Op.disk_flush, status OK, used length 1.
+def flush() -> IO(Unit):
+  +s = flush_sim()
+  do IO<Unit>:
+    check("blk flush", run(s), 16400, [0], used(1, [0, 1]), True{}, 1, disk())
+    T.eq_u32("blk flush count", flushes(run(s)), 1)
+    T.eq_u32("blk flush count ro", flushes(run_ro(s)), 1)
+    T.eq_u32("blk no flush on IN", flushes(run(S.Sim.write(s, u64(16384), hdr(0, 0)))), 0)
+
+# The OUT request of test 3: 512 bytes of 171 to sector 3.
+def out_sim() -> S.Sim:
+  +t = cat(desc(16384, 16, 1, 1), cat(desc(16400, 512, 1, 2), desc(16912, 1, 2, 0)))
+  +s = S.Sim.write(machine(t, 1, [0]), u64(16384), hdr(1, 3))
+  S.Sim.write(s, u64(16400), List.replicate(U32, 512n, 171))
+
+# 12. OUT on a read-only disk: IOERR, disk unchanged; on a read-write one
+# through Blk.serve: written.
+def out_ro() -> IO(Unit):
+  +s = out_sim()
+  +written = cat(slice(disk(), 0n, 1536n), List.replicate(U32, 512n, 171))
+  do IO<Unit>:
+    check("blk ro write", run_ro(s), 16912, [1], used(1, [0, 1]), True{}, 1, disk())
+    check("blk serve rw write", run_rw(s), 16912, [0], used(1, [0, 1]), True{}, 1, written)
+    check("blk dev ro write", run_dev(D.BlkRoKind{0, u64(4)}, s), 16912, [1], used(1, [0, 1]), True{}, 1, disk())
+    check("blk dev rw write", run_dev(D.BlkKind{0, u64(4)}, s), 16912, [0], used(1, [0, 1]), True{}, 1, written)
+
+# 13. IN and GET_ID on a read-only disk are served as usual.
+def in_ro() -> IO(Unit):
+  +t = cat(desc(16384, 16, 1, 1), cat(desc(16400, 512, 3, 2), desc(16912, 1, 2, 0)))
+  +s = S.Sim.write(machine(t, 1, [0]), u64(16384), hdr(0, 1))
+  +u = cat(desc(16384, 16, 1, 1), cat(desc(16400, 20, 3, 2), desc(16420, 1, 2, 0)))
+  +g = S.Sim.write(machine(u, 1, [0]), u64(16384), hdr(8, 0))
+  do IO<Unit>:
+    check("blk ro read", run_ro(s), 16400, cat(slice(disk(), 512n, 512n), [0]), used(1, [0, 513]), True{}, 1, disk())
+    check("blk dev ro read", run_dev(D.BlkRoKind{0, u64(4)}, s), 16400, cat(slice(disk(), 512n, 512n), [0]), used(1, [0, 513]), True{}, 1, disk())
+    check("blk ro get_id", run_ro(g), 16400, cat(id(), [0]), used(1, [0, 21]), True{}, 1, disk())
+
 def main() -> IO(Unit):
   do IO<Unit>:
     T.eq_str("blk config", show(K.Blk.config(U.U64{1, 2})), "[2, 0, 0, 0, 1, 0, 0, 0]")
@@ -190,3 +255,8 @@ def main() -> IO(Unit):
     two()
     empty()
     no_status()
+    flush()
+    out_ro()
+    in_ro()
+    T.eq_str("blk features rw", show(feats(K.Blk.features(False{}))), "[1, 512]")
+    T.eq_str("blk features ro", show(feats(K.Blk.features(True{}))), "[1, 544]")

@@ -10,10 +10,13 @@ import ./blk.bend as Blk
 # A virtio-mmio device: the transport register model plus the device logic
 # behind it, as the machine sees it.
 #
-# Both kinds offer exactly VIRTIO_F_VERSION_1 (feature bit 32) and one queue
-# of 256 entries:
-#   RngKind: device id 4, empty config space
-#   BlkKind: device id 2, config space Blk.config(sectors)
+# Every kind offers VIRTIO_F_VERSION_1 (feature bit 32) and one queue of 256
+# entries:
+#   RngKind:   device id 4, empty config space, no other feature
+#   BlkKind:   device id 2, config space Blk.config(sectors), also
+#              VIRTIO_BLK_F_FLUSH (Blk.features(False))
+#   BlkRoKind: a read-only BlkKind, also VIRTIO_BLK_F_RO
+#              (Blk.features(True)); OUT requests answer IOERR
 #
 # Writes go to the transport (M.VirtioMmio.write), then:
 #   DeviceReset: the queue list empties
@@ -26,11 +29,12 @@ import ./blk.bend as Blk
 type DevKind is Data:
   RngKind{}
   BlkKind{disk: U32, sectors: U.U64}
+  BlkRoKind{disk: U32, sectors: U.U64}
 
 type Dev is Data:
   Dev{kind: DevKind, mmio: M.VirtioMmio, queues: +List<Q.Vq>}
 
-# VIRTIO_F_VERSION_1: bit 32, so bit 0 of the high word.
+# VIRTIO_F_VERSION_1: bit 32, so bit 0 of the high word (the rng features).
 def Dev.features() -> U.U64:
   U.U64{1, 0}
 
@@ -40,7 +44,9 @@ def Dev.mmio(kind: DevKind) -> M.VirtioMmio:
     case RngKind{}:
       M.VirtioMmio.new(4, Dev.features(), 1n, 256, [])
     case BlkKind{disk, sectors}:
-      M.VirtioMmio.new(2, Dev.features(), 1n, 256, Blk.Blk.config(sectors))
+      M.VirtioMmio.new(2, Blk.Blk.features(False{}), 1n, 256, Blk.Blk.config(sectors))
+    case BlkRoKind{disk, sectors}:
+      M.VirtioMmio.new(2, Blk.Blk.features(True{}), 1n, 256, Blk.Blk.config(sectors))
 
 def Dev.new(kind: DevKind) -> Dev:
   +kind = kind
@@ -100,6 +106,8 @@ def Dev.process(-R: Type, k: DevKind, q: Q.Vq) -> V.Op<R, Q.Vq & Bool>:
       Rng.Rng.process(R, q)
     case BlkKind{disk, sectors}:
       Blk.Blk.process(R, disk, sectors, q)
+    case BlkRoKind{disk, sectors}:
+      Blk.Blk.serve(R, disk, sectors, True{}, q)
 
 def Dev.notify.fin(k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, sel: U32, r: Q.Vq & Bool) -> Dev:
   match r:
