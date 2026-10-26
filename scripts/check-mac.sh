@@ -49,7 +49,8 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   scripts/guest-assets.sh >/dev/null || { red "guest assets failed"; exit 1; }
   dd if=/dev/zero of=out/guest/disk.img bs=1m count=8 2>/dev/null
   printf 'BEND-DISK-SECTOR0' | dd of=out/guest/disk.img conv=notrunc 2>/dev/null
-  out=$( (perl -e 'alarm 180; exec @ARGV' ./out/bend-vmm --mem 1024 --cpus 2 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk out/guest/disk.img --cmdline "console=ttyAMA0 bendtest bendcpus=2") 2>&1 )
+  cp out/guest/disk.img out/guest/disk2.img
+  out=$( (perl -e 'alarm 180; exec @ARGV' ./out/bend-vmm --mem 1024 --cpus 2 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk out/guest/disk.img,out/guest/disk2.img:ro --cmdline "console=ttyAMA0 bendtest bendcpus=2") 2>&1 )
   if grep -q GUEST-TESTS-DONE <<<"$out" && ! grep -q "GUEST-TEST FAIL" <<<"$out"; then
     grn "ok: guest tests ($(grep -c 'GUEST-TEST PASS' <<<"$out") passed, $(grep -c 'GUEST-TEST SKIP' <<<"$out") skipped)"
   else

@@ -362,20 +362,44 @@ def put(mc: Chan(M.Machine), m: M.Machine) -> IO(Unit):
 def base_devices() -> +List<D.DevKind>:
   [D.RngKind{}, D.ConsoleKind{}, D.NetKind{[82, 84, 0, 18, 52, 86]}]
 
-def devices.open(+id: U32) -> IO(+List<D.DevKind>):
-  do IO<+List<D.DevKind>>:
-    die_if(U32.is_eq(id, err()), "cannot open the disk image")
+# One disk image: "path" (read-write) or "path:ro" (read-only).
+def devices.kind(ro: Bool, +id: U32, sectors: U.U64) -> D.DevKind:
+  match ro:
+    case True{}:
+      D.BlkRoKind{id, sectors}
+    case False{}:
+      D.BlkKind{id, sectors}
+
+def devices.open(ro: Bool, +id: U32) -> IO(D.DevKind):
+  do IO<D.DevKind>:
+    die_if(U32.is_eq(id, err()), "cannot open a disk image")
     size : U.U64 <- H.Host.disk_size(id)
-    return [D.BlkKind{id, U.U64.shr(9n, size)}]
+    return devices.kind(ro, id, U.U64.shr(9n, size))
+
+def devices.one(+spec: String) -> IO(D.DevKind):
+  +ro = String.ends_with(spec, ":ro")
+  path : String = Bool.pick(String, ro, String.take(spec, Nat.sub(String.length(spec), 3n)), spec)
+  do IO<D.DevKind>:
+    id : U32 <- H.Hvf.disk_open(path)
+    devices.open(ro, id)
+
+# --disk a.img,b.img:ro gives one virtio-blk per image, in order.
+def devices.disks(specs: List<&2, String>) -> IO(+List<D.DevKind>):
+  match specs:
+    case Nil{}:
+      IO.pure(+List<D.DevKind>, [])
+    case Con{spec, rest}:
+      do IO<+List<D.DevKind>>:
+        k : D.DevKind <- devices.one(spec)
+        ks : +List<D.DevKind> <- devices.disks(rest)
+        return k <> ks
 
 def devices.disk(none: Bool, disk: String) -> IO(+List<D.DevKind>):
   match none:
     case True{}:
       IO.pure(+List<D.DevKind>, [])
     case False{}:
-      do IO<+List<D.DevKind>>:
-        id : U32 <- H.Hvf.disk_open(disk)
-        devices.open(id)
+      devices.disks(String.split(disk, ','))
 
 def devices.share(none: Bool, dir: String) -> IO(+List<D.DevKind>):
   match none:

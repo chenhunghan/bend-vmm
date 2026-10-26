@@ -15,8 +15,13 @@ the same code on any OS. A thin C layer (`host/`) drives Hypervisor.framework.
 - Linux kernels as `Image` or gzip-compressed `vmlinuz` (Debian, Ubuntu), with
   an initramfs, up to 64 vCPUs (one host thread each), GICv3 and the arch timer
   in Hypervisor.framework.
-- Serial console (PL011, `ttyAMA0`) with interactive input; `Ctrl-A x` quits.
-- virtio-blk disks (read-write or read-only, FLUSH), virtio-rng, the RTC.
+- Serial console (PL011, `ttyAMA0`) with interactive input; `Ctrl-A x` quits;
+  also virtio-console (`hvc0`).
+- Networking with no root or entitlements: virtio-net behind a user-mode NAT
+  written in Bend (DHCP, DNS, TCP, UDP, ping to the gateway; the host is
+  10.0.2.2).
+- Host directory sharing over virtio-9p (9P2000.L).
+- virtio-blk disks (read-write or read-only, FLUSH), virtio-rng, the PL031 RTC.
 - Reboot (`reboot` in the guest restarts the VM) and power-off.
 
 ## Build and run
@@ -39,7 +44,8 @@ Options:
 | `--cmdline "…"` | kernel command line (default `console=ttyAMA0 earlycon=pl011,0x9000000`) |
 | `--mem MiB` | guest RAM (default 512) |
 | `--cpus N` | vCPUs (default 1) |
-| `--disk FILE` | a raw disk image as virtio-blk (`/dev/vda`) |
+| `--disk A[,B:ro…]` | raw disk images as virtio-blk (`/dev/vda`, `/dev/vdb`, …); `:ro` attaches one read-only |
+| `--share DIR` | a host directory over virtio-9p (`mount -t 9p -o trans=virtio,version=9p2000.L share /mnt`) |
 | `--payload FILE` | a bare-metal binary entered at the start of RAM |
 
 Debugging: `BEND_VMM_TRACE=1` prints every trapped exit, `=2` console input

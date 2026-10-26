@@ -18,6 +18,13 @@ else
   skip blk "no /dev/vda"
 fi
 
+# a second disk, attached read-only
+if [ -b /dev/vdb ]; then
+  check blk-ro-flag [ "$(cat /sys/block/vdb/ro)" = 1 ]
+  check blk-ro-read [ "$(head -c 17 /dev/vdb)" = "BEND-DISK-SECTOR0" ]
+  if echo x | dd of=/dev/vdb bs=512 seek=9 conv=fsync 2>/dev/null; then fail blk-ro-write "a write succeeded"; else pass blk-ro-write; fi
+fi
+
 # virtio-rng
 if [ -e /dev/hwrng ] && grep -q virtio /sys/class/misc/hw_random/rng_current 2>/dev/null; then
   check rng [ "$(dd if=/dev/hwrng bs=16 count=1 2>/dev/null | wc -c)" = 16 ]
