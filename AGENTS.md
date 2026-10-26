@@ -21,7 +21,7 @@ reference only: we do not follow its design or API.
 - `proofs/<module>.bend` — the proof of each law, as a def of the same name.
 - `LAWS.bend`, `PROOF.bend` — gather every laws/proofs file.
 - `tests/<name>.bend` — executable tests; each prints PASS/FAIL lines.
-- `laws/DONE` — modules whose laws are all proven (the ratchet).
+- `laws/done/<module>` — marker: the module's laws are all proven (the ratchet).
 - `scripts/check.sh` — the gate (typing, ratchet, tests). CI runs it.
 
 ## Rules
@@ -36,9 +36,12 @@ reference only: we do not follow its design or API.
    contract is wrong, stop and say why in the PR instead of working around it.
 4. Prove every law of your module in `proofs/<module>.bend`: `def L.<law>`
    for `law <law>` (see proofs/lib.bend). Concrete laws usually close with
-   `{==}`; general ones need induction and rewrites (`bend guide`).
-5. When `bend proofs/<module>.bend` prints ALL PROOFS CHECK, add the module
-   to `laws/DONE` in the same PR.
+   `{==}`; general ones need induction and rewrites (`bend guide`). If a
+   general law resists a real attempt, leave it open (no def), do not add the
+   done marker, and explain in the PR what blocks it. Concrete laws and
+   frozen tests must always pass.
+5. When `bend proofs/<module>.bend` prints ALL PROOFS CHECK, add the marker
+   file `laws/done/<module>` (containing the module name) in the same PR.
 6. `scripts/check.sh` must pass before you push. `bend PROOF.bend` may still
    report open TODOs of other modules, but no other error.
 7. Never use `@unsafe` (or `?`-suffixed defs) in `src/`. Only `host/` may.

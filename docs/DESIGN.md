@@ -80,8 +80,8 @@ Bend runs (CI on Linux); level 4 needs this Mac.
 2. **Laws.** `laws/<module>.bend` states the spec: concrete laws (exact
    register values, exact DTB bytes checked against `dtc`, exact syndrome
    decodes from the Arm ARM) and general laws (round-trips, invariants).
-   `proofs/<module>.bend` proves them. `laws/DONE` is a ratchet: a finished
-   module must stay fully proven.
+   `proofs/<module>.bend` proves them. `laws/done/<module>` markers are a
+   ratchet: a finished module must stay fully proven.
 3. **Simulation tests.** `tests/<name>.bend` runs devices and the exit
    handler on the simulator: virtqueues over fake guest memory, MMIO
    sequences a Linux driver performs, scripted exit traces. Tests headed

@@ -1,0 +1,3 @@
+One empty-ish marker file per finished module: laws/done/<module> holds the
+module name. scripts/check.sh requires `bend proofs/<module>.bend` to prove
+completely for each marker. Markers are never removed.

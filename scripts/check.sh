@@ -4,12 +4,12 @@
 #
 #   1. Typing: `bend PROOF.bend` either proves everything or fails only on
 #      open TODOs (unproven laws, unwritten bodies). Any other error fails.
-#   2. Ratchet: every module named in laws/DONE proves completely on its own
-#      (`bend proofs/<module>.bend` prints ALL PROOFS CHECK). A module enters
-#      DONE when its PR closes its last TODO, and never leaves it.
+#   2. Ratchet: every module with a marker laws/done/<module> proves completely
+#      on its own (`bend proofs/<module>.bend` prints ALL PROOFS CHECK). A PR
+#      adds the marker when it closes the module's last TODO; it never leaves.
 #   3. Tests: every tests/<name>.bend runs (in parallel) and prints only PASS
 #      lines. A test whose imports still hold TODOs is PENDING, which is an
-#      error once its module (same name) is in DONE.
+#      error once its module (same name) is done.
 #
 # Usage: scripts/check.sh [--strict]   (--strict: no TODO may remain anywhere)
 set -uo pipefail
@@ -23,7 +23,7 @@ grn() { printf '\033[32m%s\033[0m\n' "$*"; }
 
 # A bend run that only reports open TODOs.
 only_todos() { grep -q '^Error: [0-9]* TODOs\? found\.' <<<"$1" && ! grep -q '^- expected\|^- message' <<<"$1"; }
-is_done() { grep -qx "$1" laws/DONE 2>/dev/null; }
+is_done() { [ -f "laws/done/$1" ]; }
 
 echo "== 1. typing (bend PROOF.bend)"
 out=$(bend PROOF.bend 2>&1)
@@ -37,13 +37,13 @@ else
   red "PROOF.bend does not type-check:"; echo "$out"; fail=1
 fi
 
-echo "== 2. ratchet (laws/DONE)"
-while read -r m; do
-  [ -z "$m" ] && continue
-  case "$m" in \#*) continue;; esac
+echo "== 2. ratchet (laws/done/)"
+for f in laws/done/*; do
+  m=$(basename "$f")
+  [ "$m" = README ] && continue
   out=$(bend "proofs/$m.bend" 2>&1)
   if grep -q '^ALL PROOFS CHECK' <<<"$out"; then grn "done: $m"; else red "regressed: $m"; echo "$out" | head -20; fail=1; fi
-done < <(cat laws/DONE 2>/dev/null)
+done
 
 echo "== 3. tests"
 tmp=$(mktemp -d)

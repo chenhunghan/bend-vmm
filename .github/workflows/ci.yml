@@ -30,11 +30,9 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           git fetch --no-tags origin "$GITHUB_BASE_REF"
-          # Every line of every existing law file must survive: removals or
-          # edits in laws/ (other than laws/DONE additions) fail the build.
-          removed=$(git diff "origin/$GITHUB_BASE_REF"...HEAD -- laws ':!laws/DONE' | grep '^-[^-]' || true)
+          # Every line of every existing law file must survive, and no
+          # laws/done marker may go: removals or edits fail the build.
+          removed=$(git diff "origin/$GITHUB_BASE_REF"...HEAD -- laws | grep '^-[^-]' || true)
           if [ -n "$removed" ]; then echo "laws/ lines removed or changed:"; echo "$removed"; exit 1; fi
-          removed_done=$(git diff "origin/$GITHUB_BASE_REF"...HEAD -- laws/DONE | grep '^-[^-]' || true)
-          if [ -n "$removed_done" ]; then echo "modules removed from laws/DONE:"; echo "$removed_done"; exit 1; fi
           frozen=$(git diff --name-only "origin/$GITHUB_BASE_REF"...HEAD -- tests | while read -r f; do git show "origin/$GITHUB_BASE_REF:$f" 2>/dev/null | grep -l 'FROZEN SPEC' >/dev/null && echo "$f"; done)
           if [ -n "$frozen" ]; then echo "frozen tests changed: $frozen"; exit 1; fi
