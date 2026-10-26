@@ -33,6 +33,38 @@ def Hvf.kick(cpu: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.file_size(path: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.out(bytes: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.stdin(max: U32) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.random(len: U32) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.disk_open(path: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.disk_size(disk: U32) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.disk_read(disk: U32, off_hi: U32, off_lo: U32, len: U32) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.disk_write(disk: U32, off_hi: U32, off_lo: U32, bytes: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 # vCPU request codes (host/hvf.c).
 def Op.create() -> U32:
   0
@@ -121,3 +153,18 @@ def Host.run(cpu: U32) -> IO(V.RawExit):
   do IO<V.RawExit>:
     +ws : +List<U32> <- Hvf.vcpu(cpu, Op.run(), 0, 0, 0, 0)
     return Host.decode_exit(ws)
+
+def Host.disk_read(disk: U32, off: U.U64, len: U32) -> IO(+List<U32>):
+  match off:
+    case U.U64{h, l}:
+      Hvf.disk_read(disk, h, l, len)
+
+def Host.disk_write(disk: U32, off: U.U64, bytes: +List<U32>) -> IO(U32):
+  match off:
+    case U.U64{h, l}:
+      Hvf.disk_write(disk, h, l, bytes)
+
+def Host.disk_size(disk: U32) -> IO(U.U64):
+  do IO<U.U64>:
+    +ws : +List<U32> <- Hvf.disk_size(disk)
+    return U.U64{Host.first(ws), Host.first(List.drop(&2, U32, ws, 1n))}

@@ -271,6 +271,16 @@ Term hvf_load_run(Env e, Term* f, IoWork* w) {
   return (Term)(dst && got == (uint64_t)st.st_size && got < HVF_ERR ? (u32)got : HVF_ERR);
 }
 
+// Hvf.file_size(path) -> U32: a file's size, or 0xFFFFFFFF (also past 4 GiB).
+Term hvf_file_size_run(Env e, Term* f, IoWork* w) {
+  u64         n;
+  char*       path = io_cstr(e, f[0], &n);
+  struct stat st;
+  int         ok = stat(path, &st) == 0 && st.st_size < HVF_ERR;
+  free(path);
+  return (Term)(ok ? (u32)st.st_size : HVF_ERR);
+}
+
 // Hvf.write(gpa_hi, gpa_lo, bytes) -> U32: 0, or 0xFFFFFFFF outside RAM.
 Term hvf_write_run(Env e, Term* f, IoWork* w) {
   u64   n;
@@ -347,6 +357,105 @@ Term hvf_kick_run(Env e, Term* f, IoWork* w) {
   return (Term)(hv.vcpus_exit(&hvf_cpus[cpu].vcpu, 1) == HV_SUCCESS ? 0 : HVF_ERR);
 }
 
+// Console and disks
+// =================
+
+// Hvf.out(bytes) -> U32: writes raw bytes to stdout (guest console output is
+// bytes, not text: IO.write would re-encode them as UTF-8).
+Term hvf_out_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* buf = io_cbuf(e, f[0], &n, CID(Con));
+  if (buf == NULL) {
+    return (Term)HVF_ERR;
+  }
+  io_sync();
+  io_out(stdout, buf, n);
+  io_sync();
+  free(buf);
+  return (Term)0;
+}
+
+// Hvf.stdin(max) -> List<U32>: up to max bytes typed on stdin, without
+// blocking ([] when none are waiting).
+Term hvf_stdin_run(Env e, Term* f, IoWork* w) {
+  static int nonblock;
+  if (!nonblock) {
+    fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
+    nonblock = 1;
+  }
+  char    buf[256];
+  u64     max = (u32)f[0] < sizeof buf ? (u32)f[0] : sizeof buf;
+  ssize_t k   = read(0, buf, max);
+  return k > 0 ? io_list(e, buf, (u64)k) : term_pak(CID(Nil), 0);
+}
+
+// Hvf.random(len) -> List<U32>: len bytes from the host's entropy source.
+Term hvf_random_run(Env e, Term* f, IoWork* w) {
+  u64      n   = (u32)f[0];
+  uint8_t* buf = io_mem(malloc(n ? n : 1));
+  arc4random_buf(buf, n);
+  Term xs = io_list(e, (const char*)buf, n);
+  free(buf);
+  return xs;
+}
+
+#define HVF_MAX_DISKS 8
+static int hvf_disks[HVF_MAX_DISKS];
+static int hvf_ndisks;
+
+// Hvf.disk_open(path) -> U32: opens a disk image read-write; its index, or
+// 0xFFFFFFFF.
+Term hvf_disk_open_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* path = io_cstr(e, f[0], &n);
+  int   fd   = hvf_ndisks < HVF_MAX_DISKS ? open(path, O_RDWR) : -1;
+  free(path);
+  if (fd < 0) {
+    return (Term)HVF_ERR;
+  }
+  hvf_disks[hvf_ndisks] = fd;
+  return (Term)(u32)hvf_ndisks++;
+}
+
+static int hvf_disk(Term id) {
+  u32 i = (u32)id;
+  return i < (u32)hvf_ndisks ? hvf_disks[i] : -1;
+}
+
+// Hvf.disk_size(disk) -> List<U32>: [hi, lo] of its size in bytes.
+Term hvf_disk_size_run(Env e, Term* f, IoWork* w) {
+  struct stat st;
+  int         fd = hvf_disk(f[0]);
+  uint64_t    sz = fd >= 0 && fstat(fd, &st) == 0 ? (uint64_t)st.st_size : 0;
+  uint32_t    ws[2] = {(uint32_t)(sz >> 32), (uint32_t)sz};
+  return hvf_words(e, ws, 2);
+}
+
+// Hvf.disk_read(disk, off_hi, off_lo, len) -> List<U32>: the bytes there,
+// short at the end of the image.
+Term hvf_disk_read_run(Env e, Term* f, IoWork* w) {
+  int      fd  = hvf_disk(f[0]);
+  u64      n   = (u32)f[3];
+  uint8_t* buf = io_mem(malloc(n ? n : 1));
+  ssize_t  k   = fd >= 0 ? pread(fd, buf, n, (off_t)hvf_u64(f[1], f[2])) : -1;
+  Term     xs  = io_list(e, (const char*)buf, k > 0 ? (u64)k : 0);
+  free(buf);
+  return xs;
+}
+
+// Hvf.disk_write(disk, off_hi, off_lo, bytes) -> U32: 0, or 0xFFFFFFFF.
+Term hvf_disk_write_run(Env e, Term* f, IoWork* w) {
+  int   fd = hvf_disk(f[0]);
+  u64   n;
+  char* buf = io_cbuf(e, f[3], &n, CID(Con));
+  if (buf == NULL) {
+    return (Term)HVF_ERR;
+  }
+  ssize_t k = fd >= 0 ? pwrite(fd, buf, n, (off_t)hvf_u64(f[1], f[2])) : -1;
+  free(buf);
+  return (Term)(k == (ssize_t)n ? 0 : HVF_ERR);
+}
+
 // Effects the program never calls have no id; register only the used ones.
 static void __attribute__((constructor)) hvf_use(void) {
 #ifdef CID(Hvf.init)
@@ -369,5 +478,29 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.kick)
   io_eff(CID(Hvf.kick), hvf_kick_run);
+#endif
+#ifdef CID(Hvf.file_size)
+  io_eff(CID(Hvf.file_size), hvf_file_size_run);
+#endif
+#ifdef CID(Hvf.out)
+  io_eff(CID(Hvf.out), hvf_out_run);
+#endif
+#ifdef CID(Hvf.stdin)
+  io_eff(CID(Hvf.stdin), hvf_stdin_run);
+#endif
+#ifdef CID(Hvf.random)
+  io_eff(CID(Hvf.random), hvf_random_run);
+#endif
+#ifdef CID(Hvf.disk_open)
+  io_eff(CID(Hvf.disk_open), hvf_disk_open_run);
+#endif
+#ifdef CID(Hvf.disk_size)
+  io_eff(CID(Hvf.disk_size), hvf_disk_size_run);
+#endif
+#ifdef CID(Hvf.disk_read)
+  io_eff(CID(Hvf.disk_read), hvf_disk_read_run);
+#endif
+#ifdef CID(Hvf.disk_write)
+  io_eff(CID(Hvf.disk_write), hvf_disk_write_run);
 #endif
 }
