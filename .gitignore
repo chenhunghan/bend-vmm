@@ -1,0 +1,7 @@
+openvmm/
+/out/
+*.c.out
+/vmm
+/vmm.c
+*.gpu
+.DS_Store
