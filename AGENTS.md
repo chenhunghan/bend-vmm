@@ -68,6 +68,12 @@ reference only: we do not follow its design or API.
   any Base def with its signature.
 - Operators need a type: `(a + b : U32)`, `(x .&. 255 : U32)`, `(x >> 8n : U32)`.
 - A pair is `A & B`, built `(a, b)`; destructure it in a helper's `match`.
+- Parallel lets run on real threads only in native builds, and Bend 2.0.39's
+  native runtime can fail on some of them ("frontier drained without a
+  result") while `bend file.bend` (the sequential JS lane) passes. Bind every
+  argument of a parallel call to a variable first (`+st = status(s)`, then
+  `a b = f(s, st) g(st)`), and run `scripts/check-native.sh` (macOS or Linux
+  with clang) before pushing a parallel let.
 - Code that touches guest memory is written in `V.Op<R, A>` (src/vmm/abi.bend)
   with `do V.Op<R, A>:` blocks; tests run it on the simulator (src/vmm/sim.bend).
 
@@ -77,6 +83,7 @@ reference only: we do not follow its design or API.
 bend proofs/<module>.bend      # your module's laws
 bend tests/<module>.bend       # your module's tests
 scripts/check.sh               # the whole gate (what CI runs)
+scripts/check-native.sh        # every test compiled native, run on all threads
 ```
 
 On macOS only, `scripts/check-mac.sh` builds `host/` and boots guests

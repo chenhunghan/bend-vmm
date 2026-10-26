@@ -267,13 +267,15 @@ def VirtioMmio.read(s: VirtioMmio, off: U32, size: U32) -> VirtioMmio & U32:
   +s = s
   (s, Mmio.peek(s, off, size))
 
-# The new state and the event are independent: compute them in parallel.
+# The new state and the event are independent, but stay sequential: as a
+# parallel let this tripped a race in Bend 2.0.39's multithreaded native
+# runtime ("frontier drained without a result"; see AGENTS.md).
 def VirtioMmio.write(s: VirtioMmio, off: U32, v: U32) -> VirtioMmio & MmioEvent:
   +s = s
   +off = off
   +v = v
-  ns e = Mmio.next(s, off, v) Mmio.event(Mmio.status(s), off, v)
-  (ns, e)
+  e = Mmio.event(Mmio.status(s), off, v)
+  (Mmio.next(s, off, v), e)
 
 # The configuration of queue q, if it exists.
 def VirtioMmio.queue(s: VirtioMmio, q: U32) -> Maybe<&2, QueueCfg>:

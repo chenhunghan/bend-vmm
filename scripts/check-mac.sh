@@ -19,6 +19,9 @@ expect() {
   if grep -q -- "$pat" <<<"$out"; then grn "ok: $name"; else red "failed: $name"; echo "$out" | tail -20; fail=1; fi
 }
 
+echo "== native tests"
+scripts/check-native.sh 2 | tail -1 | grep -q "CHECK-NATIVE OK" || { red "native tests failed (scripts/check-native.sh)"; fail=1; }
+
 echo "== build"
 for g in tests/guest/*.S; do scripts/guest.sh "$(basename "$g" .S)" >/dev/null || fail=1; done
 scripts/build-mac.sh host/smoke.bend out/smoke >/dev/null || { red "smoke build failed"; exit 1; }

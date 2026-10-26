@@ -91,6 +91,9 @@ Bend runs (CI on Linux); level 4 needs this Mac.
    handler on the simulator: virtqueues over fake guest memory, MMIO
    sequences a Linux driver performs, scripted exit traces. Tests headed
    FROZEN SPEC are architect-owned.
+3b. **Native runtime.** `scripts/check-native.sh` compiles every test and
+   runs it several times on all threads: parallel lets only run in parallel
+   natively, and the native runtime has failed where the JS lane passed.
 4. **Hardware-in-the-loop (macOS).** `scripts/check-mac.sh` builds and signs
    the host, then (a) runs tiny bare-metal arm64 payloads (tests/guest/) that
    poke the UART, PSCI and virtio, and asserts on the serial log, and (b)

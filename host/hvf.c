@@ -117,6 +117,9 @@ typedef struct {
 
 static HvfCpu hvf_cpus[HVF_MAX_CPUS];
 
+// BEND_VMM_TRACE=1 prints every exception exit on stderr.
+static int hvf_trace;
+
 static void hvf_put64(HvfCpu* c, uint64_t v) {
   c->out[c->nout++] = (uint32_t)(v >> 32);
   c->out[c->nout++] = (uint32_t)v;
@@ -152,6 +155,13 @@ static void hvf_run(HvfCpu* c) {
       uint32_t srt = (uint32_t)(esr >> 16) & 31;
       int isv = (esr >> 24) & 1;
       hvf_put64(c, isv && srt != 31 ? hvf_reg(c, (hv_reg_t)(HV_REG_X0 + srt)) : 0);
+      if (hvf_trace) {
+        fprintf(stderr, "[trace] esr=%08llx ipa=%09llx x0=%llx xt=%llx pc=%llx\n",
+          (unsigned long long)esr, (unsigned long long)c->exit->exception.physical_address,
+          (unsigned long long)hvf_reg(c, HV_REG_X0),
+          (unsigned long long)(isv && srt != 31 ? hvf_reg(c, (hv_reg_t)(HV_REG_X0 + srt)) : 0),
+          (unsigned long long)hvf_reg(c, HV_REG_PC));
+      }
       break;
     }
     case HV_EXIT_REASON_VTIMER_ACTIVATED:
@@ -225,6 +235,7 @@ Term hvf_init_run(Env e, Term* f, IoWork* w) {
   if (hvf_open() != 0) {
     return (Term)1;
   }
+  hvf_trace = getenv("BEND_VMM_TRACE") != NULL;
   if (hv.vm_create(NULL) != HV_SUCCESS) {
     return (Term)2;
   }
