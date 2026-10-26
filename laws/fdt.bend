@@ -34,8 +34,10 @@ law fdt.boot_cpuid:
   # boot_cpuid_phys is header word 7 (bytes 28..31).
   {B.Bytes.slice(F.Fdt.build(F.Node{"", [], []}, 3), 28n, 4n) == [0, 0, 0, 3] : +List<U32>}
 
-# General: every blob is a whole number of 4-byte words.
-law fdt.word_aligned:
+# General: every blob starts with the DTB magic 0xd00dfeed. (An earlier
+# law claimed every blob is word-aligned; it was false: the strings block is
+# not padded, as fdt.sample's 186-byte blob shows.)
+law fdt.magic:
   for root: F.Node
   for cpu: U32
-  {Nat.mod(List.length(&2, U32, F.Fdt.build(root, cpu)), 4n) == 0n : Nat}
+  {B.Bytes.slice(F.Fdt.build(root, cpu), 0n, 4n) == [208, 13, 254, 237] : +List<U32>}
