@@ -118,6 +118,15 @@ def Hvf.udp_recv(sport: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
+# Shared directories for virtio-9p (host/fs.bend wraps these).
+def Hvf.share_open(path: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.fs(share: U32, op: U32, path: String, path2: String, a_hi: U32, a_lo: U32, b: U32, bytes: +List<U32>) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
 # vCPU request codes (host/hvf.c).
 def Op.create() -> U32:
   0

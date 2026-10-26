@@ -33,3 +33,5 @@ io_eff(CID(Hvf.tcp_shutdown), hvf_unavailable);
 io_eff(CID(Hvf.tcp_close), hvf_unavailable);
 io_eff(CID(Hvf.udp_send), hvf_unavailable);
 io_eff(CID(Hvf.udp_recv), () => ({ $: CID(Nil) }));
+io_eff(CID(Hvf.share_open), hvf_unavailable);
+io_eff(CID(Hvf.fs), () => ({ $: CID(Con), head: 1, tail: { $: CID(Con), head: 78, tail: { $: CID(Nil) } } }));

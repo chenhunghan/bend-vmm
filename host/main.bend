@@ -8,6 +8,7 @@ import ../src/virtio/device.bend as D
 import ../src/boot/image.bend as I
 import ../src/boot/dtb.bend as T
 import ./hvf.bend as H
+import ./fs.bend as Fs
 
 # bend-vmm: boots an arm64 Linux kernel (or a bare-metal payload) on
 # Hypervisor.framework. All machine logic is the pure src/vmm/machine.bend;
@@ -182,8 +183,9 @@ def put(mc: Chan(M.Machine), m: M.Machine) -> IO(Unit):
       # Wired to host sockets once the NAT lands (src/net/nat.bend).
       interp(cpu, mc, done, A, next)
     case V.VmFs{sh, op, k}:
-      # Wired to the shared directory once virtio-9p lands (src/fs/p9.bend).
-      interp(cpu, mc, done, A, k(V.FsErr{78}))
+      do IO<A>:
+        r : V.FsResult <- Fs.Host.fs(sh, op)
+        interp(cpu, mc, done, A, k(r))
 
 # Bytes typed on the host console go to the UART: this loop parks on stdin
 # and hands each chunk to the machine. An idle guest may never exit (the GIC

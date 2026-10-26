@@ -969,6 +969,285 @@ Term hvf_udp_recv_run(Env e, Term* f, IoWork* w) {
   return io_wait_on(w, k->fd, POLLIN, 0, hvf_udp_recv_more);
 }
 
+// Shared directories (the host end of virtio-9p)
+// ==============================================
+//
+// Paths from the guest are relative to a share root, components separated by
+// "/", none empty, "." or "..". An operation resolves the parent directory
+// with realpath and refuses it unless it lies inside the root (so a symlink
+// cannot lead out), and never follows a symlink in the final component.
+// Answers are word lists (host/hvf.bend decodes them):
+//   [0] ok   [1, errno]   [2, mode, uid, gid, nlink, size, ino, blocks, atime,
+//   mtime, ctime (64-bit values as hi, lo)]   [3, bytes...]   [4, count]
+//   [5, (ino hi, ino lo, type, name length, name bytes...)*]   [6, target...]
+//   [7, bsize, blocks, bfree, bavail, files, ffree (64-bit as hi, lo)]
+
+#include <dirent.h>
+#include <sys/mount.h>
+#include <limits.h>
+
+#define HVF_MAX_SHARES 8
+static char* hvf_shares[HVF_MAX_SHARES];
+static int   hvf_nshares;
+
+// Hvf.share_open(path) -> U32: a share index, or 0xFFFFFFFF.
+Term hvf_share_open_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* path = io_cstr(e, f[0], &n);
+  char* real = realpath(path, NULL);
+  free(path);
+  if (!real || hvf_nshares >= HVF_MAX_SHARES) {
+    free(real);
+    return (Term)HVF_ERR;
+  }
+  hvf_shares[hvf_nshares] = real;
+  return (Term)(u32)hvf_nshares++;
+}
+
+static int hvf_rel_ok(const char* p) {
+  if (p[0] == 0) {
+    return 1;
+  }
+  const char* c = p;
+  for (;;) {
+    const char* end = strchr(c, '/');
+    size_t      len = end ? (size_t)(end - c) : strlen(c);
+    if (len == 0 || (len == 1 && c[0] == '.') || (len == 2 && c[0] == '.' && c[1] == '.')) {
+      return 0;
+    }
+    if (!end) {
+      return 1;
+    }
+    c = end + 1;
+  }
+}
+
+// The host path for rel in share sh, in out (PATH_MAX); 0 on success or an errno.
+static int hvf_resolve(u32 sh, const char* rel, char* out) {
+  if (sh >= (u32)hvf_nshares || !hvf_rel_ok(rel)) {
+    return EINVAL;
+  }
+  const char* root = hvf_shares[sh];
+  if (rel[0] == 0) {
+    snprintf(out, PATH_MAX, "%s", root);
+    return 0;
+  }
+  char        parent[PATH_MAX];
+  const char* slash = strrchr(rel, '/');
+  if (slash) {
+    snprintf(parent, sizeof parent, "%s/%.*s", root, (int)(slash - rel), rel);
+  } else {
+    snprintf(parent, sizeof parent, "%s", root);
+  }
+  char real[PATH_MAX];
+  if (!realpath(parent, real)) {
+    return errno;
+  }
+  size_t rl = strlen(root);
+  if (strncmp(real, root, rl) != 0 || (real[rl] != 0 && real[rl] != '/')) {
+    return EACCES;
+  }
+  snprintf(out, PATH_MAX, "%s/%s", real, slash ? slash + 1 : rel);
+  return 0;
+}
+
+typedef struct {
+  uint32_t* w;
+  u64       n, cap;
+} HvfWords;
+
+static void hvf_w(HvfWords* b, uint32_t x) {
+  if (b->n == b->cap) {
+    b->cap = b->cap ? b->cap * 2 : 64;
+    b->w   = io_mem(realloc(b->w, b->cap * sizeof(uint32_t)));
+  }
+  b->w[b->n++] = x;
+}
+
+static void hvf_w64(HvfWords* b, uint64_t x) {
+  hvf_w(b, (uint32_t)(x >> 32));
+  hvf_w(b, (uint32_t)x);
+}
+
+static Term hvf_fs_done(Env e, HvfWords* b) {
+  Term t = hvf_words(e, b->w, b->n);
+  free(b->w);
+  return t;
+}
+
+static Term hvf_fs_err(Env e, int err) {
+  uint32_t ws[2] = {1, (uint32_t)err};
+  return hvf_words(e, ws, 2);
+}
+
+static Term hvf_fs_ok(Env e) {
+  uint32_t ok = 0;
+  return hvf_words(e, &ok, 1);
+}
+
+static int hvf_dir_cmp(const void* a, const void* b) {
+  return strcmp(*(char* const*)a, *(char* const*)b);
+}
+
+// Hvf.fs(share, op, path, path2, a_hi, a_lo, b, bytes) -> List<U32>.
+// op: 0 stat, 1 list(from = a_lo, max = b), 2 read(offset a, len b),
+// 3 write(offset a, bytes), 4 create(mode b), 5 mkdir(mode b),
+// 6 remove(dir = b), 7 rename(to path2), 8 truncate(size a), 9 chmod(mode b),
+// 10 symlink(target path2), 11 readlink, 12 statfs.
+Term hvf_fs_run(Env e, Term* f, IoWork* w) {
+  u32      sh = (u32)f[0], op = (u32)f[1];
+  u64      n1, n2, nb;
+  char*    rel   = io_cstr(e, f[2], &n1);
+  char*    rel2  = io_cstr(e, f[3], &n2);
+  uint64_t a     = hvf_u64(f[4], f[5]);
+  u32      b     = (u32)f[6];
+  char*    bytes = io_cbuf(e, f[7], &nb, CID(Con));
+  char     path[PATH_MAX], path2[PATH_MAX];
+  HvfWords out   = {0};
+  Term     res;
+  int      err   = hvf_resolve(sh, rel, path);
+  if (!err && (op == 7)) {
+    err = hvf_resolve(sh, rel2, path2);
+  }
+  if (err) {
+    res = hvf_fs_err(e, err);
+  } else if (op == 0) {
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+      res = hvf_fs_err(e, errno);
+    } else {
+      hvf_w(&out, 2);
+      hvf_w(&out, st.st_mode);
+      hvf_w(&out, st.st_uid);
+      hvf_w(&out, st.st_gid);
+      hvf_w(&out, (uint32_t)st.st_nlink);
+      hvf_w64(&out, (uint64_t)st.st_size);
+      hvf_w64(&out, (uint64_t)st.st_ino);
+      hvf_w64(&out, (uint64_t)st.st_blocks);
+      hvf_w64(&out, (uint64_t)st.st_atimespec.tv_sec);
+      hvf_w64(&out, (uint64_t)st.st_mtimespec.tv_sec);
+      hvf_w64(&out, (uint64_t)st.st_ctimespec.tv_sec);
+      res = hvf_fs_done(e, &out);
+    }
+  } else if (op == 1) {
+    DIR* d = opendir(path);
+    if (!d) {
+      res = hvf_fs_err(e, errno);
+    } else {
+      char**         names = NULL;
+      size_t         cnt = 0, cap = 0;
+      struct dirent* de;
+      while ((de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) {
+          continue;
+        }
+        if (cnt == cap) {
+          cap   = cap ? cap * 2 : 32;
+          names = io_mem(realloc(names, cap * sizeof(char*)));
+        }
+        names[cnt++] = strdup(de->d_name);
+      }
+      closedir(d);
+      qsort(names, cnt, sizeof(char*), hvf_dir_cmp);
+      hvf_w(&out, 5);
+      for (size_t i = (size_t)(u32)a; i < cnt && i < (size_t)(u32)a + b; i++) {
+        char        p[PATH_MAX];
+        struct stat st;
+        snprintf(p, sizeof p, "%s/%s", path, names[i]);
+        int ok = lstat(p, &st) == 0;
+        hvf_w64(&out, ok ? (uint64_t)st.st_ino : 0);
+        hvf_w(&out, !ok ? 0 : S_ISDIR(st.st_mode) ? 4 : S_ISLNK(st.st_mode) ? 10 : S_ISREG(st.st_mode) ? 8 : 0);
+        size_t len = strlen(names[i]);
+        hvf_w(&out, (uint32_t)len);
+        for (size_t j = 0; j < len; j++) {
+          hvf_w(&out, (uint8_t)names[i][j]);
+        }
+      }
+      for (size_t i = 0; i < cnt; i++) {
+        free(names[i]);
+      }
+      free(names);
+      res = hvf_fs_done(e, &out);
+    }
+  } else if (op == 2 || op == 3) {
+    int fd = open(path, (op == 2 ? O_RDONLY : O_WRONLY) | O_NOFOLLOW);
+    if (fd < 0) {
+      res = hvf_fs_err(e, errno);
+    } else if (op == 2) {
+      char*   buf = io_mem(malloc(b ? b : 1));
+      ssize_t k   = pread(fd, buf, b, (off_t)a);
+      if (k < 0) {
+        res = hvf_fs_err(e, errno);
+      } else {
+        hvf_w(&out, 3);
+        for (ssize_t i = 0; i < k; i++) {
+          hvf_w(&out, (uint8_t)buf[i]);
+        }
+        res = hvf_fs_done(e, &out);
+      }
+      free(buf);
+    } else {
+      ssize_t k = bytes ? pwrite(fd, bytes, nb, (off_t)a) : -1;
+      if (k < 0) {
+        res = hvf_fs_err(e, bytes ? errno : EINVAL);
+      } else {
+        uint32_t ws[2] = {4, (uint32_t)k};
+        res = hvf_words(e, ws, 2);
+      }
+    }
+    if (fd >= 0) {
+      close(fd);
+    }
+  } else if (op == 4) {
+    int fd = open(path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, b & 07777);
+    res = fd < 0 ? hvf_fs_err(e, errno) : (close(fd), hvf_fs_ok(e));
+  } else if (op == 5) {
+    res = mkdir(path, b & 07777) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+  } else if (op == 6) {
+    res = (b ? rmdir(path) : unlink(path)) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+  } else if (op == 7) {
+    res = rename(path, path2) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+  } else if (op == 8) {
+    res = truncate(path, (off_t)a) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+  } else if (op == 9) {
+    res = lchmod(path, b & 07777) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+  } else if (op == 10) {
+    res = symlink(rel2, path) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+  } else if (op == 11) {
+    char    buf[PATH_MAX];
+    ssize_t k = readlink(path, buf, sizeof buf);
+    if (k < 0) {
+      res = hvf_fs_err(e, errno);
+    } else {
+      hvf_w(&out, 6);
+      for (ssize_t i = 0; i < k; i++) {
+        hvf_w(&out, (uint8_t)buf[i]);
+      }
+      res = hvf_fs_done(e, &out);
+    }
+  } else if (op == 12) {
+    struct statfs sf;
+    if (statfs(path, &sf) != 0) {
+      res = hvf_fs_err(e, errno);
+    } else {
+      hvf_w(&out, 7);
+      hvf_w(&out, (uint32_t)sf.f_bsize);
+      hvf_w64(&out, sf.f_blocks);
+      hvf_w64(&out, sf.f_bfree);
+      hvf_w64(&out, sf.f_bavail);
+      hvf_w64(&out, sf.f_files);
+      hvf_w64(&out, sf.f_ffree);
+      res = hvf_fs_done(e, &out);
+    }
+  } else {
+    res = hvf_fs_err(e, ENOSYS);
+  }
+  free(rel);
+  free(rel2);
+  free(bytes);
+  return res;
+}
+
 // Effects the program never calls have no id; register only the used ones.
 // The VMM's pure work per exit is microseconds, so extra runtime worker
 // threads only add contention: default the runtime to one (BENDRTS wins).
@@ -1015,6 +1294,12 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.udp_recv)
   io_eff(CID(Hvf.udp_recv), hvf_udp_recv_run);
+#endif
+#ifdef CID(Hvf.share_open)
+  io_eff(CID(Hvf.share_open), hvf_share_open_run);
+#endif
+#ifdef CID(Hvf.fs)
+  io_eff(CID(Hvf.fs), hvf_fs_run);
 #endif
 #ifdef CID(Hvf.irq)
   io_eff(CID(Hvf.irq), hvf_irq_run);
