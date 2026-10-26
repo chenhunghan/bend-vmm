@@ -25,6 +25,10 @@ def Hvf.vcpu(cpu: U32, op: U32, a_hi: U32, a_lo: U32, b_hi: U32, b_lo: U32) -> I
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.vcpu_queue(cpu: U32, op: U32, reg: U32, hi: U32, lo: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.irq(intid: U32, level: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
@@ -92,6 +96,8 @@ def Op.get_reg() -> U32:
   3
 def Op.set_vtimer_mask() -> U32:
   4
+def Op.advance_pc() -> U32:
+  5
 
 # Register numbers beyond V.Reg: 32 is CPSR.
 def Reg.cpsr() -> U32:
@@ -125,12 +131,15 @@ def Host.vcpu_create(cpu: U32) -> IO(U32):
     ws : +List<U32> <- Hvf.vcpu(cpu, Op.create(), 0, 0, 0, 0)
     return Host.first(ws)
 
+# Queued: applied by the vCPU thread before its next request.
 def Host.set_reg(cpu: U32, reg: U32, v: U.U64) -> IO(U32):
   match v:
     case U.U64{h, l}:
-      do IO<U32>:
-        ws : +List<U32> <- Hvf.vcpu(cpu, Op.set_reg(), 0, reg, h, l)
-        return Host.first(ws)
+      Hvf.vcpu_queue(cpu, Op.set_reg(), reg, h, l)
+
+# Queued, like Host.set_reg: PC += 4.
+def Host.advance_pc(cpu: U32) -> IO(U32):
+  Hvf.vcpu_queue(cpu, Op.advance_pc(), 0, 0, 0)
 
 def Host.get_reg(cpu: U32, reg: U32) -> IO(U.U64):
   do IO<U.U64>:

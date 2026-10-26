@@ -100,7 +100,16 @@ static Term hvf_words(Env e, const uint32_t* w, u64 n) {
 // vCPU threads
 // ============
 
-enum { OP_CREATE, OP_RUN, OP_SET_REG, OP_GET_REG, OP_SET_VTIMER_MASK };
+enum { OP_CREATE, OP_RUN, OP_SET_REG, OP_GET_REG, OP_SET_VTIMER_MASK, OP_ADVANCE_PC };
+
+// Register writes and PC advances need no answer, so they are queued and the
+// vCPU thread applies them, in order, before its next request: an MMIO exit
+// costs one round trip to the vCPU thread instead of three or four.
+#define HVF_QUEUE 64
+typedef struct {
+  int      op;
+  uint64_t a, b;
+} HvfQueued;
 
 typedef struct {
   int             live;
@@ -113,6 +122,8 @@ typedef struct {
   uint64_t        a, b;
   uint32_t        out[20];  // the answer, in words
   u64             nout;
+  HvfQueued       queue[HVF_QUEUE];
+  int             nqueue;   // under mu
   hv_vcpu_t       vcpu;
   hv_vcpu_exit_t* exit;
 } HvfCpu;
@@ -179,8 +190,30 @@ static void hvf_run(HvfCpu* c) {
   }
 }
 
+static hv_reg_t hvf_reg_of(uint64_t r) {
+  return r <= 30 ? (hv_reg_t)(HV_REG_X0 + r) : r == 31 ? HV_REG_PC : HV_REG_CPSR;
+}
+
+// Applies one queued register write or PC advance.
+static void hvf_apply(HvfCpu* c, HvfQueued* q) {
+  if (q->op == OP_SET_REG) {
+    hv.set_reg(c->vcpu, hvf_reg_of(q->a), q->b);
+  } else if (q->op == OP_ADVANCE_PC) {
+    hv.set_reg(c->vcpu, HV_REG_PC, hvf_reg(c, HV_REG_PC) + 4);
+  }
+}
+
 static void hvf_do(HvfCpu* c, int cpu) {
   c->nout = 0;
+  pthread_mutex_lock(&c->mu);
+  HvfQueued q[HVF_QUEUE];
+  int       n = c->nqueue;
+  memcpy(q, c->queue, sizeof(HvfQueued) * (size_t)n);
+  c->nqueue = 0;
+  pthread_mutex_unlock(&c->mu);
+  for (int i = 0; i < n; i++) {
+    hvf_apply(c, &q[i]);
+  }
   switch (c->op) {
     case OP_CREATE: {
       hv_return_t r = hv.vcpu_create(&c->vcpu, &c->exit, NULL);
@@ -449,6 +482,27 @@ Term hvf_vcpu_run(Env e, Term* f, IoWork* w) {
   return io_wait_on(w, c->pipe[0], POLLIN, 0, hvf_vcpu_more);
 }
 
+// Hvf.vcpu_queue(cpu, op, reg, hi, lo) -> U32: queues a register write
+// (OP_SET_REG) or a PC advance (OP_ADVANCE_PC) for the vCPU's next request;
+// answers at once. A full queue waits for the vCPU thread to drain it.
+Term hvf_vcpu_queue_run(Env e, Term* f, IoWork* w) {
+  u32 cpu = (u32)f[0];
+  if (cpu >= HVF_MAX_CPUS || !hvf_cpus[cpu].live) {
+    return (Term)HVF_ERR;
+  }
+  HvfCpu* c = &hvf_cpus[cpu];
+  for (;;) {
+    pthread_mutex_lock(&c->mu);
+    if (c->nqueue < HVF_QUEUE) {
+      c->queue[c->nqueue++] = (HvfQueued){(int)(u32)f[1], (u32)f[2], hvf_u64(f[3], f[4])};
+      pthread_mutex_unlock(&c->mu);
+      return (Term)0;
+    }
+    pthread_mutex_unlock(&c->mu);
+    sched_yield();
+  }
+}
+
 // Hvf.irq(intid, level) -> U32: sets an SPI's level (0 low, else high).
 Term hvf_irq_run(Env e, Term* f, IoWork* w) {
   hv_return_t r = hv.gic_set_spi((u32)f[0], (u32)f[1] != 0);
@@ -661,7 +715,10 @@ Term hvf_disk_write_run(Env e, Term* f, IoWork* w) {
 }
 
 // Effects the program never calls have no id; register only the used ones.
+// The VMM's pure work per exit is microseconds, so extra runtime worker
+// threads only add contention: default the runtime to one (BENDRTS wins).
 static void __attribute__((constructor)) hvf_use(void) {
+  setenv("BENDRTS", "--threads 1", 0);
 #ifdef CID(Hvf.init)
   io_eff(CID(Hvf.init), hvf_init_run);
 #endif
@@ -676,6 +733,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.vcpu)
   io_eff(CID(Hvf.vcpu), hvf_vcpu_run);
+#endif
+#ifdef CID(Hvf.vcpu_queue)
+  io_eff(CID(Hvf.vcpu_queue), hvf_vcpu_queue_run);
 #endif
 #ifdef CID(Hvf.irq)
   io_eff(CID(Hvf.irq), hvf_irq_run);

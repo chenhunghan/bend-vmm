@@ -95,10 +95,8 @@ def boot_regs(+cpu: U32, entry: U.U64, x0: U.U64) -> IO(Unit):
     _ : U32 <- H.Host.set_reg(cpu, H.Reg.cpsr(), U.U64{0, 965})
     return Unit{}
 
-def advance_pc(+cpu: U32) -> IO(U32):
-  do IO<U32>:
-    pc : U.U64 <- H.Host.get_reg(cpu, V.Reg.pc())
-    H.Host.set_reg(cpu, V.Reg.pc(), U.U64.add_u32(pc, 4))
+def advance_pc(cpu: U32) -> IO(U32):
+  H.Host.advance_pc(cpu)
 
 # The machine lives in a one-slot channel: take it, handle an exit, put it back.
 def take.got(got: Maybe<&1, M.Machine>) -> IO(M.Machine):
