@@ -35,6 +35,10 @@ import ../vmm/layout.bend as Lay
 #     compatible = "arm,pl011", "arm,primecell"; reg = <0 0x9000000 0 0x1000>;
 #     interrupts = <0 1 4>; clocks = <2 2>; clock-names = "uartclk", "apb_pclk";
 #   };
+#   pl031@9010000 {
+#     compatible = "arm,pl031", "arm,primecell"; reg = <0 0x9010000 0 0x1000>;
+#     interrupts = <0 2 4>; clocks = <2>; clock-names = "apb_pclk";
+#   };
 #   virtio_mmio@<a000000 + 0x200 n> {
 #     compatible = "virtio,mmio"; reg = <0 (0xa000000 + 0x200 n) 0 0x200>;
 #     interrupts = <0 (16 + n) 1>; dma-coherent;
@@ -136,10 +140,16 @@ def Dtb.uart() -> F.Node:
 def Dtb.root_props() -> +List<F.Prop>:
   [F.Prop.str("compatible", "linux,dummy-virt"), F.Prop.str("model", "bend-vmm"), F.Prop.u32("#address-cells", 2), F.Prop.u32("#size-cells", 2), F.Prop.u32("interrupt-parent", 1)]
 
+def Dtb.rtc() -> F.Node:
+  +a = Lay.Layout.rtc_base()
+  # 4 KiB; SPI 2 (INTID 34 - 32), level-high; clocked by apb-pclk.
+  +props = {[F.Prop.strs("compatible", ["arm,pl031", "arm,primecell"]), F.Prop.cells("reg", [U.U64.hi(a), U.U64.lo(a), 0, 4096]), F.Prop.cells("interrupts", [0, (Lay.Layout.rtc_intid() - 32 : U32), 4]), F.Prop.cells("clocks", [2]), F.Prop.str("clock-names", "apb_pclk")] : +List<F.Prop>}
+  F.Node{"pl031@" ++ Dtb.unit(a), props, []}
+
 def Dtb.tree(cfg: DtbCfg) -> F.Node:
   match cfg:
     case DtbCfg{ncpus, ram_size, bootargs, initrd, +slots}:
-      +fixed = {[Dtb.chosen(bootargs, initrd), Dtb.memory(ram_size), Dtb.cpus(ncpus), Dtb.psci(), Dtb.timer(), Dtb.intc(), Dtb.clock(), Dtb.uart()] : +List<F.Node>}
+      +fixed = {[Dtb.chosen(bootargs, initrd), Dtb.memory(ram_size), Dtb.cpus(ncpus), Dtb.psci(), Dtb.timer(), Dtb.intc(), Dtb.clock(), Dtb.uart(), Dtb.rtc()] : +List<F.Node>}
       F.Node{"", Dtb.root_props(), List.append(&2, F.Node, fixed, Dtb.range(~(n => Dtb.virtio(n)), slots, 0, slots))}
 
 def Dtb.build(cfg: DtbCfg) -> +List<U32>:

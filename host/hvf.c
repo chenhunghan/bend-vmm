@@ -16,6 +16,7 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <netinet/tcp.h>
 #include <Hypervisor/Hypervisor.h>
 #include <crt_externs.h>
 #include <mach-o/dyld.h>
@@ -714,6 +715,260 @@ Term hvf_disk_write_run(Env e, Term* f, IoWork* w) {
   return (Term)(k == (ssize_t)n ? 0 : HVF_ERR);
 }
 
+// Network (the host end of src/net/nat.bend)
+// ============================================
+//
+// TCP connections are keyed by the NAT's connection number, UDP sockets by
+// the guest's source port. Guest addresses map to host ones: 10.0.2.2 (the
+// gateway) is 127.0.0.1, 10.0.2.3 (DNS) is the host's first nameserver in
+// /etc/resolv.conf (1.1.1.1 when there is none); replies map back.
+
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+#define HVF_GW  0x0A000202u
+#define HVF_DNS 0x0A000203u
+#define HVF_MAX_SOCKS 1024
+
+typedef struct {
+  int      used;
+  uint32_t key;   // conn id (TCP) or guest port (UDP)
+  int      udp;
+  int      fd;
+} HvfSock;
+
+static HvfSock  hvf_socks[HVF_MAX_SOCKS];
+static uint32_t hvf_dns;
+
+static uint32_t hvf_resolver(void) {
+  if (hvf_dns) {
+    return hvf_dns;
+  }
+  hvf_dns = 0x01010101u;
+  FILE* f = fopen("/etc/resolv.conf", "r");
+  char  line[256], addr[64];
+  while (f && fgets(line, sizeof line, f)) {
+    struct in_addr a;
+    if (sscanf(line, "nameserver %63s", addr) == 1 && inet_pton(AF_INET, addr, &a) == 1) {
+      hvf_dns = ntohl(a.s_addr);
+      break;
+    }
+  }
+  if (f) {
+    fclose(f);
+  }
+  return hvf_dns;
+}
+
+static uint32_t hvf_to_host(uint32_t ip) {
+  return ip == HVF_GW ? 0x7F000001u : ip == HVF_DNS ? hvf_resolver() : ip;
+}
+
+static uint32_t hvf_to_guest(uint32_t ip) {
+  return ip == 0x7F000001u ? HVF_GW : ip == hvf_resolver() ? HVF_DNS : ip;
+}
+
+static HvfSock* hvf_sock(uint32_t key, int udp) {
+  for (int i = 0; i < HVF_MAX_SOCKS; i++) {
+    if (hvf_socks[i].used && hvf_socks[i].key == key && hvf_socks[i].udp == udp) {
+      return &hvf_socks[i];
+    }
+  }
+  return NULL;
+}
+
+static HvfSock* hvf_sock_new(uint32_t key, int udp, int fd) {
+  for (int i = 0; i < HVF_MAX_SOCKS; i++) {
+    if (!hvf_socks[i].used) {
+      hvf_socks[i] = (HvfSock){1, key, udp, fd};
+      return &hvf_socks[i];
+    }
+  }
+  return NULL;
+}
+
+static void hvf_sock_free(HvfSock* k) {
+  close(k->fd);
+  k->used = 0;
+}
+
+static struct sockaddr_in hvf_addr(uint32_t ip, uint32_t port) {
+  struct sockaddr_in a = {0};
+  a.sin_family      = AF_INET;
+  a.sin_port        = htons((uint16_t)port);
+  a.sin_addr.s_addr = htonl(hvf_to_host(ip));
+  return a;
+}
+
+// Hvf.tcp_connect(conn, ip, port) -> U32: starts a non-blocking connect; 0,
+// or an errno. Hvf.tcp_wait answers when it completes.
+Term hvf_tcp_connect_run(Env e, Term* f, IoWork* w) {
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
+    return (Term)(u32)errno;
+  }
+  fcntl(fd, F_SETFL, O_NONBLOCK);
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+  struct sockaddr_in a = hvf_addr((u32)f[1], (u32)f[2]);
+  if (connect(fd, (struct sockaddr*)&a, sizeof a) != 0 && errno != EINPROGRESS) {
+    int err = errno;
+    close(fd);
+    return (Term)(u32)err;
+  }
+  if (!hvf_sock_new((u32)f[0], 0, fd)) {
+    close(fd);
+    return (Term)(u32)EMFILE;
+  }
+  return (Term)0;
+}
+
+static Term hvf_tcp_wait_more(Env e, IoWork* w) {
+  HvfSock* k = hvf_sock((uint32_t)w->hand, 0);
+  if (!k) {
+    return (Term)(u32)ECONNABORTED;
+  }
+  int       err = 0;
+  socklen_t len = sizeof err;
+  getsockopt(k->fd, SOL_SOCKET, SO_ERROR, &err, &len);
+  return (Term)(u32)err;
+}
+
+// Hvf.tcp_wait(conn) -> U32: parks until the connect finishes; 0, or an errno.
+Term hvf_tcp_wait_run(Env e, Term* f, IoWork* w) {
+  HvfSock* k = hvf_sock((u32)f[0], 0);
+  if (!k) {
+    return (Term)(u32)ECONNABORTED;
+  }
+  w->hand = (intptr_t)(u32)f[0];
+  return io_wait_on(w, k->fd, POLLOUT, 0, hvf_tcp_wait_more);
+}
+
+static Term hvf_tcp_recv_more(Env e, IoWork* w) {
+  HvfSock* k = hvf_sock((uint32_t)w->hand, 0);
+  if (!k) {
+    return term_pak(CID(Nil), 0);
+  }
+  char    buf[16384];
+  ssize_t n = recv(k->fd, buf, sizeof buf, 0);
+  if (n < 0 && errno == EAGAIN) {
+    return io_wait_on(w, k->fd, POLLIN, 0, hvf_tcp_recv_more);
+  }
+  return n > 0 ? io_list(e, buf, (u64)n) : term_pak(CID(Nil), 0);
+}
+
+// Hvf.tcp_recv(conn) -> List<U32>: parks until data arrives; [] at EOF, on
+// an error, or once the connection is closed.
+Term hvf_tcp_recv_run(Env e, Term* f, IoWork* w) {
+  HvfSock* k = hvf_sock((u32)f[0], 0);
+  if (!k) {
+    return term_pak(CID(Nil), 0);
+  }
+  w->hand = (intptr_t)(u32)f[0];
+  return io_wait_on(w, k->fd, POLLIN, 0, hvf_tcp_recv_more);
+}
+
+// Hvf.tcp_send(conn, bytes) -> U32: writes all bytes (waiting for room);
+// 0, or an errno.
+Term hvf_tcp_send_run(Env e, Term* f, IoWork* w) {
+  HvfSock* k = hvf_sock((u32)f[0], 0);
+  u64      n;
+  char*    buf = io_cbuf(e, f[1], &n, CID(Con));
+  if (!k || !buf) {
+    free(buf);
+    return (Term)(u32)EBADF;
+  }
+  u64 at = 0;
+  while (at < n) {
+    ssize_t m = send(k->fd, buf + at, n - at, 0);
+    if (m > 0) {
+      at += (u64)m;
+    } else if (m < 0 && errno == EAGAIN) {
+      struct pollfd p = {k->fd, POLLOUT, 0};
+      poll(&p, 1, 1000);
+    } else {
+      break;
+    }
+  }
+  free(buf);
+  return (Term)(at == n ? 0 : (u32)EPIPE);
+}
+
+// Hvf.tcp_shutdown(conn) -> U32: no more data from the guest.
+Term hvf_tcp_shutdown_run(Env e, Term* f, IoWork* w) {
+  HvfSock* k = hvf_sock((u32)f[0], 0);
+  return (Term)(k && shutdown(k->fd, SHUT_WR) == 0 ? 0 : HVF_ERR);
+}
+
+// Hvf.tcp_close(conn) -> U32
+Term hvf_tcp_close_run(Env e, Term* f, IoWork* w) {
+  HvfSock* k = hvf_sock((u32)f[0], 0);
+  if (k) {
+    hvf_sock_free(k);
+  }
+  return (Term)0;
+}
+
+// Hvf.udp_send(sport, ip, port, bytes) -> U32: sends from the socket of
+// guest port sport, creating it on first use; 1 when it was created (the
+// caller starts its receive loop), 0 otherwise, 0xFFFFFFFF on failure.
+Term hvf_udp_send_run(Env e, Term* f, IoWork* w) {
+  HvfSock* k     = hvf_sock((u32)f[0], 1);
+  int      fresh = 0;
+  if (!k) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+      return (Term)HVF_ERR;
+    }
+    fcntl(fd, F_SETFL, O_NONBLOCK);
+    k = hvf_sock_new((u32)f[0], 1, fd);
+    if (!k) {
+      close(fd);
+      return (Term)HVF_ERR;
+    }
+    fresh = 1;
+  }
+  u64   n;
+  char* buf = io_cbuf(e, f[3], &n, CID(Con));
+  if (!buf) {
+    return (Term)HVF_ERR;
+  }
+  struct sockaddr_in a = hvf_addr((u32)f[1], (u32)f[2]);
+  sendto(k->fd, buf, n, 0, (struct sockaddr*)&a, sizeof a);
+  free(buf);
+  return (Term)(u32)fresh;
+}
+
+static Term hvf_udp_recv_more(Env e, IoWork* w) {
+  HvfSock* k = hvf_sock((uint32_t)w->hand, 1);
+  if (!k) {
+    return term_pak(CID(Nil), 0);
+  }
+  char               buf[65536];
+  struct sockaddr_in a;
+  socklen_t          len = sizeof a;
+  ssize_t            n   = recvfrom(k->fd, buf, sizeof buf, 0, (struct sockaddr*)&a, &len);
+  if (n < 0) {
+    return errno == EAGAIN ? io_wait_on(w, k->fd, POLLIN, 0, hvf_udp_recv_more) : term_pak(CID(Nil), 0);
+  }
+  // [ip, port, bytes...]
+  Term xs = io_list(e, buf, (u64)n);
+  xs = io_node(e, CID(Con), (Term)(u32)ntohs(a.sin_port), xs);
+  return io_node(e, CID(Con), (Term)hvf_to_guest(ntohl(a.sin_addr.s_addr)), xs);
+}
+
+// Hvf.udp_recv(sport) -> List<U32>: parks until a datagram arrives for guest
+// port sport; [ip, port, bytes...], or [] once the socket is gone.
+Term hvf_udp_recv_run(Env e, Term* f, IoWork* w) {
+  HvfSock* k = hvf_sock((u32)f[0], 1);
+  if (!k) {
+    return term_pak(CID(Nil), 0);
+  }
+  w->hand = (intptr_t)(u32)f[0];
+  return io_wait_on(w, k->fd, POLLIN, 0, hvf_udp_recv_more);
+}
+
 // Effects the program never calls have no id; register only the used ones.
 // The VMM's pure work per exit is microseconds, so extra runtime worker
 // threads only add contention: default the runtime to one (BENDRTS wins).
@@ -736,6 +991,30 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.vcpu_queue)
   io_eff(CID(Hvf.vcpu_queue), hvf_vcpu_queue_run);
+#endif
+#ifdef CID(Hvf.tcp_connect)
+  io_eff(CID(Hvf.tcp_connect), hvf_tcp_connect_run);
+#endif
+#ifdef CID(Hvf.tcp_wait)
+  io_eff(CID(Hvf.tcp_wait), hvf_tcp_wait_run);
+#endif
+#ifdef CID(Hvf.tcp_recv)
+  io_eff(CID(Hvf.tcp_recv), hvf_tcp_recv_run);
+#endif
+#ifdef CID(Hvf.tcp_send)
+  io_eff(CID(Hvf.tcp_send), hvf_tcp_send_run);
+#endif
+#ifdef CID(Hvf.tcp_shutdown)
+  io_eff(CID(Hvf.tcp_shutdown), hvf_tcp_shutdown_run);
+#endif
+#ifdef CID(Hvf.tcp_close)
+  io_eff(CID(Hvf.tcp_close), hvf_tcp_close_run);
+#endif
+#ifdef CID(Hvf.udp_send)
+  io_eff(CID(Hvf.udp_send), hvf_udp_send_run);
+#endif
+#ifdef CID(Hvf.udp_recv)
+  io_eff(CID(Hvf.udp_recv), hvf_udp_recv_run);
 #endif
 #ifdef CID(Hvf.irq)
   io_eff(CID(Hvf.irq), hvf_irq_run);

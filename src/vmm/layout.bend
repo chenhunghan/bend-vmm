@@ -9,6 +9,7 @@ import ../lib/u64.bend as U
 #   GIC distributor    134217728 (0x0800_0000), 64 KiB
 #   GIC redistributors 201326592 (0x0C00_0000), 32 MiB region, 128 KiB per CPU
 #   PL011 UART         150994944 (0x0900_0000), 4 KiB, SPI 1 (INTID 33)
+#   PL031 RTC          151060480 (0x0901_0000), 4 KiB, SPI 2 (INTID 34)
 #   virtio-mmio slots  167772160 (0x0A00_0000), 512 bytes each, 32 slots;
 #                      slot n uses SPI 16 + n (INTID 48 + n)
 #   RAM                1073741824 (0x4000_0000) upward
@@ -30,6 +31,13 @@ def Layout.uart_base() -> U.U64:
 
 def Layout.uart_intid() -> U32:
   33
+
+# PL031 RTC: 4 KiB at 0x0901_0000, SPI 2 (INTID 34).
+def Layout.rtc_base() -> U.U64:
+  U.U64{0, 151060480}
+
+def Layout.rtc_intid() -> U32:
+  34
 
 def Layout.virtio_base() -> U.U64:
   U.U64{0, 167772160}

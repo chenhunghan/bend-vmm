@@ -85,6 +85,39 @@ def Hvf.disk_write(disk: U32, off_hi: U32, off_lo: U32, bytes: +List<U32>) -> IO
   import "./hvf.c"
   import "./hvf.js"
 
+# Host sockets for the NAT (see host/hvf.c, "Network").
+def Hvf.tcp_connect(conn: U32, ip: U32, port: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.tcp_wait(conn: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.tcp_recv(conn: U32) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.tcp_send(conn: U32, bytes: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.tcp_shutdown(conn: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.tcp_close(conn: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.udp_send(sport: U32, ip: U32, port: U32, bytes: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.udp_recv(sport: U32) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
 # vCPU request codes (host/hvf.c).
 def Op.create() -> U32:
   0
