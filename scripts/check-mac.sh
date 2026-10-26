@@ -37,6 +37,8 @@ if [ -f host/main.bend ] && [ "${SKIP_LINUX:-0}" != 1 ]; then
   echo "== 3. linux boot"
   scripts/linux-assets.sh >/dev/null || { red "linux assets failed"; exit 1; }
   expect "linux boots to init" 120 "BEND-VMM-BOOT-OK" ./out/bend-vmm --kernel out/linux/linux --initrd out/linux/initrd.cpio
+  expect "linux powers off" 120 "stopped (0)" ./out/bend-vmm --kernel out/linux/linux --initrd out/linux/initrd.cpio
+  expect "linux smp (4 cpus)" 120 "Brought up 1 node, 4 CPUs" ./out/bend-vmm --cpus 4 --kernel out/linux/linux --initrd out/linux/initrd.cpio
 fi
 
 if [ $fail = 0 ]; then grn "CHECK-MAC OK"; else red "CHECK-MAC FAILED"; fi

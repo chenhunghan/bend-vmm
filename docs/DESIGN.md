@@ -125,3 +125,23 @@ splits evenly: serializing DTB subtrees once the string table is fixed;
 gathering and scattering independent virtio descriptors; processing
 independent virtqueues; checksums over large buffers (halving recursion);
 one `IO.fork` per vCPU at the host level.
+
+## Status (2026-10-26)
+
+- Every module in `src/` is implemented and proven: `bend PROOF.bend` prints
+  ALL PROOFS CHECK, and `scripts/check.sh --strict` passes 488 tests.
+- On macOS (Apple Silicon, macOS 27), `scripts/check-mac.sh` passes. Debian
+  bookworm's arm64 kernel (6.1) boots to `/init` in about 3 s, with GICv3, the
+  virtual timer, the PL011 console and PSCI. It boots 4 CPUs through
+  CPU_ON, each on its own vCPU thread, and powers off through SYSTEM_OFF.
+- With Hypervisor.framework's GIC the virtual timer reaches the guest by itself:
+  Linux keeps time with no VTIMER exits handled by the VMM.
+
+## Next
+
+- Virtio in a real guest: Debian builds virtio-mmio as a module, so boot a
+  kernel with it built in (or ship the modules in the initramfs), then test
+  virtio-blk and virtio-rng from Linux.
+- Idle: WFI sleeps 1 ms; wait on the vtimer deadline or an interrupt instead.
+- Console input end to end (stdin in raw mode, UART RX interrupt).
+- `bend PROOF.bend --verdict` in CI (needs Lean 4.34).
