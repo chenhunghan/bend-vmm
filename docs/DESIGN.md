@@ -98,9 +98,10 @@ Bend runs (CI on Linux); level 4 needs this Mac.
    the host, then (a) runs tiny bare-metal arm64 payloads (tests/guest/) that
    poke the UART, PSCI and virtio, and asserts on the serial log, and (b)
    boots a Linux kernel and initramfs to a marker line, with a timeout.
-5. **Final gate.** `bend PROOF.bend` prints ALL PROOFS CHECK
-   (`scripts/check.sh --strict`), then `bend PROOF.bend --verdict` re-checks it
-   with the Lean-proven BendTT kernel (needs Lean 4.34).
+5. **Kernel re-check.** `VERDICT=1 scripts/check.sh` re-checks every done
+   module with `bend --verdict`: the BendTT kernel, whose soundness is proven
+   in Lean (Lean 4.34). CI runs it as the `verdict` job. The final gate is
+   `scripts/check.sh --strict` (no TODO anywhere) with VERDICT=1.
 
 ## Parallel development
 

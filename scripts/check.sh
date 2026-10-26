@@ -12,6 +12,8 @@
 #      error once its module (same name) is done.
 #
 # Usage: scripts/check.sh [--strict]   (--strict: no TODO may remain anywhere)
+# With VERDICT=1, each done module is also re-checked by the BendTT kernel
+# (`bend --verdict`, whose soundness is proven in Lean; needs Lean 4.34).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -41,7 +43,7 @@ echo "== 2. ratchet (laws/done/)"
 for f in laws/done/*; do
   m=$(basename "$f")
   [ "$m" = README ] && continue
-  out=$(bend "proofs/$m.bend" 2>&1)
+  out=$(bend "proofs/$m.bend" ${VERDICT:+--verdict} 2>&1)
   if grep -q '^ALL PROOFS CHECK' <<<"$out"; then grn "done: $m"; else red "regressed: $m"; echo "$out" | head -20; fail=1; fi
 done
 
