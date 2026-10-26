@@ -11,6 +11,7 @@ fail=0
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
 grn() { printf '\033[32m%s\033[0m\n' "$*"; }
 mkdir -p out/native
+trap 'rm -rf out/native' EXIT
 build() {
   if [ "$(uname -s)" = Darwin ]; then scripts/build-mac.sh "$1" "$2" >/dev/null 2>&1; else bend "$1" -o "$2" >/dev/null 2>&1; fi
 }

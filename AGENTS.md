@@ -88,3 +88,8 @@ scripts/check-native.sh        # every test compiled native, run on all threads
 
 On macOS only, `scripts/check-mac.sh` builds `host/` and boots guests
 (see docs/DESIGN.md, level 4).
+
+Clean up after every iteration: build outputs live only under `out/`
+(git-ignored); `scripts/clean.sh` removes them and keeps the downloaded guest
+assets, `scripts/clean.sh --all` removes everything. The check scripts clean
+up after themselves; ad-hoc builds and scratch files are yours to remove.

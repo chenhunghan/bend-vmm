@@ -9,6 +9,8 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 [ "$(uname -s)-$(uname -m)" = "Darwin-arm64" ] || { echo "check-mac: needs macOS on arm64"; exit 2; }
 fail=0
+# Build artifacts go when the check ends (scripts/clean.sh keeps downloaded assets).
+trap 'scripts/clean.sh' EXIT
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
 grn() { printf '\033[32m%s\033[0m\n' "$*"; }
 

@@ -15,4 +15,5 @@ lld=$(command -v ld.lld || ls /opt/homebrew/opt/lld*/bin/ld.lld 2>/dev/null | ta
 clang -target aarch64-linux-gnu -c tests/guest/init.S -o out/linux/init.o
 "$lld" -static -e _start out/linux/init.o -o out/linux/init
 python3 scripts/initramfs.py out/linux/init out/linux/initrd.cpio
+rm -f out/linux/init.o
 echo out/linux/linux out/linux/initrd.cpio
