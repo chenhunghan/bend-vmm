@@ -44,3 +44,17 @@ law pl031.no_irq_before_match:
 
 law pl031.unknown_reads_zero:
   {rd(R.Pl031.new(), 32, 9) == 0 : U32}
+
+# Proposed:
+
+law pl031.icr_clears_irq:
+  # alarm at 10, unmasked, acknowledged at 20: the line stays low after
+  {R.Pl031.irq(R.Pl031.write(R.Pl031.write(R.Pl031.write(R.Pl031.new(), 4, 10, 0), 16, 1, 0), 28, 1, 20), 30) == False{} : Bool}
+
+law pl031.mr_rearms:
+  # after the acknowledgement, a new MR of 40 fires at 40
+  {R.Pl031.irq(R.Pl031.write(R.Pl031.write(R.Pl031.write(R.Pl031.write(R.Pl031.new(), 4, 10, 0), 16, 1, 0), 28, 1, 20), 4, 40, 21), 40) == True{} : Bool}
+
+law pl031.ris_latches:
+  # RIS stays set after the time moves back below MR
+  {rd(R.Pl031.write(R.Pl031.write(R.Pl031.new(), 4, 10, 0), 8, 0, 20), 20, 21) == 1 : U32}
