@@ -30,10 +30,17 @@ Requirements: macOS on Apple Silicon, Bend 2.0.39
 (`curl -fsSL https://bend-lang.com/install.sh | sh`), Xcode Command Line Tools.
 
 ```sh
-scripts/build-mac.sh host/main.bend out/bend-vmm      # build and sign
-scripts/guest-assets.sh                               # fetch a test kernel and build a busybox initramfs
-out/bend-vmm --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --mem 1024 --cpus 2
+scripts/build-mac.sh host/main.bend out/bend-vmm      # build and sign (~15 s)
+scripts/guest-assets.sh                               # fetch Ubuntu's arm64 kernel, build a busybox initramfs
+out/bend-vmm --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio \
+             --mem 1024 --cpus 2 --share ~/some/dir --disk disk.img
 ```
+
+The guest boots to a busybox shell in about two seconds, with networking up
+(10.0.2.15 by DHCP; the Mac is 10.0.2.2) and `--share` mounted at
+`/mnt/share`. `poweroff -f` stops it; `Ctrl-A x` quits from the host.
+Any arm64 kernel with virtio-mmio and PL011 works; `scripts/guest-assets.sh`
+also bundles the modules Ubuntu's kernel needs for virtio-rng, 9p and the RTC.
 
 Options:
 

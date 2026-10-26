@@ -17,5 +17,17 @@ if grep -q bendtest /proc/cmdline; then
   echo "GUEST-TESTS-DONE"
   poweroff -f
 fi
+# Interactive mode: networking via DHCP from the NAT, and a --share directory
+# mounted at /mnt/share.
+hostname bend-vmm
+ip link set lo up
+if [ -e /sys/class/net/eth0 ]; then
+  ip link set eth0 up
+  udhcpc -i eth0 -q -t 5 -T 1 -n >/dev/null 2>&1 && echo "GUEST: eth0 $(ip -4 addr show eth0 | sed -n 's/.*inet \([0-9.]*\).*/\1/p')"
+fi
+if grep -qs share /sys/bus/virtio/drivers/9pnet_virtio/*/mount_tag; then
+  mkdir -p /mnt/share && mount -t 9p -o trans=virtio,version=9p2000.L share /mnt/share && echo "GUEST: host directory at /mnt/share"
+fi
+echo "GUEST: busybox shell; 'poweroff -f' to stop, Ctrl-A x to quit the VMM"
 setsid sh -c 'exec sh -i </dev/ttyAMA0 >/dev/ttyAMA0 2>&1'
 poweroff -f
