@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Level 4 of the verification ladder (docs/DESIGN.md): builds the host layer
+# and runs real guests on Hypervisor.framework. macOS on Apple Silicon only.
+#   1. smoke: a bare-metal payload prints through UART traps and powers off
+#      through PSCI, driven by host/smoke.bend (host effects only).
+#   2. (when host/main.bend exists) the same payloads on the full machine.
+#   3. (when a kernel is configured) Linux boots to its init marker.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+[ "$(uname -s)-$(uname -m)" = "Darwin-arm64" ] || { echo "check-mac: needs macOS on arm64"; exit 2; }
+fail=0
+red() { printf '\033[31m%s\033[0m\n' "$*"; }
+grn() { printf '\033[32m%s\033[0m\n' "$*"; }
+
+# expect <name> <timeout-s> <pattern> <cmd...>: runs cmd, requires pattern in its output.
+expect() {
+  name=$1 secs=$2 pat=$3; shift 3
+  out=$( (perl -e 'alarm shift; exec @ARGV' "$secs" "$@") 2>&1 )
+  if grep -q -- "$pat" <<<"$out"; then grn "ok: $name"; else red "failed: $name"; echo "$out" | tail -20; fail=1; fi
+}
+
+echo "== build"
+for g in tests/guest/*.S; do scripts/guest.sh "$(basename "$g" .S)" >/dev/null || fail=1; done
+scripts/build-mac.sh host/smoke.bend out/smoke >/dev/null || { red "smoke build failed"; exit 1; }
+
+echo "== 1. host smoke"
+expect "smoke prints" 20 "hello from the guest" ./out/smoke out/guest/hello.bin
+expect "smoke powers off" 20 "smoke: done 1" ./out/smoke out/guest/hello.bin
+
+if [ -f host/main.bend ]; then
+  echo "== 2. machine"
+  scripts/build-mac.sh host/main.bend out/bend-vmm >/dev/null || { red "bend-vmm build failed"; exit 1; }
+  expect "machine hello" 20 "hello from the guest" ./out/bend-vmm --payload out/guest/hello.bin
+fi
+
+if [ -n "${BEND_VMM_KERNEL:-}" ] && [ -f host/main.bend ]; then
+  echo "== 3. linux boot"
+  expect "linux boots" 120 "${BEND_VMM_MARKER:-BEND-VMM-BOOT-OK}" ./out/bend-vmm --kernel "$BEND_VMM_KERNEL" ${BEND_VMM_INITRD:+--initrd "$BEND_VMM_INITRD"}
+fi
+
+if [ $fail = 0 ]; then grn "CHECK-MAC OK"; else red "CHECK-MAC FAILED"; fi
+exit $fail
