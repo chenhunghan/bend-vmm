@@ -33,13 +33,13 @@ def rd(d: D.Dev, off: U32) -> U32:
 
 def nq(d: D.Dev) -> U32:
   match d:
-    case D.Dev{k, m, qs}:
+    case D.Dev{k, m, qs, st}:
       U32.from_nat(List.length(&2, Q.Vq, qs))
 
 # The first queue's state, or a zero queue when there is none.
 def q0(d: D.Dev) -> Q.Vq:
   match d:
-    case D.Dev{k, m, qs}:
+    case D.Dev{k, m, qs, st}:
       match qs:
         case Nil{}:
           Q.Vq{0, u64(0), u64(0), u64(0), 0, 0}
@@ -50,8 +50,11 @@ def q0(d: D.Dev) -> Q.Vq:
 type Out is Data:
   Out{neg: +List<U32>, setup: +List<U32>, built: Q.Vq, notify: +List<U32>, ack: +List<U32>, reset: +List<U32>, after: Q.Vq}
 
+# The device after a write (Dev.write also answers what goes to the host).
 def wr(d: D.Dev, off: U32, v: U32) -> V.Op<Out, D.Dev>:
-  D.Dev.write(Out, d, off, v)
+  do V.Op<Out, D.Dev>:
+    o : D.DevOut <- D.Dev.write(Out, d, off, v)
+    return D.DevOut.dev(o)
 
 def probe() -> V.Op<Out, Out>:
   do V.Op<Out, Out>:
@@ -137,9 +140,11 @@ def ids() -> IO(Unit):
 # DeviceFeatures words (selector 1, then 0) and the id and capacity of a kind.
 def feats(k: D.DevKind) -> V.Op<+List<U32>, +List<U32>>:
   do V.Op<+List<U32>, +List<U32>>:
-    +d : D.Dev <- D.Dev.write(+List<U32>, D.Dev.new(k), 20, 1)
+    o : D.DevOut <- D.Dev.write(+List<U32>, D.Dev.new(k), 20, 1)
+    +d : D.Dev = D.DevOut.dev(o)
     +hi : U32 = rd(d, 16)
-    +d : D.Dev <- D.Dev.write(+List<U32>, d, 20, 0)
+    o : D.DevOut <- D.Dev.write(+List<U32>, d, 20, 0)
+    +d : D.Dev = D.DevOut.dev(o)
     return [hi, rd(d, 16), rd(d, 8), rd(d, 256)]
 
 def feats_of(r: Maybe<&1, S.Sim & +List<U32>>) -> +List<U32>:
