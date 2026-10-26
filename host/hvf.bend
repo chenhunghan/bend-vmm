@@ -127,6 +127,56 @@ def Hvf.fs(share: U32, op: U32, path: String, path2: String, a_hi: U32, a_lo: U3
   import "./hvf.c"
   import "./hvf.js"
 
+# Pause, snapshots and restore (host/hvf.c).
+def Hvf.pause() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.resume() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.pause_state() -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.snap_write(path: String, words: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.snap_open(path: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.snap_info() -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.snap_args() -> IO(List<String>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.snap_machine() -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.snap_gic() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+# The control socket (host/hvf.c).
+def Hvf.ctl_listen(path: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.ctl_next() -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.ctl_reply(text: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 # vCPU request codes (host/hvf.c).
 def Op.create() -> U32:
   0

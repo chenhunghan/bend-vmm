@@ -19,6 +19,7 @@
 #include <netinet/tcp.h>
 #include <Hypervisor/Hypervisor.h>
 #include <crt_externs.h>
+#include <mach/mach_time.h>
 #include <mach-o/dyld.h>
 
 #define HVF_MAX_CPUS 64
@@ -35,6 +36,17 @@ static struct {
   __typeof__(&hv_vcpu_set_reg) set_reg;
   __typeof__(&hv_vcpu_set_sys_reg) set_sys_reg;
   __typeof__(&hv_vcpu_set_vtimer_mask) set_vtimer_mask;
+  __typeof__(&hv_vcpu_get_sys_reg) get_sys_reg;
+  __typeof__(&hv_vcpu_get_simd_fp_reg) get_simd;
+  __typeof__(&hv_vcpu_set_simd_fp_reg) set_simd;
+  __typeof__(&hv_vcpu_get_vtimer_offset) get_vtimer_offset;
+  __typeof__(&hv_vcpu_set_vtimer_offset) set_vtimer_offset;
+  __typeof__(&hv_gic_state_create) gic_state_create;
+  __typeof__(&hv_gic_state_get_size) gic_state_size;
+  __typeof__(&hv_gic_state_get_data) gic_state_data;
+  __typeof__(&hv_gic_set_state) gic_set_state;
+  __typeof__(&hv_gic_get_icc_reg) get_icc;
+  __typeof__(&hv_gic_set_icc_reg) set_icc;
   __typeof__(&hv_vcpus_exit) vcpus_exit;
   __typeof__(&hv_gic_config_create) gic_config_create;
   __typeof__(&hv_gic_config_set_distributor_base) gic_set_dist;
@@ -60,6 +72,17 @@ static int hvf_open(void) {
   HV_SYM(set_reg, hv_vcpu_set_reg);
   HV_SYM(set_sys_reg, hv_vcpu_set_sys_reg);
   HV_SYM(set_vtimer_mask, hv_vcpu_set_vtimer_mask);
+  HV_SYM(get_sys_reg, hv_vcpu_get_sys_reg);
+  HV_SYM(get_simd, hv_vcpu_get_simd_fp_reg);
+  HV_SYM(set_simd, hv_vcpu_set_simd_fp_reg);
+  HV_SYM(get_vtimer_offset, hv_vcpu_get_vtimer_offset);
+  HV_SYM(set_vtimer_offset, hv_vcpu_set_vtimer_offset);
+  HV_SYM(gic_state_create, hv_gic_state_create);
+  HV_SYM(gic_state_size, hv_gic_state_get_size);
+  HV_SYM(gic_state_data, hv_gic_state_get_data);
+  HV_SYM(gic_set_state, hv_gic_set_state);
+  HV_SYM(get_icc, hv_gic_get_icc_reg);
+  HV_SYM(set_icc, hv_gic_set_icc_reg);
   HV_SYM(vcpus_exit, hv_vcpus_exit);
   HV_SYM(gic_config_create, hv_gic_config_create);
   HV_SYM(gic_set_dist, hv_gic_config_set_distributor_base);
@@ -125,6 +148,12 @@ typedef struct {
   u64             nout;
   HvfQueued       queue[HVF_QUEUE];
   int             nqueue;   // under mu
+  int             created;  // the hv vCPU exists
+  int             saved_gen;
+  uint8_t*        saved;    // the last snapshot of this vCPU's registers
+  size_t          nsaved;
+  const uint8_t*  icc;      // GIC CPU registers to restore before the first run
+  size_t          nicc;
   hv_vcpu_t       vcpu;
   hv_vcpu_exit_t* exit;
 } HvfCpu;
@@ -146,11 +175,242 @@ static uint64_t hvf_reg(HvfCpu* c, hv_reg_t r) {
   return v;
 }
 
+static hv_reg_t hvf_reg_of(uint64_t r) {
+  return r <= 30 ? (hv_reg_t)(HV_REG_X0 + r) : r == 31 ? HV_REG_PC : HV_REG_CPSR;
+}
+
+// Applies one queued register write or PC advance.
+static void hvf_apply(HvfCpu* c, HvfQueued* q) {
+  if (q->op == OP_SET_REG) {
+    hv.set_reg(c->vcpu, hvf_reg_of(q->a), q->b);
+  } else if (q->op == OP_ADVANCE_PC) {
+    hv.set_reg(c->vcpu, HV_REG_PC, hvf_reg(c, HV_REG_PC) + 4);
+  }
+}
+
+// Pause, snapshots and restore
+// =============================
+//
+// A paused VM keeps every vCPU out of the guest: a vCPU about to run waits at
+// a gate, and pause kicks the running ones out (hv_vcpus_exit). While paused
+// the guest's virtual counter stands still: leaving the gate adds the pause's
+// length to the vtimer offset. A snapshot asks each vCPU thread to save its
+// own registers (only the owning thread may read them) and waits for all.
+
+static pthread_mutex_t hvf_gate_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  hvf_gate_cv = PTHREAD_COND_INITIALIZER;
+static int             hvf_paused;
+static int             hvf_running;     // vCPUs inside hv_vcpu_run
+static uint64_t        hvf_pause_start; // mach_absolute_time at pause
+static int             hvf_save_gen;    // bumped by each snapshot
+static int             hvf_saving;      // vCPU threads still to save
+
+// Every register a snapshot keeps besides X0..X30, PC, CPSR, FPCR, FPSR and
+// Q0..Q31. Registers this macOS lacks fail to read and are skipped.
+static const uint16_t hvf_sysregs[] = {
+  HV_SYS_REG_DBGBVR0_EL1, HV_SYS_REG_DBGBCR0_EL1, HV_SYS_REG_DBGWVR0_EL1, HV_SYS_REG_DBGWCR0_EL1,
+  HV_SYS_REG_DBGBVR1_EL1, HV_SYS_REG_DBGBCR1_EL1, HV_SYS_REG_DBGWVR1_EL1, HV_SYS_REG_DBGWCR1_EL1,
+  HV_SYS_REG_MDCCINT_EL1, HV_SYS_REG_MDSCR_EL1, HV_SYS_REG_MPIDR_EL1, HV_SYS_REG_SCTLR_EL1,
+  0xc081 /* ACTLR_EL1 */, HV_SYS_REG_CPACR_EL1, HV_SYS_REG_TTBR0_EL1, HV_SYS_REG_TTBR1_EL1,
+  HV_SYS_REG_TCR_EL1, HV_SYS_REG_APIAKEYLO_EL1, HV_SYS_REG_APIAKEYHI_EL1, HV_SYS_REG_APIBKEYLO_EL1,
+  HV_SYS_REG_APIBKEYHI_EL1, HV_SYS_REG_APDAKEYLO_EL1, HV_SYS_REG_APDAKEYHI_EL1, HV_SYS_REG_APDBKEYLO_EL1,
+  HV_SYS_REG_APDBKEYHI_EL1, HV_SYS_REG_APGAKEYLO_EL1, HV_SYS_REG_APGAKEYHI_EL1, HV_SYS_REG_SPSR_EL1,
+  HV_SYS_REG_ELR_EL1, HV_SYS_REG_SP_EL0, HV_SYS_REG_AFSR0_EL1, HV_SYS_REG_AFSR1_EL1,
+  HV_SYS_REG_ESR_EL1, HV_SYS_REG_FAR_EL1, HV_SYS_REG_PAR_EL1, HV_SYS_REG_MAIR_EL1,
+  HV_SYS_REG_AMAIR_EL1, HV_SYS_REG_VBAR_EL1, HV_SYS_REG_CONTEXTIDR_EL1, HV_SYS_REG_TPIDR_EL1,
+  0xc687 /* SCXTNUM_EL1 */, HV_SYS_REG_CNTKCTL_EL1, HV_SYS_REG_CSSELR_EL1, HV_SYS_REG_TPIDR_EL0,
+  HV_SYS_REG_TPIDRRO_EL0, 0xde85 /* TPIDR2_EL0 */, 0xde87 /* SCXTNUM_EL0 */, HV_SYS_REG_CNTV_CTL_EL0,
+  HV_SYS_REG_CNTV_CVAL_EL0, HV_SYS_REG_SP_EL1, 0xdf11 /* CNTP_CTL_EL0 */, 0xdf12 /* CNTP_CVAL_EL0 */,
+};
+#define HVF_NSYSREGS (sizeof hvf_sysregs / sizeof *hvf_sysregs)
+
+// The GIC CPU interface registers: hv_gic_state leaves them out, so each
+// vCPU saves its own. Restored after hv_gic_set_state, before the first run.
+static const uint16_t hvf_iccregs[] = {
+  HV_GIC_ICC_REG_SRE_EL1, HV_GIC_ICC_REG_CTLR_EL1, HV_GIC_ICC_REG_PMR_EL1, HV_GIC_ICC_REG_BPR0_EL1,
+  HV_GIC_ICC_REG_BPR1_EL1, HV_GIC_ICC_REG_AP0R0_EL1, HV_GIC_ICC_REG_AP1R0_EL1,
+  HV_GIC_ICC_REG_IGRPEN0_EL1, HV_GIC_ICC_REG_IGRPEN1_EL1,
+};
+#define HVF_NICCREGS (sizeof hvf_iccregs / sizeof *hvf_iccregs)
+
+// A vCPU's registers as entries {u32 key, u64 value}: key 0x10000 | n for
+// hv_reg_t n, 0x20000 | n for system register n, 0x30000 | n (n < 64) for
+// half n of SIMD register n / 2; then the guest's virtual count (key 0x40000).
+typedef struct {
+  uint32_t key;
+  uint64_t val;
+} __attribute__((packed)) HvfRegEntry;
+
+static void hvf_save_regs(HvfCpu* c) {
+  size_t       cap = 33 + 2 + HVF_NSYSREGS + HVF_NICCREGS + 64 + 1, n = 0;
+  HvfRegEntry* e   = io_mem(malloc(cap * sizeof *e));
+  for (uint32_t r = 0; r <= 30; r++) {
+    e[n++] = (HvfRegEntry){0x10000 | r, hvf_reg(c, (hv_reg_t)(HV_REG_X0 + r))};
+  }
+  e[n++] = (HvfRegEntry){0x10000 | HV_REG_PC, hvf_reg(c, HV_REG_PC)};
+  e[n++] = (HvfRegEntry){0x10000 | HV_REG_CPSR, hvf_reg(c, HV_REG_CPSR)};
+  e[n++] = (HvfRegEntry){0x10000 | HV_REG_FPCR, hvf_reg(c, HV_REG_FPCR)};
+  e[n++] = (HvfRegEntry){0x10000 | HV_REG_FPSR, hvf_reg(c, HV_REG_FPSR)};
+  for (size_t i = 0; i < HVF_NSYSREGS; i++) {
+    uint64_t v;
+    if (hv.get_sys_reg(c->vcpu, (hv_sys_reg_t)hvf_sysregs[i], &v) == HV_SUCCESS) {
+      e[n++] = (HvfRegEntry){0x20000 | hvf_sysregs[i], v};
+    }
+  }
+  for (uint32_t q = 0; q < 32; q++) {
+    hv_simd_fp_uchar16_t v;
+    uint64_t             half[2] = {0, 0};
+    if (hv.get_simd(c->vcpu, (hv_simd_fp_reg_t)(HV_SIMD_FP_REG_Q0 + q), &v) == HV_SUCCESS) {
+      memcpy(half, &v, 16);
+    }
+    e[n++] = (HvfRegEntry){0x30000 | (2 * q), half[0]};
+    e[n++] = (HvfRegEntry){0x30000 | (2 * q + 1), half[1]};
+  }
+  for (size_t i = 0; hv.get_icc && i < HVF_NICCREGS; i++) {
+    uint64_t v;
+    if (hv.get_icc(c->vcpu, (hv_gic_icc_reg_t)hvf_iccregs[i], &v) == HV_SUCCESS) {
+      e[n++] = (HvfRegEntry){0x50000 | hvf_iccregs[i], v};
+    }
+  }
+  uint64_t off = 0;
+  hv.get_vtimer_offset(c->vcpu, &off);
+  e[n++] = (HvfRegEntry){0x40000, mach_absolute_time() - off};
+  free(c->saved);
+  c->saved  = (uint8_t*)e;
+  c->nsaved = n * sizeof *e;
+}
+
+static void hvf_load_regs(HvfCpu* c, const uint8_t* blob, size_t size) {
+  const HvfRegEntry* e = (const HvfRegEntry*)blob;
+  size_t             n = size / sizeof *e;
+  uint64_t           half[64] = {0};
+  for (size_t i = 0; i < n; i++) {
+    uint32_t kind = e[i].key >> 16, id = e[i].key & 0xffff;
+    if (kind == 1) {
+      hv.set_reg(c->vcpu, (hv_reg_t)id, e[i].val);
+    } else if (kind == 2) {
+      hv.set_sys_reg(c->vcpu, (hv_sys_reg_t)id, e[i].val);
+    } else if (kind == 3 && id < 64) {
+      half[id] = e[i].val;
+    } else if (kind == 4) {
+      // continue the guest's virtual count from where it was
+      hv.set_vtimer_offset(c->vcpu, mach_absolute_time() - e[i].val);
+    }
+  }
+  for (uint32_t q = 0; q < 32; q++) {
+    hv_simd_fp_uchar16_t v;
+    memcpy(&v, &half[2 * q], 16);
+    hv.set_simd(c->vcpu, (hv_simd_fp_reg_t)(HV_SIMD_FP_REG_Q0 + q), v);
+  }
+}
+
+// Saves this vCPU's registers when a snapshot asked for them. Called by the
+// vCPU's own thread wherever it waits.
+static void hvf_service(HvfCpu* c) {
+  pthread_mutex_lock(&hvf_gate_mu);
+  int want = c->created && c->saved_gen != hvf_save_gen;
+  int gen  = hvf_save_gen;
+  pthread_mutex_unlock(&hvf_gate_mu);
+  if (!want) {
+    return;
+  }
+  // apply queued register writes first: the machine has already handled the
+  // exit they finish, so the snapshot must include them
+  pthread_mutex_lock(&c->mu);
+  HvfQueued q[HVF_QUEUE];
+  int       nq = c->nqueue;
+  memcpy(q, c->queue, sizeof(HvfQueued) * (size_t)nq);
+  c->nqueue = 0;
+  pthread_mutex_unlock(&c->mu);
+  for (int i = 0; i < nq; i++) {
+    hvf_apply(c, &q[i]);
+  }
+  hvf_save_regs(c);
+  pthread_mutex_lock(&hvf_gate_mu);
+  c->saved_gen = gen;
+  hvf_saving--;
+  pthread_cond_broadcast(&hvf_gate_cv);
+  pthread_mutex_unlock(&hvf_gate_mu);
+}
+
+// A snapshot being restored: per-vCPU register blobs, the GIC state and the
+// machine words, read by Hvf.snap_open; RAM maps straight from the file.
+static struct {
+  int       active;
+  int       fd;
+  uint32_t  ncpus;
+  uint64_t  ram_base, ram_size, ram_off;
+  uint8_t*  cpu[64];
+  size_t    ncpu[64];
+  uint8_t*  gic;
+  size_t    ngic;
+  uint32_t* words;
+  uint64_t  nwords;
+  char*     args;
+  uint64_t  nargs;
+} hvf_snap;
+
+static void hvf_restore_cpu(HvfCpu* c, int cpu) {
+  if (hvf_snap.active && cpu < 64 && hvf_snap.cpu[cpu]) {
+    hvf_load_regs(c, hvf_snap.cpu[cpu], hvf_snap.ncpu[cpu]);
+    c->icc  = hvf_snap.cpu[cpu];
+    c->nicc = hvf_snap.ncpu[cpu];
+  }
+}
+
+// The saved GIC CPU registers (entries of kind 5), on the vCPU's thread.
+static void hvf_restore_icc(HvfCpu* c) {
+  const HvfRegEntry* e = (const HvfRegEntry*)c->icc;
+  size_t             n = c->nicc / sizeof *e;
+  for (size_t i = 0; hv.set_icc && i < n; i++) {
+    if (e[i].key >> 16 == 5) {
+      hv.set_icc(c->vcpu, (hv_gic_icc_reg_t)(e[i].key & 0xffff), e[i].val);
+    }
+  }
+  c->icc  = NULL;
+  c->nicc = 0;
+}
+
+// The gate before hv_vcpu_run.
+static void hvf_gate(HvfCpu* c) {
+  if (c->icc) {
+    hvf_restore_icc(c);
+  }
+  pthread_mutex_lock(&hvf_gate_mu);
+  int waited = 0;
+  while (hvf_paused || c->saved_gen != hvf_save_gen) {
+    waited = 1;
+    pthread_mutex_unlock(&hvf_gate_mu);
+    hvf_service(c);
+    pthread_mutex_lock(&hvf_gate_mu);
+    if (hvf_paused) {
+      pthread_cond_wait(&hvf_gate_cv, &hvf_gate_mu);
+    }
+  }
+  uint64_t start = hvf_pause_start;
+  hvf_running++;
+  pthread_mutex_unlock(&hvf_gate_mu);
+  if (waited && start) {
+    uint64_t off = 0;
+    hv.get_vtimer_offset(c->vcpu, &off);
+    hv.set_vtimer_offset(c->vcpu, off + (mach_absolute_time() - start));
+  }
+}
+
+static void hvf_ungate(void) {
+  pthread_mutex_lock(&hvf_gate_mu);
+  hvf_running--;
+  pthread_cond_broadcast(&hvf_gate_cv);
+  pthread_mutex_unlock(&hvf_gate_mu);
+}
+
 // Runs the guest until an exit and encodes it as
 // [kind, esr, far, ipa, x0, x1, x2, x3, xt] (each 64-bit value as hi, lo):
 // kind 0 exception, 1 vtimer, 2 canceled, 3 + reason otherwise.
 static void hvf_run(HvfCpu* c) {
+  hvf_gate(c);
   hv_return_t r = hv.vcpu_run(c->vcpu);
+  hvf_ungate();
   if (r != HV_SUCCESS) {
     c->out[c->nout++] = 1000 + (uint32_t)(r & 0xffff);
     return;
@@ -191,19 +451,6 @@ static void hvf_run(HvfCpu* c) {
   }
 }
 
-static hv_reg_t hvf_reg_of(uint64_t r) {
-  return r <= 30 ? (hv_reg_t)(HV_REG_X0 + r) : r == 31 ? HV_REG_PC : HV_REG_CPSR;
-}
-
-// Applies one queued register write or PC advance.
-static void hvf_apply(HvfCpu* c, HvfQueued* q) {
-  if (q->op == OP_SET_REG) {
-    hv.set_reg(c->vcpu, hvf_reg_of(q->a), q->b);
-  } else if (q->op == OP_ADVANCE_PC) {
-    hv.set_reg(c->vcpu, HV_REG_PC, hvf_reg(c, HV_REG_PC) + 4);
-  }
-}
-
 static void hvf_do(HvfCpu* c, int cpu) {
   c->nout = 0;
   pthread_mutex_lock(&c->mu);
@@ -217,10 +464,19 @@ static void hvf_do(HvfCpu* c, int cpu) {
   }
   switch (c->op) {
     case OP_CREATE: {
+      if (c->created) {
+        c->out[c->nout++] = 0;
+        break;
+      }
       hv_return_t r = hv.vcpu_create(&c->vcpu, &c->exit, NULL);
       if (r == HV_SUCCESS) {
         // Aff0 = cpu index; bit 31 is RES1. The GIC routes by affinity.
         r = hv.set_sys_reg(c->vcpu, HV_SYS_REG_MPIDR_EL1, (1ull << 31) | (uint64_t)cpu);
+        c->created = 1;
+        pthread_mutex_lock(&hvf_gate_mu);
+        c->saved_gen = hvf_save_gen;
+        pthread_mutex_unlock(&hvf_gate_mu);
+        hvf_restore_cpu(c, cpu);
       }
       c->out[c->nout++] = r == HV_SUCCESS ? 0 : (uint32_t)r;
       break;
@@ -251,7 +507,19 @@ static void* hvf_thread(void* arg) {
   pthread_mutex_lock(&c->mu);
   for (;;) {
     while (!c->busy) {
-      pthread_cond_wait(&c->cv, &c->mu);
+      pthread_mutex_unlock(&c->mu);
+      hvf_service(c);
+      pthread_mutex_lock(&c->mu);
+      if (!c->busy) {
+        struct timespec t;
+        clock_gettime(CLOCK_REALTIME, &t);
+        t.tv_nsec += 20000000;
+        if (t.tv_nsec >= 1000000000) {
+          t.tv_sec++;
+          t.tv_nsec -= 1000000000;
+        }
+        pthread_cond_timedwait(&c->cv, &c->mu, &t);
+      }
     }
     pthread_mutex_unlock(&c->mu);
     hvf_do(c, cpu);
@@ -284,7 +552,14 @@ Term hvf_init_run(Env e, Term* f, IoWork* w) {
   }
   hvf_ram_size = (uint64_t)(u32)f[0] << 20;
   hvf_ram_base = hvf_u64(f[5], f[6]);
-  hvf_ram = mmap(NULL, hvf_ram_size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+  if (hvf_snap.active) {
+    // a restore: guest RAM is the snapshot's, copy-on-write from the file
+    hvf_ram_size = hvf_snap.ram_size;
+    hvf_ram_base = hvf_snap.ram_base;
+    hvf_ram = mmap(NULL, hvf_ram_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, hvf_snap.fd, (off_t)hvf_snap.ram_off);
+  } else {
+    hvf_ram = mmap(NULL, hvf_ram_size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+  }
   if (hvf_ram == MAP_FAILED) {
     return (Term)4;
   }
@@ -594,25 +869,31 @@ static void hvf_tty_raw(void) {
   }
 }
 
-// Drops the Ctrl-A escape from buf; quits on Ctrl-A x.
-static ssize_t hvf_escape(char* buf, ssize_t k) {
+// Applies the Ctrl-A escape to buf into out (words): Ctrl-A x quits here;
+// Ctrl-A p, Ctrl-A s and Ctrl-A h become the words 256 + 'p' / 's' / 'h'
+// for the VMM to act on; Ctrl-A Ctrl-A sends one Ctrl-A to the guest.
+static ssize_t hvf_escape(const char* buf, ssize_t k, uint32_t* out) {
   ssize_t n = 0;
   for (ssize_t i = 0; i < k; i++) {
+    unsigned char ch = (unsigned char)buf[i];
     if (hvf_ctrl_a) {
       hvf_ctrl_a = 0;
-      if (buf[i] == 'x') {
+      if (ch == 'x') {
         hvf_tty_restore();
         fprintf(stderr, "\r\nbend-vmm: quit (Ctrl-A x)\r\n");
         exit(0);
+      } else if (ch == 'p' || ch == 's' || ch == 'h') {
+        out[n++] = 256u + ch;
+      } else if (ch == 1) {
+        out[n++] = 1;
+      } else {
+        out[n++] = 1;
+        out[n++] = ch;
       }
-      if (buf[i] != 1) {
-        buf[n++] = 1;
-      }
-      buf[n++] = buf[i];
-    } else if (buf[i] == 1 && hvf_raw) {
+    } else if (ch == 1 && hvf_raw) {
       hvf_ctrl_a = 1;
     } else {
-      buf[n++] = buf[i];
+      out[n++] = ch;
     }
   }
   return n;
@@ -624,16 +905,18 @@ static Term hvf_stdin_more(Env e, IoWork* w) {
   if (k < 0 && errno == EAGAIN) {
     return io_wait_on(w, 0, POLLIN, 0, hvf_stdin_more);
   }
-  if (k > 0) {
-    k = hvf_escape(buf, k);
-    if (k == 0) {
-      return io_wait_on(w, 0, POLLIN, 0, hvf_stdin_more);
-    }
+  if (k <= 0) {
+    return term_pak(CID(Nil), 0);
   }
-  if ((hvf_trace & 2) && k > 0) {
-    fprintf(stderr, "[trace] stdin %zd bytes\n", k);
+  uint32_t out[512];
+  ssize_t  m = hvf_escape(buf, k, out);
+  if (m == 0) {
+    return io_wait_on(w, 0, POLLIN, 0, hvf_stdin_more);
   }
-  return k > 0 ? io_list(e, buf, (u64)k) : term_pak(CID(Nil), 0);
+  if (hvf_trace & 2) {
+    fprintf(stderr, "[trace] stdin %zd words\n", m);
+  }
+  return hvf_words(e, out, (u64)m);
 }
 
 // Hvf.stdin_wait(max) -> List<U32>: parks until stdin has bytes and answers
@@ -1248,6 +1531,367 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
   return res;
 }
 
+// Pause, snapshot and restore effects
+// ===================================
+
+static void hvf_kick_all(void) {
+  for (int i = 0; i < HVF_MAX_CPUS; i++) {
+    if (hvf_cpus[i].live && hvf_cpus[i].created) {
+      hv.vcpus_exit(&hvf_cpus[i].vcpu, 1);
+    }
+  }
+}
+
+// Hvf.pause() -> U32: stops every vCPU at its gate (asynchronous: poll
+// Hvf.pause_state until no vCPU runs). 0, or 1 if it was already paused.
+Term hvf_pause_run(Env e, Term* f, IoWork* w) {
+  pthread_mutex_lock(&hvf_gate_mu);
+  int was = hvf_paused;
+  if (!was) {
+    hvf_paused      = 1;
+    hvf_pause_start = mach_absolute_time();
+  }
+  pthread_mutex_unlock(&hvf_gate_mu);
+  hvf_kick_all();
+  return (Term)(u32)was;
+}
+
+// Hvf.resume() -> U32: lets every vCPU run again.
+Term hvf_resume_run(Env e, Term* f, IoWork* w) {
+  pthread_mutex_lock(&hvf_gate_mu);
+  hvf_paused = 0;
+  pthread_cond_broadcast(&hvf_gate_cv);
+  pthread_mutex_unlock(&hvf_gate_mu);
+  return (Term)0;
+}
+
+// Hvf.pause_state() -> List<U32>: [paused, vCPUs still inside the guest].
+Term hvf_pause_state_run(Env e, Term* f, IoWork* w) {
+  pthread_mutex_lock(&hvf_gate_mu);
+  uint32_t ws[2] = {(uint32_t)hvf_paused, (uint32_t)hvf_running};
+  pthread_mutex_unlock(&hvf_gate_mu);
+  if (ws[0] && ws[1]) {
+    hvf_kick_all();
+  }
+  return hvf_words(e, ws, 2);
+}
+
+static int hvf_put(int fd, const void* p, size_t n) {
+  const uint8_t* b = p;
+  while (n) {
+    ssize_t k = write(fd, b, n);
+    if (k <= 0) {
+      return -1;
+    }
+    b += k;
+    n -= (size_t)k;
+  }
+  return 0;
+}
+
+static int hvf_fput64(int fd, uint64_t v) {
+  return hvf_put(fd, &v, 8);
+}
+
+// Guest RAM, skipping all-zero 64 KiB chunks (the file stays sparse).
+static int hvf_put_ram(int fd, off_t at) {
+  static const uint8_t zero[65536];
+  for (uint64_t o = 0; o < hvf_ram_size; o += sizeof zero) {
+    size_t n = hvf_ram_size - o < sizeof zero ? (size_t)(hvf_ram_size - o) : sizeof zero;
+    if (memcmp(hvf_ram + o, zero, n) == 0) {
+      continue;
+    }
+    if (pwrite(fd, hvf_ram + o, n, at + (off_t)o) != (ssize_t)n) {
+      return -1;
+    }
+  }
+  return ftruncate(fd, at + (off_t)hvf_ram_size);
+}
+
+// Hvf.snap_write(path, words) -> U32: writes a snapshot of the paused VM:
+//   "BVMSNAP1", version u32 = 1, ncpus u32, ram base u64, ram size u64,
+//   args (u64 length, NUL-separated argv), machine (u64 count, u32 words),
+//   GIC state (u64 size, bytes), per vCPU (u64 size, register entries; 0 when
+//   absent), then RAM at the next 16 KiB boundary. 0, or an errno.
+Term hvf_snap_write_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* path = io_cstr(e, f[0], &n);
+  // the machine words
+  u64       cap = 1024, nw = 0;
+  uint32_t* ws  = io_mem(malloc(cap * 4));
+  for (Term t = f[1]; term_aux(t) == CID(Con);) {
+    Term fb[2];
+    spare_free(e, cls_fit(2), ctr_take(e, t, 2, fb));
+    if (nw == cap) {
+      cap *= 2;
+      ws = io_mem(realloc(ws, cap * 4));
+    }
+    ws[nw++] = (uint32_t)fb[0];
+    t        = fb[1];
+  }
+  // every created vCPU saves its registers on its own thread
+  int live = 0;
+  pthread_mutex_lock(&hvf_gate_mu);
+  hvf_save_gen++;
+  for (int i = 0; i < HVF_MAX_CPUS; i++) {
+    live += hvf_cpus[i].live && hvf_cpus[i].created;
+  }
+  hvf_saving = live;
+  pthread_cond_broadcast(&hvf_gate_cv);
+  pthread_mutex_unlock(&hvf_gate_mu);
+  for (int i = 0; i < HVF_MAX_CPUS; i++) {
+    if (hvf_cpus[i].live) {
+      pthread_mutex_lock(&hvf_cpus[i].mu);
+      pthread_cond_signal(&hvf_cpus[i].cv);
+      pthread_mutex_unlock(&hvf_cpus[i].mu);
+    }
+  }
+  pthread_mutex_lock(&hvf_gate_mu);
+  while (hvf_saving > 0) {
+    pthread_cond_wait(&hvf_gate_cv, &hvf_gate_mu);
+  }
+  pthread_mutex_unlock(&hvf_gate_mu);
+  // the GIC
+  void*          gic  = NULL;
+  size_t         ngic = 0;
+  hv_gic_state_t st   = hv.gic_state_create ? hv.gic_state_create() : NULL;
+  if (st && hv.gic_state_size(st, &ngic) == HV_SUCCESS) {
+    gic = io_mem(malloc(ngic ? ngic : 1));
+    if (hv.gic_state_data(st, gic) != HV_SUCCESS) {
+      ngic = 0;
+    }
+  }
+  if (st) {
+    os_release(st);
+  }
+  // argv
+  int    argc = *_NSGetArgc();
+  char** argv = *_NSGetArgv();
+  int    err  = 0;
+  int    fd   = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  free(path);
+  if (fd < 0) {
+    err = errno;
+  } else {
+    uint32_t ncpus = 0;
+    for (int i = 0; i < HVF_MAX_CPUS; i++) {
+      if (hvf_cpus[i].created) {
+        ncpus = (uint32_t)i + 1;
+      }
+    }
+    uint64_t alen = 0;
+    for (int i = 0; i < argc; i++) {
+      alen += strlen(argv[i]) + 1;
+    }
+    uint32_t ver = 1;
+    int      bad = hvf_put(fd, "BVMSNAP1", 8) || hvf_put(fd, &ver, 4) || hvf_put(fd, &ncpus, 4)
+      || hvf_fput64(fd, hvf_ram_base) || hvf_fput64(fd, hvf_ram_size) || hvf_fput64(fd, alen);
+    for (int i = 0; !bad && i < argc; i++) {
+      bad = hvf_put(fd, argv[i], strlen(argv[i]) + 1);
+    }
+    bad = bad || hvf_fput64(fd, nw) || hvf_put(fd, ws, nw * 4) || hvf_fput64(fd, ngic) || hvf_put(fd, gic, ngic);
+    for (uint32_t i = 0; !bad && i < ncpus; i++) {
+      HvfCpu* c  = &hvf_cpus[i];
+      size_t  sz = c->created ? c->nsaved : 0;
+      bad = hvf_fput64(fd, sz) || hvf_put(fd, c->saved, sz);
+    }
+    off_t at = lseek(fd, 0, SEEK_CUR);
+    at       = (at + 16383) & ~(off_t)16383;
+    bad      = bad || hvf_put_ram(fd, at) != 0;
+    err      = bad ? (errno ? errno : EIO) : 0;
+    if (fsync(fd) != 0 && !err) {
+      err = errno;
+    }
+    close(fd);
+  }
+  free(ws);
+  free(gic);
+  return (Term)(u32)err;
+}
+
+static int hvf_get(int fd, void* p, size_t n) {
+  return read(fd, p, n) == (ssize_t)n ? 0 : -1;
+}
+
+// Hvf.snap_open(path) -> U32: reads a snapshot for a restore (the RAM is
+// mapped later, by Hvf.init). 0, or an errno (EINVAL for a bad file).
+Term hvf_snap_open_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* path = io_cstr(e, f[0], &n);
+  int   fd   = open(path, O_RDONLY);
+  free(path);
+  if (fd < 0) {
+    return (Term)(u32)errno;
+  }
+  char     magic[8];
+  uint32_t ver;
+  if (hvf_get(fd, magic, 8) || memcmp(magic, "BVMSNAP1", 8) || hvf_get(fd, &ver, 4) || ver != 1
+      || hvf_get(fd, &hvf_snap.ncpus, 4) || hvf_snap.ncpus > 64 || hvf_get(fd, &hvf_snap.ram_base, 8)
+      || hvf_get(fd, &hvf_snap.ram_size, 8) || hvf_get(fd, &hvf_snap.nargs, 8) || hvf_snap.nargs > 1u << 20) {
+    close(fd);
+    return (Term)(u32)EINVAL;
+  }
+  hvf_snap.args = io_mem(malloc(hvf_snap.nargs + 1));
+  int bad = hvf_get(fd, hvf_snap.args, hvf_snap.nargs) || hvf_get(fd, &hvf_snap.nwords, 8) || hvf_snap.nwords > 1u << 28;
+  if (!bad) {
+    hvf_snap.words = io_mem(malloc(hvf_snap.nwords * 4 + 4));
+    bad = hvf_get(fd, hvf_snap.words, hvf_snap.nwords * 4) || hvf_get(fd, &hvf_snap.ngic, 8) || hvf_snap.ngic > 1u << 26;
+  }
+  if (!bad) {
+    hvf_snap.gic = io_mem(malloc(hvf_snap.ngic + 1));
+    bad = hvf_get(fd, hvf_snap.gic, hvf_snap.ngic);
+  }
+  for (uint32_t i = 0; !bad && i < hvf_snap.ncpus; i++) {
+    uint64_t sz;
+    bad = hvf_get(fd, &sz, 8) || sz > 1u << 20;
+    if (!bad && sz) {
+      hvf_snap.cpu[i]  = io_mem(malloc(sz));
+      hvf_snap.ncpu[i] = sz;
+      bad = hvf_get(fd, hvf_snap.cpu[i], sz);
+    }
+  }
+  if (bad) {
+    close(fd);
+    return (Term)(u32)EINVAL;
+  }
+  off_t at         = lseek(fd, 0, SEEK_CUR);
+  hvf_snap.ram_off = (uint64_t)((at + 16383) & ~(off_t)16383);
+  hvf_snap.fd      = fd;
+  hvf_snap.active  = 1;
+  return (Term)0;
+}
+
+// Hvf.snap_info() -> List<U32>: [ncpus, RAM MiB, then 1 per vCPU that had
+// registers saved, 0 otherwise].
+Term hvf_snap_info_run(Env e, Term* f, IoWork* w) {
+  uint32_t ws[66] = {hvf_snap.ncpus, (uint32_t)(hvf_snap.ram_size >> 20)};
+  for (uint32_t i = 0; i < hvf_snap.ncpus; i++) {
+    ws[2 + i] = hvf_snap.cpu[i] != NULL;
+  }
+  return hvf_words(e, ws, 2 + hvf_snap.ncpus);
+}
+
+// Hvf.snap_args() -> List<String>: the argv the snapshotted VMM ran with.
+Term hvf_snap_args_run(Env e, Term* f, IoWork* w) {
+  Term   xs = term_pak(CID(Nil), 0);
+  size_t starts[4096], k = 0;
+  for (size_t i = 0; i < hvf_snap.nargs && k < 4096; i += strlen(hvf_snap.args + i) + 1) {
+    starts[k++] = i;
+  }
+  while (k > 0) {
+    k--;
+    const char* a = hvf_snap.args + starts[k];
+    xs = io_node(e, CID(Con), io_str(e, a, strlen(a)), xs);
+  }
+  return xs;
+}
+
+// Hvf.snap_machine() -> List<U32>: the encoded machine (src/vmm/snapshot.bend).
+Term hvf_snap_machine_run(Env e, Term* f, IoWork* w) {
+  return hvf_words(e, hvf_snap.words, hvf_snap.nwords);
+}
+
+// Hvf.snap_gic() -> U32: restores the GIC state, once every vCPU exists.
+Term hvf_snap_gic_run(Env e, Term* f, IoWork* w) {
+  if (!hvf_snap.ngic) {
+    return (Term)0;
+  }
+  return (Term)(hv.gic_set_state && hv.gic_set_state(hvf_snap.gic, hvf_snap.ngic) == HV_SUCCESS ? 0 : HVF_ERR);
+}
+
+// The control socket
+// ==================
+//
+// --control PATH listens on a Unix socket; each connection sends one command
+// line and gets one reply line (`echo pause | nc -U PATH`).
+
+#include <sys/un.h>
+
+static int hvf_ctl_fd = -1;
+static int hvf_ctl_client = -1;
+
+// Hvf.ctl_listen(path) -> U32: 0, or an errno.
+Term hvf_ctl_listen_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* path = io_cstr(e, f[0], &n);
+  struct sockaddr_un a = {0};
+  a.sun_family = AF_UNIX;
+  if (n >= sizeof a.sun_path) {
+    free(path);
+    return (Term)(u32)ENAMETOOLONG;
+  }
+  memcpy(a.sun_path, path, n + 1);
+  unlink(path);
+  free(path);
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0 || bind(fd, (struct sockaddr*)&a, sizeof a) != 0 || listen(fd, 4) != 0) {
+    int err = errno;
+    if (fd >= 0) {
+      close(fd);
+    }
+    return (Term)(u32)err;
+  }
+  fcntl(fd, F_SETFL, O_NONBLOCK);
+  hvf_ctl_fd = fd;
+  return (Term)0;
+}
+
+static Term hvf_ctl_line(Env e, IoWork* w);
+
+static Term hvf_ctl_accept(Env e, IoWork* w) {
+  int c = accept(hvf_ctl_fd, NULL, NULL);
+  if (c < 0) {
+    return io_wait_on(w, hvf_ctl_fd, POLLIN, 0, hvf_ctl_accept);
+  }
+  fcntl(c, F_SETFL, O_NONBLOCK);
+  hvf_ctl_client = c;
+  w->made        = 0;
+  return hvf_ctl_line(e, w);
+}
+
+// Reads one line from the client into w->data.
+static Term hvf_ctl_line(Env e, IoWork* w) {
+  char ch;
+  for (;;) {
+    ssize_t k = read(hvf_ctl_client, &ch, 1);
+    if (k < 0 && errno == EAGAIN) {
+      return io_wait_on(w, hvf_ctl_client, POLLIN, 0, hvf_ctl_line);
+    }
+    if (k <= 0 || ch == '\n' || w->made >= 1023) {
+      break;
+    }
+    w->data[w->made++] = ch;
+  }
+  Term t = io_list(e, w->data, (u64)w->made);
+  free(w->data);
+  return t;
+}
+
+// Hvf.ctl_next() -> List<U32>: parks until a client connects and sends a
+// line; the line's bytes. The client stays open for Hvf.ctl_reply.
+Term hvf_ctl_next_run(Env e, Term* f, IoWork* w) {
+  if (hvf_ctl_fd < 0) {
+    return term_pak(CID(Nil), 0);
+  }
+  w->data = io_mem(malloc(1024));
+  return hvf_ctl_accept(e, w);
+}
+
+// Hvf.ctl_reply(text) -> U32: answers the client with a line and closes it.
+Term hvf_ctl_reply_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* text = io_cstr(e, f[0], &n);
+  if (hvf_ctl_client >= 0) {
+    fcntl(hvf_ctl_client, F_SETFL, 0);
+    (void)!write(hvf_ctl_client, text, n);
+    (void)!write(hvf_ctl_client, "\n", 1);
+    close(hvf_ctl_client);
+    hvf_ctl_client = -1;
+  }
+  free(text);
+  return (Term)0;
+}
+
 // Effects the program never calls have no id; register only the used ones.
 // The VMM's pure work per exit is microseconds, so extra runtime worker
 // threads only add contention: default the runtime to one (BENDRTS wins).
@@ -1300,6 +1944,42 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.fs)
   io_eff(CID(Hvf.fs), hvf_fs_run);
+#endif
+#ifdef CID(Hvf.pause)
+  io_eff(CID(Hvf.pause), hvf_pause_run);
+#endif
+#ifdef CID(Hvf.resume)
+  io_eff(CID(Hvf.resume), hvf_resume_run);
+#endif
+#ifdef CID(Hvf.pause_state)
+  io_eff(CID(Hvf.pause_state), hvf_pause_state_run);
+#endif
+#ifdef CID(Hvf.snap_write)
+  io_eff(CID(Hvf.snap_write), hvf_snap_write_run);
+#endif
+#ifdef CID(Hvf.snap_open)
+  io_eff(CID(Hvf.snap_open), hvf_snap_open_run);
+#endif
+#ifdef CID(Hvf.snap_info)
+  io_eff(CID(Hvf.snap_info), hvf_snap_info_run);
+#endif
+#ifdef CID(Hvf.snap_args)
+  io_eff(CID(Hvf.snap_args), hvf_snap_args_run);
+#endif
+#ifdef CID(Hvf.snap_machine)
+  io_eff(CID(Hvf.snap_machine), hvf_snap_machine_run);
+#endif
+#ifdef CID(Hvf.snap_gic)
+  io_eff(CID(Hvf.snap_gic), hvf_snap_gic_run);
+#endif
+#ifdef CID(Hvf.ctl_listen)
+  io_eff(CID(Hvf.ctl_listen), hvf_ctl_listen_run);
+#endif
+#ifdef CID(Hvf.ctl_next)
+  io_eff(CID(Hvf.ctl_next), hvf_ctl_next_run);
+#endif
+#ifdef CID(Hvf.ctl_reply)
+  io_eff(CID(Hvf.ctl_reply), hvf_ctl_reply_run);
 #endif
 #ifdef CID(Hvf.irq)
   io_eff(CID(Hvf.irq), hvf_irq_run);

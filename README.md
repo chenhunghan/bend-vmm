@@ -54,6 +54,16 @@ Options:
 | `--disk A[,B:ro…]` | raw disk images as virtio-blk (`/dev/vda`, `/dev/vdb`, …); `:ro` attaches one read-only |
 | `--share DIR` | a host directory over virtio-9p (`mount -t 9p -o trans=virtio,version=9p2000.L share /mnt`) |
 | `--payload FILE` | a bare-metal binary entered at the start of RAM |
+| `--control SOCK` | a Unix socket for management commands (below) |
+| `--restore FILE` | start from a snapshot (same disks and shares as when it was taken) |
+
+Management: on the console, `Ctrl-A p` pauses or resumes, `Ctrl-A s` writes
+`./bend-vmm.snap`, `Ctrl-A x` quits, `Ctrl-A h` lists the keys. Over
+`--control`: `echo pause | nc -U SOCK` (also `resume`, `status`,
+`snapshot PATH`, `quit`). A snapshot holds guest RAM (sparse), every vCPU's
+registers, the GIC, and the whole device state; `--restore` maps the RAM
+copy-on-write, so restoring is immediate. TCP connections through the NAT do
+not survive a restore.
 
 Debugging: `BEND_VMM_TRACE=1` prints every trapped exit, `=2` console input
 and interrupt line changes.

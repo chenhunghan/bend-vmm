@@ -80,5 +80,19 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   if [ "$(grep -c 'GUEST: up' <<<"$out")" = 2 ] && grep -q "stopped (0)" <<<"$out"; then grn "ok: reboot (gzip kernel)"; else red "failed: reboot"; grep -a -E "GUEST|reset|stopped" <<<"$out"; fail=1; fi
 fi
 
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5. lifecycle: pause, resume, snapshot, restore"
+  t=$(mktemp -d); sock=$t/vm.sock
+  ( (sleep 8; printf 'echo MARK-$((6*7)) > /tmp/m\n'; sleep 40) | ./out/bend-vmm --mem 512 --cpus 2 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --control "$sock" --cmdline "console=ttyAMA0 quiet" > "$t/run.log" 2>&1 & )
+  sleep 12
+  [ "$(echo pause | nc -U "$sock")" = paused ] && [ "$(echo status | nc -U "$sock")" = paused ] && grn "ok: pause" || { red "failed: pause"; fail=1; }
+  [ "$(echo resume | nc -U "$sock")" = running ] && grn "ok: resume" || { red "failed: resume"; fail=1; }
+  [ "$(echo "snapshot $t/vm.snap" | nc -U "$sock")" = saved ] && grn "ok: snapshot ($(du -h "$t/vm.snap" | cut -f1) on disk)" || { red "failed: snapshot"; fail=1; }
+  echo quit | nc -U "$sock" >/dev/null; sleep 1
+  out=$( ( (sleep 3; printf 'cat /tmp/m\n'; sleep 2; printf 'poweroff -f\n'; sleep 3) | perl -e 'alarm 40; exec @ARGV' ./out/bend-vmm --restore "$t/vm.snap") 2>&1 )
+  grep -q "^MARK-42" <<<"$(tr -d '\r' <<<"$out")" && grep -q "stopped (0)" <<<"$out" && grn "ok: restore (guest RAM and CPUs continue)" || { red "failed: restore"; tail -5 <<<"$out"; fail=1; }
+  rm -rf "$t"
+fi
+
 if [ $fail = 0 ]; then grn "CHECK-MAC OK"; else red "CHECK-MAC FAILED"; fi
 exit $fail
