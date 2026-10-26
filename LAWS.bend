@@ -23,3 +23,5 @@ import ./laws/wire.bend as Laws_wire
 import ./laws/dhcp.bend as Laws_dhcp
 import ./laws/nat.bend as Laws_nat
 import ./laws/net.bend as Laws_net
+import ./laws/p9wire.bend as Laws_p9wire
+import ./laws/p9.bend as Laws_p9

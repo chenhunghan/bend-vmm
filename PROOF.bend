@@ -24,3 +24,5 @@ import ./proofs/wire.bend as Proofs_wire
 import ./proofs/dhcp.bend as Proofs_dhcp
 import ./proofs/nat.bend as Proofs_nat
 import ./proofs/net.bend as Proofs_net
+import ./proofs/p9wire.bend as Proofs_p9wire
+import ./proofs/p9.bend as Proofs_p9

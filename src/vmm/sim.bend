@@ -222,6 +222,10 @@ def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
           Sim.run(f, A, Sim.flush(s), next)
         case V.VmNet{cmd, next}:
           Sim.run(f, A, Sim.net_cmd(s, cmd), next)
+        case V.VmFs{sh, op, k}:
+          # No simulated filesystem yet: every operation fails with ENOSYS (78
+          # on macOS).
+          Sim.run(f, A, s, k(V.FsErr{78}))
 
 # Runs an Op to completion with a generous step budget.
 def Sim.exec(-A: Type, s: Sim, m: V.Op<A, A>) -> Maybe<&1, Sim & A>:

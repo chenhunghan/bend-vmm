@@ -54,6 +54,50 @@ type NetEvent is Data:
   # A datagram from ip:port to guest port dport.
   UdpData{ip: U32, port: U32, dport: U32, bytes: +List<U32>}
 
+# Host file operations for virtio-9p (src/fs/p9.bend). Paths are relative
+# to the shared directory, "" being its root, components separated by "/",
+# never "." or ".." (the 9p server builds them from names it validated; the
+# host refuses anything else). Times are seconds since the Unix epoch.
+type FsOp is Data:
+  FsStat{path: String}
+  # Entries of a directory, in a stable order, from index `from` on, at most
+  # `max` of them.
+  FsList{path: String, from: U32, max: U32}
+  FsRead{path: String, offset: U.U64, len: U32}
+  FsWrite{path: String, offset: U.U64, bytes: +List<U32>}
+  # Creates a regular file (mode: permission bits); fails if it exists.
+  FsCreate{path: String, mode: U32}
+  FsMkdir{path: String, mode: U32}
+  # Removes a file, or an empty directory when dir is True.
+  FsRemove{path: String, dir: Bool}
+  FsRename{from: String, to: String}
+  FsTruncate{path: String, size: U.U64}
+  FsChmod{path: String, mode: U32}
+  FsSymlink{path: String, target: String}
+  FsReadlink{path: String}
+  FsStatfs{}
+
+# A file's attributes (lstat): mode is st_mode (type and permission bits).
+type FsAttr is Data:
+  FsAttr{mode: U32, uid: U32, gid: U32, nlink: U32, size: U.U64, ino: U.U64, blocks: U.U64, atime: U.U64, mtime: U.U64, ctime: U.U64}
+
+# A directory entry: name, inode, and its type (DT_DIR 4, DT_REG 8, DT_LNK 10, ...).
+type FsEntry is Data:
+  FsEntry{name: String, ino: U.U64, kind: U32}
+
+type FsResult is Data:
+  # An errno (ENOENT 2, EACCES 13, EEXIST 17, ENOTDIR 20, EISDIR 21,
+  # EINVAL 22, ENOSPC 28, ENOTEMPTY 66 on macOS, ...).
+  FsErr{errno: U32}
+  FsOk{}
+  FsGotAttr{attr: FsAttr}
+  FsBytes{bytes: +List<U32>}
+  FsCount{n: U32}
+  FsEntries{entries: +List<FsEntry>}
+  FsLink{target: String}
+  # statfs: block size, total, free and available blocks, total and free files.
+  FsStatfsOk{bsize: U32, blocks: U.U64, bfree: U.U64, bavail: U.U64, files: U.U64, ffree: U.U64}
+
 # A program of host effects that ends with a value of type A. Each effect
 # applies to the vCPU whose exit is being handled, unless it names a cpu.
 type Vm<-A: Type> is Type:
@@ -88,6 +132,8 @@ type Vm<-A: Type> is Type:
   VmDiskFlush{disk: U32, next: Vm<A>}
   # A network command for the host's sockets.
   VmNet{cmd: NetCmd, next: Vm<A>}
+  # A file operation on the shared directory (`share` numbers the --share).
+  VmFs{share: U32, op: FsOp, k: FsResult -> Vm<A>}
 
 # Device code is written in Op, a continuation monad over Vm: its bind needs
 # no recursion, so `do Op<R, A>:` blocks pass Bend's termination check. R is
@@ -154,3 +200,6 @@ def Op.disk_flush(-R: Type, disk: U32) -> Op<R, Unit>:
 
 def Op.net(-R: Type, cmd: NetCmd) -> Op<R, Unit>:
   Op{k => VmNet{cmd, k(Unit{})}}
+
+def Op.fs(-R: Type, share: U32, op: FsOp) -> Op<R, FsResult>:
+  Op{k => VmFs{share, op, k}}

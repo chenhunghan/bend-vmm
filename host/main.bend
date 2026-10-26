@@ -181,6 +181,9 @@ def put(mc: Chan(M.Machine), m: M.Machine) -> IO(Unit):
     case V.VmNet{cmd, next}:
       # Wired to host sockets once the NAT lands (src/net/nat.bend).
       interp(cpu, mc, done, A, next)
+    case V.VmFs{sh, op, k}:
+      # Wired to the shared directory once virtio-9p lands (src/fs/p9.bend).
+      interp(cpu, mc, done, A, k(V.FsErr{78}))
 
 # Bytes typed on the host console go to the UART: this loop parks on stdin
 # and hands each chunk to the machine. An idle guest may never exit (the GIC
