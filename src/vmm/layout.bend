@@ -2,10 +2,12 @@ import Base
 import ../lib/u64.bend as U
 
 # The guest physical memory map and the MMIO bus that routes trapped
-# accesses to device models. The map follows QEMU's arm "virt" machine so
-# stock arm64 kernels need nothing special:
+# accesses to device models. The map follows QEMU's arm "virt" machine where
+# it can, except for the GIC redistributors: Hypervisor.framework's GIC
+# reserves a 32 MiB redistributor region, which at QEMU's 0x080A_0000 would
+# swallow the UART and the virtio slots, so it sits at 0x0C00_0000:
 #   GIC distributor    134217728 (0x0800_0000), 64 KiB
-#   GIC redistributors 134873088 (0x080A_0000), 128 KiB per CPU
+#   GIC redistributors 201326592 (0x0C00_0000), 32 MiB region, 128 KiB per CPU
 #   PL011 UART         150994944 (0x0900_0000), 4 KiB, SPI 1 (INTID 33)
 #   virtio-mmio slots  167772160 (0x0A00_0000), 512 bytes each, 32 slots;
 #                      slot n uses SPI 16 + n (INTID 48 + n)
@@ -17,7 +19,11 @@ def Layout.gicd_base() -> U.U64:
   U.U64{0, 134217728}
 
 def Layout.gicr_base() -> U.U64:
-  U.U64{0, 134873088}
+  U.U64{0, 201326592}
+
+# Size of the redistributor region Hypervisor.framework reserves (32 MiB).
+def Layout.gicr_region_size() -> U.U64:
+  U.U64{0, 33554432}
 
 def Layout.uart_base() -> U.U64:
   U.U64{0, 150994944}

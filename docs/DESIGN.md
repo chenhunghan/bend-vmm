@@ -39,12 +39,17 @@ Device code is written in `Op<R, A>`, a continuation monad over `Vm`. Its
 bind needs no recursion, so `do` blocks and Nat-fuelled loops pass Bend's
 termination check. Nothing in `src/` is `@unsafe`.
 
-### Guest memory map (QEMU "virt" compatible)
+### Guest memory map (QEMU "virt" layout, GICR moved)
+
+Hypervisor.framework's GIC reserves a 32 MiB redistributor region (probed
+on macOS 27: distributor 64 KiB, redistributor 128 KiB per CPU, SPIs
+32..1019, vtimer PPI 27). At QEMU's 0x080A_0000 that region would cover the
+UART and the virtio slots, so it moves to 0x0C00_0000.
 
 | Region | Base | Size | IRQ |
 |---|---|---|---|
 | GIC distributor | 0x0800_0000 | 64 KiB | |
-| GIC redistributors | 0x080A_0000 | 128 KiB / CPU | |
+| GIC redistributors | 0x0C00_0000 | 32 MiB region (128 KiB / CPU) | |
 | PL011 UART | 0x0900_0000 | 4 KiB | SPI 1 (INTID 33) |
 | virtio-mmio slot n | 0x0A00_0000 + n·0x200 | 512 B | SPI 16+n (INTID 48+n) |
 | RAM | 0x4000_0000 | configurable | |
