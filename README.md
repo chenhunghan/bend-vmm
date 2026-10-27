@@ -231,9 +231,10 @@ elsewhere. What holds today:
   window); past 32 MiB per connection or 96 MiB in all, or when its peer
   takes nothing for 60 s, the connection is reset. A guest RST resets the
   host's socket at once and drops what waits; a closed connection sends
-  what waits for at most 30 s (at most 64 such at once). The VMM keeps
-  below 1024 descriptors (Bend's runtime polls with select()): a new flow
-  that would pass its socket budget is refused. A connection queues at most
+  what waits for at most 30 s (at most 64 such at once). On macOS the
+  VMM keeps below 1024 descriptors (select() there refuses more); on Linux
+  it raises its soft limit up to 65536. Either way a new flow that would
+  pass the socket budget is refused before the VMM runs out of descriptors. A connection queues at most
   1 MiB for the guest before the host stops reading its socket. Nothing
   reaches the host's sockets before the host's connect completes.
 - Not yet: the VMM is not sandboxed (it runs with your user's rights).
