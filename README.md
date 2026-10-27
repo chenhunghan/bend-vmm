@@ -215,9 +215,23 @@ elsewhere. What holds today:
   qcow2 image's
   backing file name is trusted as `qemu-img` trusts it: do not attach
   images from untrusted sources.
-- Not yet: the VMM is not sandboxed (it runs with your user's rights), and
-  the guest's network reaches what your host reaches (10.0.2.2 is the
-  host's loopback).
+- The network (user-mode NAT): the guest reaches what your host reaches,
+  except these, refused by the NAT (a TCP SYN gets a RST, a UDP datagram is
+  dropped): 0.0.0.0/8, 127.0.0.0/8 named directly, 169.254.0.0/16 (link
+  local, where clouds serve instance metadata), 224.0.0.0/4 (multicast) and
+  255.255.255.255; 10.0.2.3 (the host's resolver) takes port 53 only. The
+  host itself stays reachable as 10.0.2.2, which is the host's loopback: a
+  service bound to 127.0.0.1 on the host is open to the guest. The guest
+  holds at most 256 TCP connections and 128 UDP flows (the least recently
+  used closes first; a flow idle for 60 s closes); each UDP flow is a
+  socket connected to the one address and port the guest sent to, so only
+  that peer answers it. No socket send waits: guest data a peer does not
+  take waits on the host, up to 4 MiB per connection before the NAT stops
+  taking more from the guest (a zero window); a connection whose peer takes
+  nothing for 60 s with data waiting is reset. A connection queues at most
+  256 KiB for the guest before the host stops reading its socket. Nothing
+  reaches the host's sockets before the host's connect completes.
+- Not yet: the VMM is not sandboxed (it runs with your user's rights).
 
 ## How it is verified
 
