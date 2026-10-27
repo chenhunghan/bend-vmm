@@ -2214,6 +2214,20 @@ Term hvf_inflate_disk_run(Env e, Term* f, IoWork* w) {
 #define HVF_WSTALL (60ull * 1000000000ull)
 #define HVF_WTICK  (100ull * 1000000ull)
 
+// Pending guest data over all connections: past HVF_WBUDGET the flusher of
+// each connection that holds some tells the NAT TcpBlocked; a send that
+// would take the total past HVF_WALL resets its connection instead, so the
+// pending bytes never pass HVF_WALL.
+#define HVF_WBUDGET (64ull << 20)
+#define HVF_WALL    (96ull << 20)
+
+// A close (V.TcpClose) with data still pending sends it for at most
+// HVF_WLINGER ns, and at most HVF_WLINGER_MAX connections do so at once:
+// past either the socket is reset. A guest RST (V.TcpAbort) resets it at
+// once.
+#define HVF_WLINGER     (30ull * 1000000000ull)
+#define HVF_WLINGER_MAX 64
+
 // UDP flows: at most HVF_UDP_MAX (the least recently used goes first), each
 // closed after HVF_UDP_IDLE ns without a datagram either way.
 #define HVF_UDP_MAX  128
@@ -2240,7 +2254,9 @@ typedef struct {
   uint8_t  blocked;  // the NAT was told TcpBlocked
   uint8_t  wshut;    // shut down once the data is out
   uint8_t  wclose;   // closed once the data is out
-  uint8_t  wreset;   // over HVF_WHARD: the flusher resets it
+  uint8_t  wreset;   // over HVF_WHARD or HVF_WALL: the flusher resets it
+  u64      wdead;    // wclose: the socket is reset at this time
+  int      fds;      // descriptors counted for it (hvf_fd_used)
   // UDP: the guest's port, the host's address and port, the last datagram
   uint32_t uport, uip, urport;
   u64      ulast;
@@ -2264,17 +2280,40 @@ Term hvf_dns_run(Env e, Term* f, IoWork* w) {
   return (Term)hvf_dns;
 }
 
-// The VMM may hold many sockets (NAT connections and flows, vsock, disks):
-// the soft descriptor limit goes up to the hard one, at most 8192.
+// Descriptors. Bend's runtime waits on parked effects with select(), whose
+// fd_set holds descriptors below FD_SETSIZE (1024): a larger one would write
+// past the set. So the soft limit is min(hard, HVF_FD_TOP), raised or
+// lowered to it, and the kernel never hands out a larger descriptor. The
+// socket table (NAT connections and flows, vsock) holds at most
+// hvf_fd_room of them: the rest (HVF_FD_SPARE, or half of a small limit)
+// stays for disks, the control socket, shares, pipes and the runtime. A new
+// guest flow past hvf_fd_room is refused (a RST, or a dropped datagram)
+// before socket() could fail with EMFILE. A NAT connection counts 3 (its
+// socket and the wake pipe Hvf.tcp_fill may make), anything else 1.
+#define HVF_FD_TOP   1024
+#define HVF_FD_SPARE 128
+
+static int hvf_fd_room = HVF_FD_TOP - HVF_FD_SPARE;
+static int hvf_fd_used;
+
 static void __attribute__((constructor)) hvf_nofile(void) {
   struct rlimit r;
-  if (getrlimit(RLIMIT_NOFILE, &r) == 0 && r.rlim_cur < 8192) {
-    rlim_t want = r.rlim_max == RLIM_INFINITY || r.rlim_max > 8192 ? 8192 : r.rlim_max;
-    if (want > r.rlim_cur) {
-      r.rlim_cur = want;
-      setrlimit(RLIMIT_NOFILE, &r);
+  rlim_t        lim = HVF_FD_TOP;
+  if (getrlimit(RLIMIT_NOFILE, &r) == 0) {
+    lim = r.rlim_max != RLIM_INFINITY && r.rlim_max < HVF_FD_TOP ? r.rlim_max : HVF_FD_TOP;
+    if (r.rlim_cur != lim) {
+      r.rlim_cur = lim;
+      if (setrlimit(RLIMIT_NOFILE, &r) != 0 && getrlimit(RLIMIT_NOFILE, &r) == 0 && r.rlim_cur != RLIM_INFINITY && r.rlim_cur < lim) {
+        lim = r.rlim_cur;
+      }
     }
   }
+  hvf_fd_room = (int)lim - ((int)lim / 2 < HVF_FD_SPARE ? (int)lim / 2 : HVF_FD_SPARE);
+}
+
+// Whether the socket table may take n more descriptors.
+static int hvf_fd_has(int n) {
+  return hvf_fd_used + n <= hvf_fd_room;
 }
 
 static HvfSock* hvf_sock(uint32_t key, int udp) {
@@ -2286,14 +2325,34 @@ static HvfSock* hvf_sock(uint32_t key, int udp) {
   return NULL;
 }
 
-static HvfSock* hvf_sock_new(uint32_t key, int udp, int fd) {
+// Files socket fd under key, counting fds descriptors for it (hvf_fd_has);
+// NULL when the table is full.
+static HvfSock* hvf_sock_new(uint32_t key, int udp, int fd, int fds) {
+  if (!hvf_fd_has(fds)) {
+    return NULL;
+  }
   for (int i = 0; i < HVF_MAX_SOCKS; i++) {
     if (!hvf_socks[i].used) {
-      hvf_socks[i] = (HvfSock){.used = 1, .key = key, .udp = udp, .fd = fd, .wake = {-1, -1}};
+      hvf_socks[i] = (HvfSock){.used = 1, .key = key, .udp = udp, .fd = fd, .wake = {-1, -1}, .fds = fds};
+      hvf_fd_used += fds;
       return &hvf_socks[i];
     }
   }
   return NULL;
+}
+
+static u64 hvf_wtotal; // pending guest data over all connections
+
+// The bytes the socket has not taken yet.
+static u64 hvf_wpend(HvfSock* k) {
+  return k->wlen - k->woff;
+}
+
+static void hvf_wdrop(HvfSock* k) {
+  hvf_wtotal -= hvf_wpend(k);
+  free(k->wbuf);
+  k->wbuf = NULL;
+  k->woff = k->wlen = k->wsize = 0;
 }
 
 // Closing a socket that an effect is parked on would pull the fd out from
@@ -2306,7 +2365,8 @@ static void hvf_sock_release(HvfSock* k) {
     close(k->wake[1]);
   }
   free(k->rbuf);
-  free(k->wbuf);
+  hvf_wdrop(k);
+  hvf_fd_used -= k->fds;
   *k = (HvfSock){.wake = {-1, -1}};
 }
 
@@ -2352,6 +2412,9 @@ static struct sockaddr_in hvf_addr(uint32_t ip, uint32_t port) {
 // Hvf.tcp_connect(conn, ip, port) -> U32: starts a non-blocking connect; 0,
 // or an errno. Hvf.tcp_wait answers when it completes.
 Term hvf_tcp_connect_run(Env e, Term* f, IoWork* w) {
+  if (!hvf_fd_has(3)) {
+    return (Term)(u32)EMFILE;
+  }
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd >= 0) {
     fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -2371,7 +2434,7 @@ Term hvf_tcp_connect_run(Env e, Term* f, IoWork* w) {
     close(fd);
     return (Term)(u32)err;
   }
-  if (!hvf_sock_new((u32)f[0], 0, fd)) {
+  if (!hvf_sock_new((u32)f[0], 0, fd, 3)) {
     close(fd);
     return (Term)(u32)EMFILE;
   }
@@ -2590,17 +2653,6 @@ Term hvf_stage_drop_run(Env e, Term* f, IoWork* w) {
   return (Term)0;
 }
 
-// The bytes the socket has not taken yet.
-static u64 hvf_wpend(HvfSock* k) {
-  return k->wlen - k->woff;
-}
-
-static void hvf_wdrop(HvfSock* k) {
-  free(k->wbuf);
-  k->wbuf = NULL;
-  k->woff = k->wlen = k->wsize = 0;
-}
-
 // Sends what the socket takes of the pending bytes; 0, or an errno (not
 // EAGAIN: the socket is full).
 static int hvf_wsend(HvfSock* k) {
@@ -2608,6 +2660,7 @@ static int hvf_wsend(HvfSock* k) {
     ssize_t m = send(k->fd, k->wbuf + k->woff, k->wlen - k->woff, HVF_NOSIG);
     if (m > 0) {
       k->woff += (u64)m;
+      hvf_wtotal -= (u64)m;
       k->wlast = io_tick();
     } else if (m < 0 && errno == EINTR) {
       continue;
@@ -2641,6 +2694,7 @@ static void hvf_wkeep(HvfSock* k, const uint8_t* p, u64 n) {
   }
   memcpy(k->wbuf + k->wlen, p, n);
   k->wlen += n;
+  hvf_wtotal += n;
 }
 
 // Sends n bytes of guest data on a NAT connection without waiting: what the
@@ -2670,7 +2724,7 @@ static u32 hvf_nat_send(HvfSock* k, const uint8_t* buf, u64 n) {
     }
     k->wlast = io_tick();
   }
-  if (hvf_wpend(k) + (n - at) > HVF_WHARD) {
+  if (hvf_wpend(k) + (n - at) > HVF_WHARD || hvf_wtotal + (n - at) > HVF_WALL) {
     k->wreset = 1;
     hvf_wdrop(k);
   } else {
@@ -2710,10 +2764,11 @@ static Term hvf_tcp_flush_more(Env e, IoWork* w);
 static Term hvf_tcp_flush_step(HvfSock* k, IoWork* w) {
   int err   = k->wreset ? 0 : hvf_wsend(k);
   u64 now   = io_tick();
+  int late  = hvf_wpend(k) && k->wclose && now >= k->wdead;
   int stall = hvf_wpend(k) && now - k->wlast >= HVF_WSTALL;
-  if (k->wreset || err || stall) {
+  if (k->wreset || err || stall || late) {
     if (hvf_trace & 2) {
-      fprintf(stderr, "[trace] tcp %u: reset (%s, %llu pending)\n", k->key, k->wreset ? "over the cap" : err ? strerror(err) : "stalled", (unsigned long long)hvf_wpend(k));
+      fprintf(stderr, "[trace] tcp %u: reset (%s, %llu pending)\n", k->key, k->wreset ? "over the cap" : err ? strerror(err) : late ? "closed too long" : "stalled", (unsigned long long)hvf_wpend(k));
     }
     int           closed = k->wclose;
     struct linger l      = {1, 0};
@@ -2740,11 +2795,11 @@ static Term hvf_tcp_flush_step(HvfSock* k, IoWork* w) {
     k->flushing = 0;
     return (Term)1;
   }
-  if (!k->wclose && !k->blocked && hvf_wpend(k) > HVF_WCAP) {
+  if (!k->wclose && !k->blocked && (hvf_wpend(k) > HVF_WCAP || hvf_wtotal > HVF_WBUDGET)) {
     k->blocked = 1;
     return (Term)3;
   }
-  if (!k->wclose && k->blocked && hvf_wpend(k) <= HVF_WCAP / 2) {
+  if (!k->wclose && k->blocked && hvf_wpend(k) <= HVF_WCAP / 2 && hvf_wtotal <= HVF_WBUDGET / 2) {
     k->blocked = 0;
     return (Term)0;
   }
@@ -2840,12 +2895,37 @@ Term hvf_tcp_shutdown_run(Env e, Term* f, IoWork* w) {
   return (Term)(k && shutdown(k->fd, SHUT_WR) == 0 ? 0 : HVF_ERR);
 }
 
+// Resets k's socket at once: what is pending is dropped (SO_LINGER 0).
+static void hvf_tcp_reset(HvfSock* k) {
+  struct linger l = {1, 0};
+  setsockopt(k->fd, SOL_SOCKET, SO_LINGER, &l, sizeof l);
+  hvf_wdrop(k);
+  hvf_sock_free(k);
+}
+
+// How many closed connections still send what is pending.
+static int hvf_wlingering(void) {
+  int n = 0;
+  for (int i = 0; i < HVF_MAX_SOCKS; i++) {
+    if (hvf_socks[i].used && !hvf_socks[i].closing && !hvf_socks[i].udp && hvf_socks[i].wclose) {
+      n++;
+    }
+  }
+  return n;
+}
+
 // Hvf.tcp_close(conn) -> U32: closes now, or once what is pending is out
-// (the flusher closes it; reading stops at once).
+// (the flusher closes it; reading stops at once), within HVF_WLINGER; with
+// HVF_WLINGER_MAX closes already waiting so, it resets at once.
 Term hvf_tcp_close_run(Env e, Term* f, IoWork* w) {
   HvfSock* k = hvf_sock((u32)f[0], 0);
+  if (k && hvf_wpend(k) && !k->wreset && hvf_wlingering() >= HVF_WLINGER_MAX) {
+    hvf_tcp_reset(k);
+    return (Term)0;
+  }
   if (k && hvf_wpend(k) && !k->wreset) {
     k->wclose = 1;
+    k->wdead  = io_tick() + HVF_WLINGER;
     shutdown(k->fd, SHUT_RD);
     if (k->wake[1] >= 0) {
       (void)!write(k->wake[1], "x", 1);
@@ -2854,6 +2934,16 @@ Term hvf_tcp_close_run(Env e, Term* f, IoWork* w) {
   }
   if (k) {
     hvf_sock_free(k);
+  }
+  return (Term)0;
+}
+
+// Hvf.tcp_abort(conn) -> U32: the guest reset the connection: its socket is
+// reset at once, what is pending dropped.
+Term hvf_tcp_abort_run(Env e, Term* f, IoWork* w) {
+  HvfSock* k = hvf_sock((u32)f[0], 0);
+  if (k) {
+    hvf_tcp_reset(k);
   }
   return (Term)0;
 }
@@ -2896,13 +2986,19 @@ static void hvf_udp_room(void) {
 // (the caller starts its receiver, Hvf.udp_recv), 0 otherwise, 0xFFFFFFFF
 // on failure.
 Term hvf_udp_send_run(Env e, Term* f, IoWork* w) {
-  u32      sport = (u32)f[0], ip = (u32)f[1], port = (u32)f[2];
+  u32   sport = (u32)f[0], ip = (u32)f[1], port = (u32)f[2];
+  u64   n;
+  char* buf = io_cbuf(e, f[3], &n, CID(Con));
+  if (!buf) {
+    return (Term)HVF_ERR;
+  }
   HvfSock* k     = hvf_udp_flow(sport, ip, port);
   u32      fresh = 0;
   if (!k) {
     hvf_udp_room();
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    int fd = hvf_fd_has(1) ? socket(AF_INET, SOCK_DGRAM, 0) : -1;
     if (fd < 0) {
+      free(buf);
       return (Term)HVF_ERR;
     }
     fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -2910,24 +3006,21 @@ Term hvf_udp_send_run(Env e, Term* f, IoWork* w) {
     struct sockaddr_in a = hvf_addr(ip, port);
     if (connect(fd, (struct sockaddr*)&a, sizeof a) != 0) {
       close(fd);
+      free(buf);
       return (Term)HVF_ERR;
     }
     do {
       fresh = ++hvf_udp_next;
     } while (fresh == 0 || fresh == HVF_ERR);
-    k = hvf_sock_new(fresh, 1, fd);
+    k = hvf_sock_new(fresh, 1, fd, 1);
     if (!k) {
       close(fd);
+      free(buf);
       return (Term)HVF_ERR;
     }
     k->uport  = sport;
     k->uip    = ip;
     k->urport = port;
-  }
-  u64   n;
-  char* buf = io_cbuf(e, f[3], &n, CID(Con));
-  if (!buf) {
-    return (Term)HVF_ERR;
   }
   send(k->fd, buf, n, HVF_NOSIG);
   free(buf);
@@ -3799,6 +3892,9 @@ Term hvf_unix_connect_run(Env e, Term* f, IoWork* w) {
   }
   memcpy(a.sun_path, path, n + 1);
   free(path);
+  if (!hvf_fd_has(1)) {
+    return (Term)(u32)EMFILE;
+  }
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd >= 0) {
     fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -3816,7 +3912,7 @@ Term hvf_unix_connect_run(Env e, Term* f, IoWork* w) {
     close(fd);
     return (Term)(u32)err;
   }
-  if (!hvf_sock_new((u32)f[0], 0, fd)) {
+  if (!hvf_sock_new((u32)f[0], 0, fd, 1)) {
     close(fd);
     return (Term)(u32)EMFILE;
   }
@@ -3906,7 +4002,7 @@ static Term hvf_vs_line(Env e, IoWork* w) {
     return hvf_vs_accept(e, w);
   }
   uint32_t conn = hvf_vs_next++;
-  if (!hvf_sock_new(conn ^ 0x40000000u, 0, c)) {
+  if (!hvf_sock_new(conn ^ 0x40000000u, 0, c, 1)) {
     close(c);
     w->made = 0;
     return hvf_vs_accept(e, w);
@@ -4258,6 +4354,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.tcp_close)
   io_eff(CID(Hvf.tcp_close), hvf_tcp_close_run);
+#endif
+#ifdef CID(Hvf.tcp_abort)
+  io_eff(CID(Hvf.tcp_abort), hvf_tcp_abort_run);
 #endif
 #ifdef CID(Hvf.udp_send)
   io_eff(CID(Hvf.udp_send), hvf_udp_send_run);

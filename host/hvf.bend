@@ -216,6 +216,12 @@ def Hvf.tcp_close(conn: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+# The guest reset a NAT connection: the host resets its socket at once and
+# drops the data it has not sent.
+def Hvf.tcp_abort(conn: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.udp_send(sport: U32, ip: U32, port: U32, bytes: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"

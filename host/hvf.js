@@ -54,6 +54,7 @@ io_eff(CID(Hvf.tcp_shutdown), hvf_unavailable);
 io_eff(CID(Hvf.nat_send), () => 0);
 io_eff(CID(Hvf.tcp_flush), () => 1);
 io_eff(CID(Hvf.tcp_close), hvf_unavailable);
+io_eff(CID(Hvf.tcp_abort), hvf_unavailable);
 io_eff(CID(Hvf.udp_send), hvf_unavailable);
 io_eff(CID(Hvf.udp_recv), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.share_open), hvf_unavailable);

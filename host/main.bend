@@ -375,7 +375,7 @@ def net_room(+m: M.Machine, udp: Bool, +conn: U32) -> Bool:
 
 # Backpressure: the link to the guest must stay lossless, so a reader waits
 # as long as net_room says no (looking again after 2 ms, then less often,
-# at least every 64 ms); it never reads on regardless.
+# at least every 16 ms); it never reads on regardless.
 @unsafe def net_wait(+mc: Chan(M.Machine), +udp: Bool, +conn: U32, +ms: U32) -> IO(Unit):
   do IO<Unit>:
     +m : M.Machine <- take(mc)
@@ -389,7 +389,7 @@ def net_room(+m: M.Machine, udp: Bool, +conn: U32) -> Bool:
     case False{}:
       do IO<Unit>:
         IO.sleep(ms)
-        net_wait(mc, udp, conn, U32.min((ms * 2 : U32), 64))
+        net_wait(mc, udp, conn, U32.min((ms * 2 : U32), 16))
 
 @unsafe def tcp_reader.got(eof: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32, bs: +List<U32>) -> IO(Unit):
   match eof:
@@ -533,6 +533,10 @@ def net_room(+m: M.Machine, udp: Bool, +conn: U32) -> Bool:
     case V.TcpClose{conn}:
       do IO<Unit>:
         _ : U32 <- H.Hvf.tcp_close(conn)
+        return Unit{}
+    case V.TcpAbort{conn}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.tcp_abort(conn)
         return Unit{}
     case V.UdpSend{+sport, ip, port, bs}:
       do IO<Unit>:
