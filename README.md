@@ -226,10 +226,15 @@ elsewhere. What holds today:
   used closes first; a flow idle for 60 s closes); each UDP flow is a
   socket connected to the one address and port the guest sent to, so only
   that peer answers it. No socket send waits: guest data a peer does not
-  take waits on the host, up to 4 MiB per connection before the NAT stops
-  taking more from the guest (a zero window); a connection whose peer takes
-  nothing for 60 s with data waiting is reset. A connection queues at most
-  256 KiB for the guest before the host stops reading its socket. Nothing
+  take waits on the host, up to 4 MiB per connection and 64 MiB over all
+  connections before the NAT stops taking more from the guest (a zero
+  window); past 32 MiB per connection or 96 MiB in all, or when its peer
+  takes nothing for 60 s, the connection is reset. A guest RST resets the
+  host's socket at once and drops what waits; a closed connection sends
+  what waits for at most 30 s (at most 64 such at once). The VMM keeps
+  below 1024 descriptors (Bend's runtime polls with select()): a new flow
+  that would pass its socket budget is refused. A connection queues at most
+  1 MiB for the guest before the host stops reading its socket. Nothing
   reaches the host's sockets before the host's connect completes.
 - Not yet: the VMM is not sandboxed (it runs with your user's rights).
 
