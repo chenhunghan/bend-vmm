@@ -50,6 +50,9 @@ type NetCmd is Data:
   # The guest acknowledged all the host holds for the connection (TcpReady):
   # the host may drop it and read on.
   TcpRelease{conn: U32}
+  # Abort: the guest reset the connection. The host drops the data it has
+  # not sent yet and resets its socket at once (SO_LINGER 0).
+  TcpAbort{conn: U32}
 
 # What the host reports back to the NAT.
 type NetEvent is Data:

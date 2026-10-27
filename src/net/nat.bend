@@ -32,7 +32,7 @@ import ./dhcp.bend as D
 #       Slirp.dst_ok: RST|ACK (seq 0, ack seq + 1) and no connection.
 #     SynSent (the host is still connecting): everything but a RST is
 #       dropped, unanswered.
-#     RST, known: V.TcpClose{id}; the connection is forgotten.
+#     RST, known: V.TcpAbort{id}; the connection is forgotten.
 #     Blocked (the host's socket holds too much unsent, V.TcpBlocked):
 #       in-order data is dropped (seq hseq, ack gseq, window 0 answers it)
 #       until V.TcpUnblocked.
@@ -114,7 +114,7 @@ def Slirp.max_conns() -> Nat:
 # The most bytes a connection queues for the guest (TcpData waiting for the
 # guest's ACK): past them the host reads no more of its socket.
 def Slirp.queue_cap() -> U32:
-  262144
+  1048576
 
 # The flow toward the guest, in sequence numbers: the guest acknowledged
 # everything before una and takes what lies before wnd (its last ACK plus
@@ -616,7 +616,7 @@ def Tcp.known(syn: Bool, rst: Bool, +c: Conn, rest: +List<Conn>, next_id: U32, +
     case True{} _:
       SlirpOut{Slirp{c <> rest, next_id}, [], Payload.drop(pl)}
     case False{} True{}:
-      SlirpOut{Slirp{rest, next_id}, [], V.TcpClose{Conn.id(c)} <> Payload.drop(pl)}
+      SlirpOut{Slirp{rest, next_id}, [], V.TcpAbort{Conn.id(c)} <> Payload.drop(pl)}
     case False{} False{}:
       Tcp.in_seq(U32.is_eq(seq, Conn.gseq(c)), c, rest, next_id, pl, fin)
 
