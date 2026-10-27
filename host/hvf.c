@@ -2280,33 +2280,48 @@ Term hvf_dns_run(Env e, Term* f, IoWork* w) {
   return (Term)hvf_dns;
 }
 
-// Descriptors. Bend's runtime waits on parked effects with select(), whose
-// fd_set holds descriptors below FD_SETSIZE (1024): a larger one would write
-// past the set. So the soft limit is min(hard, HVF_FD_TOP), raised or
-// lowered to it, and the kernel never hands out a larger descriptor. The
-// socket table (NAT connections and flows, vsock) holds at most
-// hvf_fd_room of them: the rest (HVF_FD_SPARE, or half of a small limit)
-// stays for disks, the control socket, shares, pipes and the runtime. A new
-// guest flow past hvf_fd_room is refused (a RST, or a dropped datagram)
-// before socket() could fail with EMFILE. A NAT connection counts 3 (its
-// socket and the wake pipe Hvf.tcp_fill may make), anything else 1.
-#define HVF_FD_TOP   1024
+// Descriptors. Bend's runtime waits on parked effects with select(). On
+// Linux it sizes its fd sets by the top descriptor, so any descriptor is
+// fine and the soft limit is raised to min(hard, HVF_FD_TOP) (never
+// lowered). On macOS select() fails with EINVAL for nfds > FD_SETSIZE
+// (1024) and the runtime then aborts ("the poller failed"), so the soft
+// limit is min(hard, FD_SETSIZE), raised or lowered to it, and the kernel
+// never hands out a larger descriptor. Either way the socket table (NAT
+// connections and flows, vsock) holds at most hvf_fd_room descriptors: the
+// rest (HVF_FD_SPARE, or half of a small limit) stays for disks, the control
+// socket, shares, pipes and the runtime. A new guest flow past hvf_fd_room
+// is refused (a RST, or a dropped datagram) before socket() could fail with
+// EMFILE. A NAT connection counts 3 (its socket and the wake pipe
+// Hvf.tcp_fill may make), anything else 1.
+#ifdef __APPLE__
+#define HVF_FD_TOP 1024 // FD_SETSIZE
+#else
+#define HVF_FD_TOP 65536
+#endif
 #define HVF_FD_SPARE 128
 
-static int hvf_fd_room = HVF_FD_TOP - HVF_FD_SPARE;
+static int hvf_fd_room = 1024 - HVF_FD_SPARE;
 static int hvf_fd_used;
 
 static void __attribute__((constructor)) hvf_nofile(void) {
   struct rlimit r;
-  rlim_t        lim = HVF_FD_TOP;
+  rlim_t        lim = 1024;
   if (getrlimit(RLIMIT_NOFILE, &r) == 0) {
-    lim = r.rlim_max != RLIM_INFINITY && r.rlim_max < HVF_FD_TOP ? r.rlim_max : HVF_FD_TOP;
-    if (r.rlim_cur != lim) {
-      r.rlim_cur = lim;
-      if (setrlimit(RLIMIT_NOFILE, &r) != 0 && getrlimit(RLIMIT_NOFILE, &r) == 0 && r.rlim_cur != RLIM_INFINITY && r.rlim_cur < lim) {
-        lim = r.rlim_cur;
+    rlim_t want = r.rlim_max != RLIM_INFINITY && r.rlim_max < HVF_FD_TOP ? r.rlim_max : HVF_FD_TOP;
+#ifdef __APPLE__
+    int set = r.rlim_cur != want;
+#else
+    int set = r.rlim_cur == RLIM_INFINITY ? 0 : r.rlim_cur < want;
+#endif
+    if (set) {
+      r.rlim_cur = want;
+      if (setrlimit(RLIMIT_NOFILE, &r) != 0) {
+        getrlimit(RLIMIT_NOFILE, &r);
       }
     }
+    // The budget counts at most HVF_FD_TOP, even when Linux's soft limit is
+    // higher (the table, HVF_MAX_SOCKS, bounds it below that anyway).
+    lim = r.rlim_cur != RLIM_INFINITY && r.rlim_cur < HVF_FD_TOP ? r.rlim_cur : HVF_FD_TOP;
   }
   hvf_fd_room = (int)lim - ((int)lim / 2 < HVF_FD_SPARE ? (int)lim / 2 : HVF_FD_SPARE);
 }
