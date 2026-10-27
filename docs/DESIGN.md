@@ -177,9 +177,10 @@ floor (`Csum.small`, `Tcp.small`).
 
 - UEFI: a fw_cfg device (boot order, kernel loading) and a graphics output
   (ramfb) for the firmware's own screens.
-- The NAT's remaining hardening (non-blocking sends, connection and socket
-  caps, an outbound policy): PR #25. vsock's host-side send still blocks the
-  event loop when the host program stops reading.
+- vsock moves its payload through Bend lists (about 7 MB/s to the guest,
+  27 MB/s from it); the NAT's V.Iov path (a host hold copied straight into
+  guest memory, staged transmits) would lift it, but VConn's byte-list
+  `pending` is pinned by laws/snapshot.bend.
 - A vCPU waiting on another's interrupt pays Hypervisor.framework's ~80 µs
   WFI wake (a disk request from vCPU 1: ~100 µs against ~21 µs on vCPU 0).
 - No sandbox: the VMM runs with the user's rights.
