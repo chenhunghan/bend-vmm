@@ -331,15 +331,24 @@ def Machine.vsock_cmds(-R: Type, cs: +List<V.VsockCmd>) -> V.Op<R, Unit>:
         V.Op.vsock(R, c)
         Machine.vsock_cmds(R, rest)
 
+# Transmitted frames through the NAT; none (most virtio writes) leave it as
+# it is, without a pass over the devices.
+def Machine.virtio_frames(-R: Type, none: Bool, p: P.PsciState, u: Uart.Pl011, ui: Bool, devs: +List<D.Dev>, lines: +List<Bool>, rt: Rtc.Pl031, ri: Bool, nt: Nt.Slirp, fl: Pf.Pflash, fs: +List<+List<U32>>) -> V.Op<R, Machine>:
+  match none:
+    case True{}:
+      V.Op.pure(R, Machine, Machine{p, u, ui, devs, lines, rt, ri, nt, fl})
+    case False{}:
+      Machine.slirp(R, p, u, ui, devs, lines, rt, ri, fl, Machine.guest_frames(nt, fs))
+
 # After a virtio write: hvc0 bytes to the console, vsock commands to the
 # host, transmitted frames through the NAT.
 def Machine.virtio_wrote(-R: Type, p: P.PsciState, u: Uart.Pl011, ui: Bool, lines: +List<Bool>, rt: Rtc.Pl031, ri: Bool, nt: Nt.Slirp, fl: Pf.Pflash, w: Wrote) -> V.Op<R, Machine>:
   match w:
-    case Wrote{devs, bs, fs, vc}:
+    case Wrote{devs, bs, +fs, vc}:
       do V.Op<R, Machine>:
         Machine.print(R, bs)
         Machine.vsock_cmds(R, vc)
-        Machine.slirp(R, p, u, ui, devs, lines, rt, ri, fl, Machine.guest_frames(nt, fs))
+        Machine.virtio_frames(R, List.is_empty(&2, +List<U32>, fs), p, u, ui, devs, lines, rt, ri, nt, fl, fs)
 
 # The 32-bit write of v to bus device n at off.
 def Machine.dev_write(-R: Type, n: Nat, m: Machine, off: U32, v: U32) -> V.Op<R, Machine>:
@@ -393,17 +402,26 @@ def Machine.unmapped(write: Bool, m: Machine, ipa: U.U64, size: U32, +srt: U32) 
     V.Op.advance_pc(Step)
     return Step{m, Run{}}
 
+# The lines after a read: a UART read (lines true) can lower its interrupt;
+# a virtio register read changes no line, so the pass is skipped.
+def Machine.read_lines(-R: Type, lines: Bool, +m: Machine) -> V.Op<R, Machine>:
+  match lines:
+    case True{}:
+      Machine.irqs(R, m)
+    case False{}:
+      V.Op.pure(R, Machine, m)
+
 # A device read has happened: the register, the lines, the PC.
-def Machine.loaded(r: Machine & U32, +size: U32, srt: U32, sse: Bool, sf: Bool) -> V.Op<Step, Step>:
+def Machine.loaded(r: Machine & U32, +size: U32, srt: U32, sse: Bool, sf: Bool, lines: Bool) -> V.Op<Step, Step>:
   match r:
     case (m, v):
       do V.Op<Step, Step>:
         Machine.put_reg(Step, srt, Machine.extend(v, size, sse, sf))
-        m : Machine <- Machine.irqs(Step, m)
+        m : Machine <- Machine.read_lines(Step, lines, m)
         V.Op.advance_pc(Step)
         return Step{m, Run{}}
 
-def Machine.access(write: Bool, n: Nat, m: Machine, off: U32, size: U32, srt: U32, value: U.U64, sse: Bool, sf: Bool) -> V.Op<Step, Step>:
+def Machine.access(write: Bool, +n: Nat, m: Machine, off: U32, size: U32, srt: U32, value: U.U64, sse: Bool, sf: Bool) -> V.Op<Step, Step>:
   match write:
     case True{}:
       do V.Op<Step, Step>:
@@ -413,7 +431,7 @@ def Machine.access(write: Bool, n: Nat, m: Machine, off: U32, size: U32, srt: U3
         return Step{m, Run{}}
     case False{}:
       +size = size
-      Machine.loaded(Machine.dev_read(n, m, off, size), size, srt, sse, sf)
+      Machine.loaded(Machine.dev_read(n, m, off, size), size, srt, sse, sf, Nat.is_eq(n, 0n))
 
 def Machine.route(hit: Maybe<&2, L.Hit>, m: Machine, ipa: U.U64, write: Bool, size: U32, srt: U32, value: U.U64, sse: Bool, sf: Bool) -> V.Op<Step, Step>:
   match hit:

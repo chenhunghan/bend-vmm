@@ -136,5 +136,8 @@ def Trap.by_dabt(hit: Bool, +ec: U32, +iss: U32, ipa: U.U64, xt: U.U64) -> Trap:
 # xt the value of the register ISS.SRT names (both as in RawExit).
 def Trap.decode(esr: U.U64, ipa: U.U64, xt: U.U64) -> Trap:
   +esr = esr
-  +ec +iss = Esr.ec(esr) Esr.iss(esr)
+  # sequential: on every exit, and a native parallel let costs about 2.6 us
+  # to spawn against a few ns of work here
+  +ec = Esr.ec(esr)
+  +iss = Esr.iss(esr)
   Trap.by_dabt(U32.is_eq(ec, Ec.dabt_lower()), ec, iss, ipa, xt)

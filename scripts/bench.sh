@@ -12,9 +12,9 @@
 #                   payload, per store: one guest exit handled end to end
 #   mmio-exit       the same from a Linux process (tests/guest/bench.c)
 #   disk-*          virtio-blk: sequential 1 MiB read and write, 4 KiB random
-#                   reads (QD1), O_DIRECT on a 256 MiB image
-#   net-*, 9p-*     a 64 MiB download from a host HTTP server through the NAT
-#                   and a 64 MiB upload to a host socket, HTTP request
+#                   reads (QD1), O_DIRECT on a 256 MiB image (written out)
+#   net-*, 9p-*     a 256 MiB download from a host HTTP server through the NAT
+#                   and a 256 MiB upload to a host socket, HTTP request
 #                   latency, the shared folder's read, write and stat
 #   rss-*           the VMM's resident memory after the guest benchmarks
 # SKIP_BUILD=1 uses out/bend-vmm as it is.
@@ -54,13 +54,16 @@ rec exit-uart "$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.2f", (b - a) * 1e6
 
 # the guest benchmarks
 t=$(mktemp -d)
-dd if=/dev/zero of="$t/disk.img" bs=1048576 count=0 seek=256 2>/dev/null
+# written out, not sparse: reads move real bytes, not holes
+head -c 268435456 /dev/urandom > "$t/disk.img"
 mkdir "$t/www" "$t/share"
-head -c 67108864 /dev/urandom > "$t/www/big"; echo 67108864 > "$t/www/size"
+# 256 MiB: the guest times with /proc/uptime (10 ms), so a transfer takes
+# a few tenths of a second at least
+head -c 268435456 /dev/urandom > "$t/www/big"; echo 268435456 > "$t/www/size"
 ln "$t/www/big" "$t/share/big"; cp "$t/www/size" "$t/share/size"
 port=$((20000 + RANDOM % 20000))
 (cd "$t/www" && exec python3 -m http.server "$port" --bind 127.0.0.1 >/dev/null 2>&1) & http=$!
-python3 scripts/bench/sink.py $((port + 1)) 67108864 & sink=$!
+python3 scripts/bench/sink.py $((port + 1)) 268435456 & sink=$!
 sleep 1
 $vmm --mem 1024 --cpus 2 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/disk.img" --share "$t/share" \
   --cmdline "console=ttyAMA0 quiet bendbench benchttp=$port" > "$t/run.log" 2>&1 &
