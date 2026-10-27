@@ -140,17 +140,16 @@ def syn_to(+dst: U32, port: U32) -> +List<U32>:
 law nat.no_special_dst:
   {(frames(N.Slirp.guest_frame(N.Slirp.new(), syn_to(2852039166, 80))), cmds(N.Slirp.guest_frame(N.Slirp.new(), syn_to(2852039166, 80))), cmds(N.Slirp.guest_frame(N.Slirp.new(), to_host(W.Udp.build(g(), 2130706433, W.Udp{33000, 53, [7]}), 2130706433, 17))), cmds(N.Slirp.guest_frame(N.Slirp.new(), to_host(W.Udp.build(g(), 167772675, W.Udp{33000, 80, [7]}), 167772675, 17)))) == ([to_guest(2852039166, 6, W.Tcp.build(2852039166, g(), W.Tcp{80, 40000, 0, 1000, 20, 65535, 0, []}))], [], [], []) : +List<+List<U32>> & +List<V.NetCmd> & +List<V.NetCmd> & +List<V.NetCmd>}
 
-def zeros(n: Nat) -> +List<U32>:
-  match n:
-    case 0n:
-      []
-    case 1n+p:
-      0 <> zeros(p)
+# A connection whose queue toward the guest holds n bytes (una 2, dend
+# 2 + n): the counts come from the sequence numbers, so the kernel need not
+# build 256 KiB of queue.
+def queued(n: U32) -> N.Slirp:
+  N.Slirp{[N.Conn{0, 40000, remote(), 80, 1, 1000, 2, N.Flow{2, 2, (2 + n : U32), 2, 0, [], False{}, 4294967295, 2, 0, 1}}], 1}
 
 # The host reads a connection on only while its queue toward the guest
 # holds less than N.Slirp.queue_cap (256 KiB) bytes.
 law nat.queue_bounded:
-  {(N.Slirp.may_read(net(N.Slirp.host_event(narrow(), V.TcpData{0, zeros(262143n)})), 0), N.Slirp.may_read(net(N.Slirp.host_event(narrow(), V.TcpData{0, zeros(262144n)})), 0)) == (True{}, False{}) : Bool & Bool}
+  {(N.Slirp.may_read(queued(262143), 0), N.Slirp.may_read(queued(262144), 0)) == (True{}, False{}) : Bool & Bool}
 
 # While the host's socket is over its pending cap (TcpBlocked), guest data
 # is not taken: no send, and an ACK of what came before with a zero window.
