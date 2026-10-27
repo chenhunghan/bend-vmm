@@ -3336,6 +3336,10 @@ Term hvf_ctl_listen_run(Env e, Term* f, IoWork* w) {
 
 static Term hvf_ctl_line(Env e, IoWork* w);
 
+// One client at a time: one that sends no full line within 5 s is dropped,
+// so it cannot hold the control socket from the next.
+static uint64_t hvf_ctl_deadline;
+
 static int hvf_accept_full(int err) {
   return err == EMFILE || err == ENFILE || err == ENOBUFS || err == ENOMEM;
 }
@@ -3349,8 +3353,9 @@ static Term hvf_ctl_accept(Env e, IoWork* w) {
   }
   fcntl(c, F_SETFD, FD_CLOEXEC);
   fcntl(c, F_SETFL, O_NONBLOCK);
-  hvf_ctl_client = c;
-  w->made        = 0;
+  hvf_ctl_client   = c;
+  hvf_ctl_deadline = io_tick() + 5000000000ull;
+  w->made          = 0;
   return hvf_ctl_line(e, w);
 }
 
@@ -3360,7 +3365,12 @@ static Term hvf_ctl_line(Env e, IoWork* w) {
   for (;;) {
     ssize_t k = read(hvf_ctl_client, &ch, 1);
     if (k < 0 && errno == EAGAIN) {
-      return io_wait_on(w, hvf_ctl_client, POLLIN, 0, hvf_ctl_line);
+      if (io_tick() >= hvf_ctl_deadline) {
+        close(hvf_ctl_client);
+        hvf_ctl_client = -1;
+        return hvf_ctl_accept(e, w);
+      }
+      return io_wait_on(w, hvf_ctl_client, POLLIN, hvf_ctl_deadline, hvf_ctl_line);
     }
     if (k <= 0 || ch == '\n' || w->made >= 1023) {
       break;
@@ -3485,6 +3495,8 @@ Term hvf_vsock_listen_run(Env e, Term* f, IoWork* w) {
 
 static Term hvf_vs_line(Env e, IoWork* w);
 
+static uint64_t hvf_vs_deadline;
+
 static Term hvf_vs_accept(Env e, IoWork* w) {
   int c = accept(hvf_vs_fd, NULL, NULL);
   if (c < 0) {
@@ -3497,8 +3509,9 @@ static Term hvf_vs_accept(Env e, IoWork* w) {
 #ifdef SO_NOSIGPIPE
   setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
 #endif
-  w->hand = c;
-  w->made = 0;
+  w->hand         = c;
+  w->made         = 0;
+  hvf_vs_deadline = io_tick() + 5000000000ull;
   return hvf_vs_line(e, w);
 }
 
@@ -3510,7 +3523,14 @@ static Term hvf_vs_line(Env e, IoWork* w) {
   for (;;) {
     ssize_t k = read(c, &ch, 1);
     if (k < 0 && errno == EAGAIN) {
-      return io_wait_on(w, c, POLLIN, 0, hvf_vs_line);
+      // a client that names no port within 5 s is dropped (as on the
+      // control socket), so it cannot hold the listener
+      if (io_tick() >= hvf_vs_deadline) {
+        close(c);
+        w->made = 0;
+        return hvf_vs_accept(e, w);
+      }
+      return io_wait_on(w, c, POLLIN, hvf_vs_deadline, hvf_vs_line);
     }
     if (k <= 0 || ch == '\n' || w->made >= 63) {
       break;
