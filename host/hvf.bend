@@ -90,6 +90,10 @@ def Hvf.disk_open_backing(path: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.disk_status(disk: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.signal_wait() -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"

@@ -232,6 +232,10 @@ type Vm<-A: Type> is Type:
   # Inflates that stream into disk image dst at doff: len of its bytes from
   # skip on (zeros past its end).
   VmInflateToDisk{disk: U32, off: U.U64, clen: U32, dst: U32, doff: U.U64, skip: U32, len: U32, next: Vm<A>}
+  # Whether a host operation on disk image `disk` failed since the last ask
+  # (1) or not (0); the ask clears it. The disk ops above answer nothing, so
+  # a device asks once its request is done.
+  VmDiskStatus{disk: U32, k: U32 -> Vm<A>}
 
 # Device code is written in Op, a continuation monad over Vm: its bind needs
 # no recursion, so `do Op<R, A>:` blocks pass Bend's termination check. R is
@@ -313,6 +317,9 @@ def Op.inflate_to_ram(-R: Type, disk: U32, off: U.U64, clen: U32, skip: U32, iov
 
 def Op.inflate_to_disk(-R: Type, disk: U32, off: U.U64, clen: U32, dst: U32, doff: U.U64, skip: U32, len: U32) -> Op<R, Unit>:
   Op{k => VmInflateToDisk{disk, off, clen, dst, doff, skip, len, k(Unit{})}}
+
+def Op.disk_status(-R: Type, disk: U32) -> Op<R, U32>:
+  Op{k => VmDiskStatus{disk, k}}
 
 def Op.random(-R: Type, len: U32) -> Op<R, +List<U32>>:
   Op{k => VmRandom{len, k}}

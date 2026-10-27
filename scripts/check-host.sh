@@ -21,6 +21,8 @@
 #      image and a fresh one read and written by the guest; qemu-img checks
 #      them and reads back what the guest wrote; a second bend-vmm cannot
 #      open an image one writes, two overlays share a backing file.
+#   9. (macOS) a disk image on a full host volume: guest writes fail (IOERR)
+#      instead of being lost.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 host=$(uname -s)-$(uname -m)
@@ -227,6 +229,21 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
     [ "$(head -c 4 "$t/plain.raw" | od -An -tx1 | tr -d ' ')" = 00000000 ] && grn "ok: a raw disk refuses a qcow2 header" || { red "failed: raw disk took a qcow2 header"; tail -5 <<<"$out"; fail=1; }
     rm -rf "$t"
   fi
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && command -v hdiutil >/dev/null; then
+  echo "== 9. a full host disk: the guest sees I/O errors, not lost writes"
+  t=$(mktemp -d)
+  if hdiutil create -quiet -size 3m -fs APFS -volname bendfull "$t/full.dmg" && hdiutil attach -quiet -mountpoint "$t/mnt" "$t/full.dmg"; then
+    dd if=/dev/zero of="$t/mnt/d.img" bs=1048576 count=0 seek=64 2>/dev/null
+    out=$(drive 90 "busybox shell" 'dd if=/dev/urandom of=/dev/vda bs=1M count=8 oflag=direct; echo FULL-DONE\n' "FULL-DONE" 'poweroff -f\n' -- \
+      ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/mnt/d.img" --cmdline "console=ttyAMA0 quiet" 2>&1 | tr -d '\r')
+    grep -aq "dd: error writing '/dev/vda': I/O error" <<<"$out" && grn "ok: writes past a full host disk fail in the guest (IOERR)" || { red "failed: full host disk"; grep -a "records\|error" <<<"$out" | tail -3; fail=1; }
+    hdiutil detach -quiet "$t/mnt"
+  else
+    echo "skipped: cannot make a small volume"
+  fi
+  rm -rf "$t"
 fi
 
 if [ $fail = 0 ]; then grn "CHECK-MAC OK"; else red "CHECK-MAC FAILED"; fi

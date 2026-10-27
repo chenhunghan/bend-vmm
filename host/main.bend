@@ -316,6 +316,10 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
       do IO<A>:
         _ : U32 <- H.Host.inflate_disk(d, off, clen, dd, doff, skip, len)
         interp(cpu, mc, done, A, next)
+    case V.VmDiskStatus{d, k}:
+      do IO<A>:
+        rc : U32 <- H.Hvf.disk_status(d)
+        interp(cpu, mc, done, A, k(rc))
     case V.VmNetToRam{conn, off, iovs, next}:
       do IO<A>:
         _ : U32 <- H.Host.net_copy(conn, off, iovs)

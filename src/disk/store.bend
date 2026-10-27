@@ -378,6 +378,20 @@ def Store.write(fuel: Nat, -R: Type, st: Store, +off: U.U64, +iovs: +List<V.Iov>
             ok2 : Bool <- Store.write.rest(R, U32.is_zero(V.Iov.total(rest)), Store.write(f, R, QcowStore{disk, q, below}, U.U64.add_u32(off, n), rest))
             return ok1 && ok2
 
+# Whether a host operation on the store's images failed since the last ask
+# (nonzero), clearing it: a request asks once it is done.
+def Store.status(-R: Type, st: Store) -> V.Op<R, U32>:
+  match st:
+    case NoStore{}:
+      V.Op.pure(R, U32, 0)
+    case RawStore{disk}:
+      V.Op.disk_status(R, disk)
+    case QcowStore{disk, q, below}:
+      do V.Op<R, U32>:
+        a : U32 <- V.Op.disk_status(R, disk)
+        b : U32 <- Store.status(R, below)
+        return (a .|. b : U32)
+
 # Makes the top image's writes durable.
 def Store.flush(-R: Type, st: Store) -> V.Op<R, Unit>:
   match st:

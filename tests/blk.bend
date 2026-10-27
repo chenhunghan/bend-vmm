@@ -299,6 +299,23 @@ def big_requests() -> IO(Unit):
     T.eq_str("blk write past 16 MiB is IOERR", big(1, 1, 16777217), "status [1]")
     T.eq_str("blk write of 4 GiB is IOERR", big(1, 1, 4294967295), "status [1]")
 
+# A host operation on the image failed (the simulator has no disk 1, so every
+# op on it fails): the request completes with IOERR, read and write alike.
+def run_on(dk: U32, s: S.Sim) -> Maybe<&1, S.Sim & (Q.Vq & Bool)>:
+  S.Sim.exec(Q.Vq & Bool, s, K.Blk.process(Q.Vq & Bool, dk, u64(4), queue()))
+
+def host_errors() -> IO(Unit):
+  +t = cat(desc(16384, 16, 1, 1), cat(desc(16400, 512, 3, 2), desc(16912, 1, 2, 0)))
+  +r = S.Sim.write(machine(t, 1, [0]), u64(16384), hdr(0, 1))
+  +tw = cat(desc(16384, 16, 1, 1), cat(desc(16400, 512, 1, 2), desc(16912, 1, 2, 0)))
+  +w = S.Sim.write(machine(tw, 1, [0]), u64(16384), hdr(1, 3))
+  +tf = cat(desc(16384, 16, 1, 1), desc(16400, 1, 2, 0))
+  +fl = S.Sim.write(machine(tf, 1, [0]), u64(16384), hdr(4, 0))
+  do IO<Unit>:
+    check("blk host read error", run_on(1, r), 16912, [1], used(1, [0, 513]), True{}, 1, disk())
+    check("blk host write error", run_on(1, w), 16912, [1], used(1, [0, 1]), True{}, 1, disk())
+    check("blk host flush error", run_on(1, fl), 16400, [1], used(1, [0, 1]), True{}, 1, disk())
+
 def main() -> IO(Unit):
   do IO<Unit>:
     T.eq_str("blk config", show(K.Blk.config(U.U64{1, 2})), "[2, 0, 0, 0, 1, 0, 0, 0]")
@@ -318,6 +335,7 @@ def main() -> IO(Unit):
     write_one_desc()
     read_one_desc()
     short_header()
+    host_errors()
     T.eq_str("blk features rw", show(feats(K.Blk.features(False{}))), "[1, 512]")
     T.eq_str("blk features ro", show(feats(K.Blk.features(True{}))), "[1, 544]")
     big_requests()

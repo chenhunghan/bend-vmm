@@ -367,6 +367,9 @@ def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
         case V.VmDiskCopy{sd, so, dd, doff, +len, next}:
           +s = s
           Sim.run(f, A, Sim.disk_write(s, dd, doff, Sim.fill(Sim.disk_read(s, sd, so, len), len)), next)
+        case V.VmDiskStatus{+dk, k}:
+          # disk 0 never fails; any other has no image, so its ops failed
+          Sim.run(f, A, s, k(Bool.pick(U32, U32.is_zero(dk), 0, 1)))
         case V.VmInflateToRam{dk, off, clen, skip, +iovs, next}:
           # no inflater here: zeros
           Sim.run(f, A, Sim.scatter(iovs, s, B.Bytes.zeros(U32.to_nat(V.Iov.total(iovs)))), next)

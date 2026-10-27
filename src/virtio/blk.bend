@@ -26,8 +26,8 @@ import ../disk/store.bend as S
 #                  the writable data descriptors
 #   other types:   status UNSUPP
 # Status: 0 OK, 1 IOERR (the access ends past capacity*512, moves more than
-# Blk.max_len() bytes, or the chain has no writable status byte to answer
-# in), 2 UNSUPP. The used length is the number
+# Blk.max_len() bytes, the chain has no writable status byte to answer in,
+# or a host operation on the image failed: S.Store.status), 2 UNSUPP. The used length is the number
 # of bytes written into the chain, status byte included.
 
 def Blk.id() -> String:
@@ -146,11 +146,16 @@ def Blk.reply(-R: Type, +w: +List<Q.Desc>, +room: U32, res: U32 & +List<U32>) ->
 def Blk.fuel() -> Nat:
   1000000n
 
-# IN: the room before the status byte filled from the store at sector. The
-# store's host effects report no status (V.Op.disk_to_ram and the others
-# answer Unit), so a host read error cannot become IOERR here; OUT reports
-# what S.Store.write answers.
-def Blk.in(-R: Type, ok: Bool, st: S.Store, sector: U.U64, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
+# The status after the host moved a request's data: IOERR when the store
+# refused it (done false) or a host operation on its images failed
+# (S.Store.status: a full host disk, an I/O error), else OK.
+def Blk.status(-R: Type, +st: S.Store, done: Bool) -> V.Op<R, U32>:
+  do V.Op<R, U32>:
+    e : U32 <- S.Store.status(R, st)
+    return Bool.pick(U32, done && U32.is_zero(e), Blk.s_ok(), Blk.s_ioerr())
+
+# IN: the room before the status byte filled from the store at sector.
+def Blk.in(-R: Type, ok: Bool, +st: S.Store, sector: U.U64, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
   match ok:
     case False{}:
       Blk.reply(R, w, room, (Blk.s_ioerr(), []))
@@ -158,18 +163,20 @@ def Blk.in(-R: Type, ok: Bool, st: S.Store, sector: U.U64, +w: +List<Q.Desc>, +r
       +last = (room - 1 : U32)
       do V.Op<R, U32>:
         S.Store.read(Blk.fuel(), R, st, Blk.offset(sector), Q.Vq.segs(w, 0, last))
-        Blk.put(R, w, last, Blk.s_ok())
+        s : U32 <- Blk.status(R, st, True{})
+        Blk.put(R, w, last, s)
         return room
 
 # OUT: the readable data after the header (ss) written at sector.
-def Blk.out(-R: Type, ok: Bool, st: S.Store, sector: U.U64, ss: +List<V.Iov>, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
+def Blk.out(-R: Type, ok: Bool, +st: S.Store, sector: U.U64, ss: +List<V.Iov>, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
   match ok:
     case False{}:
       Blk.reply(R, w, room, (Blk.s_ioerr(), []))
     case True{}:
       do V.Op<R, U32>:
-        +done : Bool <- S.Store.write(Blk.fuel(), R, st, Blk.offset(sector), ss)
-        Blk.reply(R, w, room, (Bool.pick(U32, done, Blk.s_ok(), Blk.s_ioerr()), []))
+        done : Bool <- S.Store.write(Blk.fuel(), R, st, Blk.offset(sector), ss)
+        s : U32 <- Blk.status(R, st, done)
+        Blk.reply(R, w, room, (s, []))
 
 # OUT on a store that may be read-only: IOERR without writing when ro.
 def Blk.out_ro(-R: Type, ro: Bool, st: S.Store, +sectors: U.U64, +sector: U.U64, +r: +List<Q.Desc>, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
@@ -182,10 +189,11 @@ def Blk.out_ro(-R: Type, ro: Bool, st: S.Store, +sectors: U.U64, +sector: U.U64,
       Blk.out(R, Blk.len_ok(len) && Blk.fits(sectors, sector, len), st, sector, ss, w, room)
 
 # FLUSH: makes earlier writes durable.
-def Blk.flush(-R: Type, st: S.Store, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
+def Blk.flush(-R: Type, +st: S.Store, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
   do V.Op<R, U32>:
     S.Store.flush(R, st)
-    Blk.reply(R, w, room, (Blk.s_ok(), []))
+    s : U32 <- Blk.status(R, st, True{})
+    Blk.reply(R, w, room, (s, []))
 
 def Blk.exec.kind(
   -R: Type, k: Nat, ro: Bool, st: S.Store, +sectors: U.U64, +sector: U.U64, +r: +List<Q.Desc>, +w: +List<Q.Desc>, +room: U32

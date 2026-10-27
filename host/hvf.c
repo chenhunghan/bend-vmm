@@ -1878,6 +1878,30 @@ Term hvf_disk_open_backing_run(Env e, Term* f, IoWork* w) {
   return hvf_disk_open_as(e, f[0], 2);
 }
 
+// A failed host read or write of each image since the guest's device last
+// asked (Hvf.disk_status): virtio-blk answers that request with IOERR, so a
+// full host disk or an I/O error never passes for success.
+static int hvf_disk_err[HVF_MAX_DISKS];
+
+static Term hvf_disk_mark(Term id, Term r) {
+  if (r == (Term)HVF_ERR && (u32)id < HVF_MAX_DISKS) {
+    hvf_disk_err[(u32)id] = 1;
+  }
+  return r;
+}
+
+// Hvf.disk_status(disk) -> U32: 1 when an operation on the image failed
+// since the last call, else 0; clears it.
+Term hvf_disk_status_run(Env e, Term* f, IoWork* w) {
+  u32 i = (u32)f[0];
+  if (i >= HVF_MAX_DISKS) {
+    return (Term)0;
+  }
+  int r          = hvf_disk_err[i];
+  hvf_disk_err[i] = 0;
+  return (Term)(u32)r;
+}
+
 static int hvf_disk(Term id) {
   u32 i = (u32)id;
   return i < (u32)hvf_ndisks ? hvf_disks[i] : -1;
@@ -1903,7 +1927,7 @@ Term hvf_disk_flush_run(Env e, Term* f, IoWork* w) {
     return (Term)0;
   }
 #endif
-  return (Term)(fd >= 0 && fsync(fd) == 0 ? 0 : HVF_ERR);
+  return hvf_disk_mark(f[0], (Term)(fd >= 0 && fsync(fd) == 0 ? 0 : HVF_ERR));
 }
 
 // Hvf.now() -> List<U32>: [hi, lo] of the wall clock in seconds since 1970.
@@ -1921,6 +1945,7 @@ Term hvf_disk_read_run(Env e, Term* f, IoWork* w) {
   uint8_t* buf = io_mem(malloc(n ? n : 1));
   ssize_t  k   = fd >= 0 ? pread(fd, buf, n, (off_t)hvf_u64(f[1], f[2])) : -1;
   Term     xs  = io_list(e, (const char*)buf, k > 0 ? (u64)k : 0);
+  hvf_disk_mark(f[0], k < 0 ? (Term)HVF_ERR : 0);
   free(buf);
   return xs;
 }
@@ -1935,7 +1960,7 @@ Term hvf_disk_write_run(Env e, Term* f, IoWork* w) {
   }
   ssize_t k = fd >= 0 ? pwrite(fd, buf, n, (off_t)hvf_u64(f[1], f[2])) : -1;
   free(buf);
-  return (Term)(k == (ssize_t)n ? 0 : HVF_ERR);
+  return hvf_disk_mark(f[0], (Term)(k == (ssize_t)n ? 0 : HVF_ERR));
 }
 
 // Pieces of guest memory as the effects below take them: each an address
@@ -2038,14 +2063,14 @@ Term hvf_disk_copy_run(Env e, Term* f, IoWork* w) {
   int             n = hvf_iovs(b, nb, hva, len, HVF_MAX_IOVS);
   free(b);
   if (fd < 0 || n < 0) {
-    return (Term)HVF_ERR;
+    return hvf_disk_mark(f[0], (Term)HVF_ERR);
   }
   u64 want = 0;
   for (int i = 0; i < n; i++) {
     want += len[i];
   }
   int64_t k = hvf_iov_io(fd, out, off, hva, len, n, !out);
-  return (Term)(k < 0 || (out && (u64)k < want) ? HVF_ERR : 0);
+  return hvf_disk_mark(f[0], (Term)(k < 0 || (out && (u64)k < want) ? HVF_ERR : 0));
 }
 
 // Disk images by layout (src/disk)
@@ -2073,10 +2098,12 @@ Term hvf_disk_alloc_run(Env e, Term* f, IoWork* w) {
   u64         len = (u32)f[1];
   struct stat st;
   if (fd < 0 || len == 0 || fstat(fd, &st) != 0) {
+    hvf_disk_mark(f[0], (Term)HVF_ERR);
     return term_pak(CID(Nil), 0);
   }
   uint64_t at = ((uint64_t)st.st_size + len - 1) / len * len;
   if (ftruncate(fd, (off_t)(at + len)) != 0) {
+    hvf_disk_mark(f[0], (Term)HVF_ERR);
     return term_pak(CID(Nil), 0);
   }
   uint32_t ws[2] = {(uint32_t)(at >> 32), (uint32_t)at};
@@ -2090,13 +2117,13 @@ Term hvf_disk_xcopy_run(Env e, Term* f, IoWork* w) {
   uint64_t so = hvf_u64(f[1], f[2]), dof = hvf_u64(f[4], f[5]);
   u64      n   = (u32)f[6];
   if (sfd < 0 || dfd < 0) {
-    return (Term)HVF_ERR;
+    return hvf_disk_mark(f[3], (Term)HVF_ERR);
   }
   uint8_t* buf = io_mem(calloc(1, n ? n : 1));
   ssize_t  k   = pread(sfd, buf, n, (off_t)so);
   int      ok  = k >= 0 && pwrite(dfd, buf, n, (off_t)dof) == (ssize_t)n;
   free(buf);
-  return (Term)(ok ? 0 : HVF_ERR);
+  return hvf_disk_mark(f[3], (Term)(ok ? 0 : HVF_ERR));
 }
 
 // The raw-deflate stream of clen bytes at off in image fd, inflated into a
@@ -2130,7 +2157,7 @@ Term hvf_inflate_ram_run(Env e, Term* f, IoWork* w) {
   }
   uint8_t* c = n < 0 ? NULL : hvf_inflate_at(hvf_disk(f[0]), hvf_u64(f[1], f[2]), (u32)f[3], skip + total);
   if (!c) {
-    return (Term)HVF_ERR;
+    return hvf_disk_mark(f[0], (Term)HVF_ERR);
   }
   u64 at = 0;
   for (int i = 0; i < n; at += len[i], i++) {
@@ -2149,7 +2176,7 @@ Term hvf_inflate_disk_run(Env e, Term* f, IoWork* w) {
   uint8_t* c    = hvf_inflate_at(hvf_disk(f[0]), hvf_u64(f[1], f[2]), (u32)f[3], skip + n);
   int      ok   = c && dfd >= 0 && pwrite(dfd, c + skip, n, (off_t)hvf_u64(f[5], f[6])) == (ssize_t)n;
   free(c);
-  return (Term)(ok ? 0 : HVF_ERR);
+  return hvf_disk_mark(f[4], (Term)(ok ? 0 : HVF_ERR));
 }
 
 // Network (the host end of src/net/nat.bend)
@@ -4040,6 +4067,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.log_gate)
   io_eff(CID(Hvf.log_gate), hvf_log_gate_run);
+#endif
+#ifdef CID(Hvf.disk_status)
+  io_eff(CID(Hvf.disk_status), hvf_disk_status_run);
 #endif
 #ifdef CID(Hvf.disk_open_backing)
   io_eff(CID(Hvf.disk_open_backing), hvf_disk_open_backing_run);
