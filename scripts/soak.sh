@@ -8,7 +8,8 @@
 # Passes when every round checked out, the guest finished, and the VMM's
 # resident memory at the end is within 20% of its size after the first
 # quarter (a leak grows it round after round). The samples go to
-# out/soak/<host>-<time>.tsv (seconds, RSS KiB, rounds).
+# out/soak/<host>-<time>.tsv (seconds, RSS KiB, rounds), the guest's console
+# next to them (.log).
 # SKIP_BUILD=1 uses out/bend-vmm as it is; VMM=path runs that binary instead.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -19,7 +20,7 @@ scripts/guest-assets.sh >/dev/null || exit 1
 mkdir -p out/soak
 res=out/soak/$(uname -s | tr A-Z a-z)-$(uname -m)-$(date +%Y%m%d-%H%M%S).tsv
 t=$(mktemp -d)
-trap 'kill $http 2>/dev/null; rm -rf "$t"' EXIT
+trap 'kill $http 2>/dev/null; cp "$t/run.log" "${res%.tsv}.log" 2>/dev/null; rm -rf "$t"' EXIT
 dd if=/dev/zero of="$t/disk.img" bs=1048576 count=0 seek=64 2>/dev/null
 mkdir "$t/www" "$t/share"
 head -c 8388608 /dev/urandom > "$t/www/big"

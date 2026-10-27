@@ -31,6 +31,7 @@ while [ "$(up)" -lt "$end" ]; do
   rm -f /mnt/share/soak.$i
   [ "$(wget -q -O - "http://10.0.2.2:$port/big" | md5sum | cut -d' ' -f1)" = "$want" ] || echo "SOAK-FAIL net $i"
   echo "SOAK-ITER $i $(( $(up) - s ))"
+  [ $((i % 100)) = 0 ] && echo "SOAK-MEM $i $(awk '/MemAvailable|^Slab|Shmem:|^Buffers|^Cached/ { printf "%s %s ", $1, $2 }' /proc/meminfo)"
 done
 touch /tmp/stop
 echo "SOAK-DONE $i"

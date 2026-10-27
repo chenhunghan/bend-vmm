@@ -177,6 +177,7 @@ typedef struct {
   int             nqueue;   // under mu
   int             created;  // the hv vCPU exists
   int             saved_gen;
+  uint64_t        pause_applied; // the part of hvf_pause_total in this vCPU's vtimer offset
   uint8_t*        saved;    // the last snapshot of this vCPU's registers
   size_t          nsaved;
   const uint8_t*  icc;      // GIC CPU registers to restore before the first run
@@ -500,15 +501,20 @@ static void hvf_apply(HvfCpu* c, HvfQueued* q) {
 //
 // A paused VM keeps every vCPU out of the guest: a vCPU about to run waits at
 // a gate, and pause kicks the running ones out (hv_vcpus_exit). While paused
-// the guest's virtual counter stands still: leaving the gate adds the pause's
-// length to the vtimer offset. A snapshot asks each vCPU thread to save its
-// own registers (only the owning thread may read them) and waits for all.
+// the guest's virtual counter stands still: resume adds the pause's length to
+// a total, and every vCPU, before it next runs, moves its vtimer offset by
+// whatever part of that total it has not applied yet. So every vCPU's counter
+// moves by the same amount, whether or not it waited at the gate (a vCPU busy
+// in an exit through a whole pause applies it later), and the counters stay
+// in step. A snapshot asks each vCPU thread to save its own registers (only
+// the owning thread may read them) and waits for all.
 
 static pthread_mutex_t hvf_gate_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  hvf_gate_cv = PTHREAD_COND_INITIALIZER;
 static int             hvf_paused;
 static int             hvf_running;     // vCPUs inside hv_vcpu_run
 static uint64_t        hvf_pause_start; // the host clock at pause (mach_absolute_time on macOS)
+static uint64_t        hvf_pause_total; // the length of every pause so far, in the same units
 static int             hvf_save_gen;    // bumped by each snapshot
 static int             hvf_saving;      // vCPU threads still to save
 
@@ -589,6 +595,10 @@ static void hvf_save_regs(HvfCpu* c) {
   c->nsaved = n * sizeof *e;
 }
 
+// The host clock a restore counts from: one instant for every vCPU, so their
+// virtual counters come back in step (set when the snapshot is opened).
+static uint64_t hvf_restore_now;
+
 static void hvf_load_regs(HvfCpu* c, const uint8_t* blob, size_t size) {
   const HvfRegEntry* e = (const HvfRegEntry*)blob;
   size_t             n = size / sizeof *e;
@@ -603,7 +613,7 @@ static void hvf_load_regs(HvfCpu* c, const uint8_t* blob, size_t size) {
       half[id] = e[i].val;
     } else if (kind == 4) {
       // continue the guest's virtual count from where it was
-      hv.set_vtimer_offset(c->vcpu, mach_absolute_time() - e[i].val);
+      hv.set_vtimer_offset(c->vcpu, hvf_restore_now - e[i].val);
     }
   }
   for (uint32_t q = 0; q < 32; q++) {
@@ -934,18 +944,19 @@ static void hvf_gate(HvfCpu* c) {
       pthread_cond_wait(&hvf_gate_cv, &hvf_gate_mu);
     }
   }
-  uint64_t start = hvf_pause_start;
+  uint64_t total = hvf_pause_total;
   hvf_running++;
   pthread_mutex_unlock(&hvf_gate_mu);
+  (void)waited;
 #ifdef __APPLE__
-  if (waited && start) {
+  if (total != c->pause_applied) {
     uint64_t off = 0;
     hv.get_vtimer_offset(c->vcpu, &off);
-    hv.set_vtimer_offset(c->vcpu, off + (mach_absolute_time() - start));
+    hv.set_vtimer_offset(c->vcpu, off + (total - c->pause_applied));
+    c->pause_applied = total;
   }
 #else
-  (void)waited;
-  (void)start;
+  (void)total; // KVM's counter keeps running through a pause
 #endif
 }
 
@@ -2813,6 +2824,13 @@ Term hvf_pause_run(Env e, Term* f, IoWork* w) {
 // Hvf.resume() -> U32: lets every vCPU run again.
 Term hvf_resume_run(Env e, Term* f, IoWork* w) {
   pthread_mutex_lock(&hvf_gate_mu);
+  if (hvf_paused) {
+#ifdef __APPLE__
+    hvf_pause_total += mach_absolute_time() - hvf_pause_start;
+#else
+    hvf_pause_total += hvf_ns() - hvf_pause_start;
+#endif
+  }
   hvf_paused = 0;
   pthread_cond_broadcast(&hvf_gate_cv);
   pthread_mutex_unlock(&hvf_gate_mu);
@@ -3008,6 +3026,9 @@ Term hvf_snap_open_run(Env e, Term* f, IoWork* w) {
   hvf_snap.ram_off = (uint64_t)((at + 16383) & ~(off_t)16383);
   hvf_snap.fd      = fd;
   hvf_snap.active  = 1;
+#ifdef __APPLE__
+  hvf_restore_now = mach_absolute_time();
+#endif
   return (Term)0;
 }
 
