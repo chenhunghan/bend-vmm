@@ -129,6 +129,10 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo quit | nc -U "$sock" >/dev/null; slp 1
   out=$(drive 40 "restored" 'cat /tmp/m\n' "MARK-42" 'poweroff -f\n' -- ./out/bend-vmm --restore "$t/vm.snap" 2>&1)
   grep -q "^MARK-42" <<<"$(tr -d '\r' <<<"$out")" && grep -q "stopped (0)" <<<"$out" && grn "ok: restore (guest RAM and CPUs continue)" || { red "failed: restore"; grep -a -v sysreg <<<"$out" | tail -15; fail=1; }
+  # a snapshot cannot choose host files: a restore that names other ones
+  # than the snapshot was taken with is refused
+  out=$(./out/bend-vmm --restore "$t/vm.snap" --share "$t" 2>&1 < /dev/null)
+  grep -q "taken without --share" <<<"$out" && grn "ok: restore refuses host paths the snapshot was not taken with" || { red "failed: restore path check"; tail -3 <<<"$out"; fail=1; }
   # SIGTERM, and the control socket's powerdown, press the guest's power
   # button (the virtio keyboard's KEY_POWER): the guest powers off
   for how in sigterm powerdown; do

@@ -84,7 +84,7 @@ Options:
 | `--display WxH` | a window showing the guest's framebuffer, with a virtio keyboard and tablet (`WxH,headless`: no window, for `screendump`) |
 | `--version`, `--help` | the release, the options |
 | `--control SOCK` | a Unix socket for management commands (below) |
-| `--restore FILE` | start from a snapshot (same disks and shares as when it was taken) |
+| `--restore FILE` | start from a snapshot; pass the same `--disk`, `--share`, `--vsock`, `--firmware` and `--vars` it was taken with (a snapshot cannot choose host files by itself) |
 
 Linux (KVM): the same binary builds on Linux arm64 (clang, `libx11-dev` for
 `--display`) with `scripts/build.sh`, and runs with `/dev/kvm`; snapshots
@@ -185,6 +185,28 @@ host and sent from there.
 memory traffic, checking every byte read back, pausing and resuming it every
 minute, and fails on a mismatch, a hang, or the VMM's memory growing past
 20%.
+
+## Security
+
+The guest is treated as hostile; so are snapshot files and disk images from
+elsewhere. What holds today:
+
+- The shared folder: every path stays under `--share` (`..`, absolute names
+  and symlinks in a directory part are refused; the last part of a path is
+  never followed as a symlink, for reads, writes, truncation and listings).
+  Only regular files are read or written. The guest cannot set setuid,
+  setgid or sticky bits.
+- Snapshots: `--restore` opens only the host files the command line names
+  (and refuses a snapshot taken with others); the devices it decodes must be
+  the ones opened. Snapshots, screendumps and the control and vsock sockets
+  are this user's alone (mode 0600), and never written through a symlink.
+- Disk images: locked while in use; `:ro` disks and qcow2 backing files open
+  read-only, and a backing file must be a regular file. A qcow2 image's
+  backing file name is trusted as `qemu-img` trusts it: do not attach
+  images from untrusted sources.
+- Not yet: the VMM is not sandboxed (it runs with your user's rights), and
+  the guest's network reaches what your host reaches (10.0.2.2 is the
+  host's loopback).
 
 ## How it is verified
 

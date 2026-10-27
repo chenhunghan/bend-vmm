@@ -710,6 +710,9 @@ static void hvf_load_regs(HvfCpu* c, const uint8_t* blob, size_t size) {
       break;
     }
     uint8_t            v[256];
+    if (sz > sizeof v) {
+      break; // no register is wider (the save side keeps to 256 bytes)
+    }
     memcpy(v, blob + at + 8, sz);
     struct kvm_one_reg one = {id, (uint64_t)(uintptr_t)v};
     ioctl(c->fd, KVM_SET_ONE_REG, &one);
@@ -1222,6 +1225,9 @@ Term hvf_init_run(Env e, Term* f, IoWork* w) {
     return (Term)1;
   }
   hvf_trace = getenv("BEND_VMM_TRACE") ? atoi(getenv("BEND_VMM_TRACE")) : 0;
+  if ((u32)f[7] == 0 || (u32)f[7] > HVF_MAX_CPUS) {
+    return (Term)6; // 1 to 64 vCPUs
+  }
   int rc = vmb_create(hvf_u64(f[1], f[2]), hvf_u64(f[3], f[4]), (u32)f[7]);
   if (rc != 0) {
     return (Term)(u32)rc;
@@ -1790,7 +1796,8 @@ static int hvf_ndisks;
 // alone, readers together, so a second bend-vmm cannot write an image this
 // one reads or writes (two writers corrupt a qcow2 image at once). Its index,
 // or 0xFFFFFFFF.
-static Term hvf_disk_open_as(Env e, Term path_t, int ro) {
+static Term hvf_disk_open_as(Env e, Term path_t, int kind) {
+  int   ro = kind != 0;
   u64   n;
   char* path = io_cstr(e, path_t, &n);
   int   fd   = -1;
@@ -1800,6 +1807,14 @@ static Term hvf_disk_open_as(Env e, Term path_t, int ro) {
       fd = open(path, O_RDONLY | O_CLOEXEC); // a read-only file (a qcow2 backing image)
       ro = 1;
     }
+  }
+  // a backing file named inside an image is a regular file, never a device
+  // or a FIFO
+  struct stat st;
+  if (fd >= 0 && kind == 2 && (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode))) {
+    fprintf(stderr, "bend-vmm: %s: a backing file must be a regular file\n", path);
+    close(fd);
+    fd = -1;
   }
   // a file system without locks (some network ones) answers ENOTSUP: go on
   if (fd >= 0 && flock(fd, (ro ? LOCK_SH : LOCK_EX) | LOCK_NB) != 0 && errno == EWOULDBLOCK) {
@@ -1820,10 +1835,15 @@ Term hvf_disk_open_run(Env e, Term* f, IoWork* w) {
   return hvf_disk_open_as(e, f[0], 0);
 }
 
-// Hvf.disk_open_ro(path) -> U32: a disk image only read (a :ro disk, a
-// qcow2 backing file).
+// Hvf.disk_open_ro(path) -> U32: a disk image only read (a :ro disk).
 Term hvf_disk_open_ro_run(Env e, Term* f, IoWork* w) {
   return hvf_disk_open_as(e, f[0], 1);
+}
+
+// Hvf.disk_open_backing(path) -> U32: a qcow2 image's backing file, read
+// only, and a regular file.
+Term hvf_disk_open_backing_run(Env e, Term* f, IoWork* w) {
+  return hvf_disk_open_as(e, f[0], 2);
 }
 
 static int hvf_disk(Term id) {
@@ -2055,7 +2075,8 @@ Term hvf_inflate_ram_run(Env e, Term* f, IoWork* w) {
   if (!c) {
     return (Term)HVF_ERR;
   }
-  for (int i = 0, at = 0; i < n; at += (int)len[i], i++) {
+  u64 at = 0;
+  for (int i = 0; i < n; at += len[i], i++) {
     memcpy(hva[i], c + skip + at, len[i]);
   }
   free(c);
@@ -2192,6 +2213,9 @@ static struct sockaddr_in hvf_addr(uint32_t ip, uint32_t port) {
 // or an errno. Hvf.tcp_wait answers when it completes.
 Term hvf_tcp_connect_run(Env e, Term* f, IoWork* w) {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd >= 0) {
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+  }
   if (fd < 0) {
     return (Term)(u32)errno;
   }
@@ -2262,9 +2286,12 @@ Term hvf_tcp_recv_run(Env e, Term* f, IoWork* w) {
   return io_wait_on(w, k->fd, POLLIN, 0, hvf_tcp_recv_more);
 }
 
-// The most a TCP segment to the guest carries: its IPv4 packet (20 + 20
-// header bytes) stays within 65535 bytes.
-#define HVF_RBUF 65495
+// The most the host holds for a TCP connection: four of the largest
+// segments to the guest (65495 bytes: its IPv4 packet, 20 + 20 header bytes,
+// stays within 65535), so the NAT sends the next ones while the guest
+// acknowledges the first (one segment at a time held the download to about
+// 360 MB/s on an M2 Pro; four reach about 650).
+#define HVF_RBUF (4 * 65495)
 
 static Term hvf_tcp_fill_read(Env e, IoWork* w) {
   HvfSock* k = hvf_sock_at(w);
@@ -2299,7 +2326,7 @@ static Term hvf_tcp_fill_taken(Env e, IoWork* w) {
 }
 
 // Hvf.tcp_fill(conn) -> U32: once the hold is released (Hvf.tcp_release),
-// parks until the socket has data and holds up to 65495
+// parks until the socket has data and holds up to HVF_RBUF
 // bytes of it for the guest: their count; 0 at EOF, on an error, or once the
 // connection is closed.
 Term hvf_tcp_fill_run(Env e, Term* f, IoWork* w) {
@@ -2393,7 +2420,8 @@ Term hvf_stage_run(Env e, Term* f, IoWork* w) {
     uint32_t s = hvf_stage_next++ % HVF_STAGES;
     if (hvf_stages[s].buf == NULL) {
       uint8_t* p = io_mem(malloc(total ? total : 1));
-      for (int i = 0, at = 0; i < n; at += (int)len[i], i++) {
+      u64 at = 0;
+      for (int i = 0; i < n; at += len[i], i++) {
         memcpy(p + at, hva[i], len[i]);
       }
       hvf_stages[s].buf = p;
@@ -2452,7 +2480,7 @@ Term hvf_tcp_send_staged_run(Env e, Term* f, IoWork* w) {
 Term hvf_net_holds_run(Env e, Term* f, IoWork* w) {
   uint32_t ws[4 * 64];
   int      n = 0;
-  for (int i = 0; i < HVF_MAX_SOCKS && n < 64 * 4; i++) {
+  for (int i = 0; i < HVF_MAX_SOCKS && n + 3 <= 64 * 4; i++) {
     HvfSock* k = &hvf_socks[i];
     if (k->used && !k->udp && k->rbuf) {
       ws[n++] = k->key;
@@ -2497,6 +2525,9 @@ Term hvf_udp_send_run(Env e, Term* f, IoWork* w) {
   int      fresh = 0;
   if (!k) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd >= 0) {
+      fcntl(fd, F_SETFD, FD_CLOEXEC);
+    }
     if (fd < 0) {
       return (Term)HVF_ERR;
     }
@@ -2622,10 +2653,10 @@ static int hvf_resolve(u32 sh, const char* rel, char* out) {
   }
   char        parent[PATH_MAX];
   const char* slash = strrchr(rel, '/');
-  if (slash) {
-    snprintf(parent, sizeof parent, "%s/%.*s", root, (int)(slash - rel), rel);
-  } else {
-    snprintf(parent, sizeof parent, "%s", root);
+  int         k     = slash ? snprintf(parent, sizeof parent, "%s/%.*s", root, (int)(slash - rel), rel)
+                            : snprintf(parent, sizeof parent, "%s", root);
+  if (k < 0 || k >= (int)sizeof parent) {
+    return ENAMETOOLONG;
   }
   char real[PATH_MAX];
   if (!realpath(parent, real)) {
@@ -2635,8 +2666,8 @@ static int hvf_resolve(u32 sh, const char* rel, char* out) {
   if (strncmp(real, root, rl) != 0 || (real[rl] != 0 && real[rl] != '/')) {
     return EACCES;
   }
-  snprintf(out, PATH_MAX, "%s/%s", real, slash ? slash + 1 : rel);
-  return 0;
+  k = snprintf(out, PATH_MAX, "%s/%s", real, slash ? slash + 1 : rel);
+  return k < 0 || k >= PATH_MAX ? ENAMETOOLONG : 0;
 }
 
 // Open files for reads and writes, by share, relative path and direction:
@@ -2757,9 +2788,16 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
     hvf_fdc_flush(sh);
   }
   if (!err && io && fd < 0) {
-    fd = open(path, (wr ? O_WRONLY : O_RDONLY) | O_NOFOLLOW);
+    // a regular file only: a FIFO or a device in the share must not block
+    // or reach the VMM
+    struct stat st = {0};
+    fd = open(path, (wr ? O_WRONLY : O_RDONLY) | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
       err = errno;
+    } else if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+      err = S_ISDIR(st.st_mode) ? EISDIR : EINVAL;
+      close(fd);
+      fd = -1;
     } else {
       hvf_fdc_put(sh, rel, wr, fd);
     }
@@ -2788,9 +2826,15 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
       res = hvf_fs_done(e, &out);
     }
   } else if (op == 1) {
-    DIR* d = opendir(path);
+    // never through a symlink (O_NOFOLLOW), and the entries are looked at
+    // where they are (fstatat), not through a path
+    int  dfd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    DIR* d   = dfd >= 0 ? fdopendir(dfd) : NULL;
     if (!d) {
       res = hvf_fs_err(e, errno);
+      if (dfd >= 0) {
+        close(dfd);
+      }
     } else {
       char**         names = NULL;
       size_t         cnt = 0, cap = 0;
@@ -2805,14 +2849,11 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
         }
         names[cnt++] = strdup(de->d_name);
       }
-      closedir(d);
       qsort(names, cnt, sizeof(char*), hvf_dir_cmp);
       hvf_w(&out, 5);
       for (size_t i = (size_t)(u32)a; i < cnt && i < (size_t)(u32)a + b; i++) {
-        char        p[PATH_MAX];
         struct stat st;
-        snprintf(p, sizeof p, "%s/%s", path, names[i]);
-        int ok = lstat(p, &st) == 0;
+        int         ok = fstatat(dirfd(d), names[i], &st, AT_SYMLINK_NOFOLLOW) == 0;
         hvf_w64(&out, ok ? (uint64_t)st.st_ino : 0);
         hvf_w(&out, !ok ? 0 : S_ISDIR(st.st_mode) ? 4 : S_ISLNK(st.st_mode) ? 10 : S_ISREG(st.st_mode) ? 8 : 0);
         size_t len = strlen(names[i]);
@@ -2821,6 +2862,7 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
           hvf_w(&out, (uint8_t)names[i][j]);
         }
       }
+      closedir(d);
       for (size_t i = 0; i < cnt; i++) {
         free(names[i]);
       }
@@ -2866,18 +2908,22 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
       }
     }
   } else if (op == 4) {
-    int fd = open(path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, b & 07777);
+    int fd = open(path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, b & 0777);
     res = fd < 0 ? hvf_fs_err(e, errno) : (close(fd), hvf_fs_ok(e));
   } else if (op == 5) {
-    res = mkdir(path, b & 07777) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+    res = mkdir(path, b & 0777) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
   } else if (op == 6) {
     res = (b ? rmdir(path) : unlink(path)) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
   } else if (op == 7) {
     res = rename(path, path2) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
   } else if (op == 8) {
-    res = truncate(path, (off_t)a) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+    int t = open(path, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    res   = t < 0 || ftruncate(t, (off_t)a) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+    if (t >= 0) {
+      close(t);
+    }
   } else if (op == 9) {
-    res = lchmod(path, b & 07777) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+    res = lchmod(path, b & 0777) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
   } else if (op == 10) {
     res = symlink(rel2, path) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
   } else if (op == 11) {
@@ -2894,7 +2940,7 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
     }
   } else if (op == 12) {
     struct statfs sf;
-    if (statfs(path, &sf) != 0) {
+    if (statfs(hvf_shares[sh], &sf) != 0) {
       res = hvf_fs_err(e, errno);
     } else {
       hvf_w(&out, 7);
@@ -3019,8 +3065,16 @@ static uint64_t hvf_args(char** out) {
 //   register entries; 0 when absent), then RAM at the next 16 KiB boundary.
 //   0, or an errno.
 Term hvf_snap_write_run(Env e, Term* f, IoWork* w) {
-  u64   n;
-  char* path = io_cstr(e, f[0], &n);
+  u64         n;
+  char*       path = io_cstr(e, f[0], &n);
+  struct stat dst, src;
+  // guest RAM is mapped from the snapshot this VM was restored from: writing
+  // over that file would pull the RAM from under the guest
+  if (hvf_snap.active && stat(path, &dst) == 0 && fstat(hvf_snap.fd, &src) == 0 && dst.st_dev == src.st_dev
+      && dst.st_ino == src.st_ino) {
+    free(path);
+    return (Term)(u32)EBUSY;
+  }
   // the machine words
   u64       cap = 1024, nw = 0;
   uint32_t* ws  = io_mem(malloc(cap * 4));
@@ -3064,7 +3118,9 @@ Term hvf_snap_write_run(Env e, Term* f, IoWork* w) {
   char*    args = NULL;
   uint64_t alen = hvf_args(&args);
   int      err  = 0;
-  int    fd   = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  // the guest's whole RAM: readable by this user alone, and never written
+  // through a symlink planted at the path
+  int    fd   = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
   free(path);
   if (fd < 0) {
     err = errno;
@@ -3124,6 +3180,7 @@ Term hvf_snap_open_run(Env e, Term* f, IoWork* w) {
   }
   hvf_snap.args = io_mem(malloc(hvf_snap.nargs + 1));
   int bad = hvf_get(fd, hvf_snap.args, hvf_snap.nargs) || hvf_get(fd, &hvf_snap.nwords, 8) || hvf_snap.nwords > 1u << 28;
+  hvf_snap.args[hvf_snap.nargs] = 0;
   if (!bad) {
     hvf_snap.words = io_mem(malloc(hvf_snap.nwords * 4 + 4));
     bad = hvf_get(fd, hvf_snap.words, hvf_snap.nwords * 4) || hvf_get(fd, &hvf_snap.ngic, 8) || hvf_snap.ngic > 1u << 26;
@@ -3145,8 +3202,16 @@ Term hvf_snap_open_run(Env e, Term* f, IoWork* w) {
     close(fd);
     return (Term)(u32)EINVAL;
   }
-  off_t at         = lseek(fd, 0, SEEK_CUR);
+  off_t       at   = lseek(fd, 0, SEEK_CUR);
+  struct stat st;
   hvf_snap.ram_off = (uint64_t)((at + 16383) & ~(off_t)16383);
+  // guest RAM is mapped from the file: all of it must be there (a short file
+  // would fault the VMM on the first touch past its end)
+  if (fstat(fd, &st) != 0 || hvf_snap.ram_size == 0 || hvf_snap.ram_size > (uint64_t)1 << 40
+      || (uint64_t)st.st_size < hvf_snap.ram_off + hvf_snap.ram_size) {
+    close(fd);
+    return (Term)(u32)EINVAL;
+  }
   hvf_snap.fd      = fd;
   hvf_snap.active  = 1;
 #ifdef __APPLE__
@@ -3169,7 +3234,7 @@ Term hvf_snap_info_run(Env e, Term* f, IoWork* w) {
 Term hvf_snap_args_run(Env e, Term* f, IoWork* w) {
   Term   xs = term_pak(CID(Nil), 0);
   size_t starts[4096], k = 0;
-  for (size_t i = 0; i < hvf_snap.nargs && k < 4096; i += strlen(hvf_snap.args + i) + 1) {
+  for (size_t i = 0; i < hvf_snap.nargs && k < 4096; i += strnlen(hvf_snap.args + i, hvf_snap.nargs - i) + 1) {
     starts[k++] = i;
   }
   while (k > 0) {
@@ -3218,6 +3283,9 @@ Term hvf_ctl_listen_run(Env e, Term* f, IoWork* w) {
   unlink(path);
   free(path);
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd >= 0) {
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+  }
   if (fd < 0 || bind(fd, (struct sockaddr*)&a, sizeof a) != 0 || listen(fd, 4) != 0) {
     int err = errno;
     if (fd >= 0) {
@@ -3225,6 +3293,7 @@ Term hvf_ctl_listen_run(Env e, Term* f, IoWork* w) {
     }
     return (Term)(u32)err;
   }
+  chmod(a.sun_path, 0600); // this user alone
   fcntl(fd, F_SETFL, O_NONBLOCK);
   hvf_ctl_fd = fd;
   return (Term)0;
@@ -3232,11 +3301,18 @@ Term hvf_ctl_listen_run(Env e, Term* f, IoWork* w) {
 
 static Term hvf_ctl_line(Env e, IoWork* w);
 
+static int hvf_accept_full(int err) {
+  return err == EMFILE || err == ENFILE || err == ENOBUFS || err == ENOMEM;
+}
+
 static Term hvf_ctl_accept(Env e, IoWork* w) {
   int c = accept(hvf_ctl_fd, NULL, NULL);
   if (c < 0) {
-    return io_wait_on(w, hvf_ctl_fd, POLLIN, 0, hvf_ctl_accept);
+    // out of descriptors the listener stays readable: wait, don't spin
+    return hvf_accept_full(errno) ? io_wait_on(w, 0, 0, io_tick() + 100000000ull, hvf_ctl_accept)
+                                  : io_wait_on(w, hvf_ctl_fd, POLLIN, 0, hvf_ctl_accept);
   }
+  fcntl(c, F_SETFD, FD_CLOEXEC);
   fcntl(c, F_SETFL, O_NONBLOCK);
   hvf_ctl_client = c;
   w->made        = 0;
@@ -3318,6 +3394,9 @@ Term hvf_unix_connect_run(Env e, Term* f, IoWork* w) {
   memcpy(a.sun_path, path, n + 1);
   free(path);
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd >= 0) {
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+  }
   if (fd < 0) {
     return (Term)(u32)errno;
   }
@@ -3353,6 +3432,9 @@ Term hvf_vsock_listen_run(Env e, Term* f, IoWork* w) {
   unlink(path);
   free(path);
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd >= 0) {
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+  }
   if (fd < 0 || bind(fd, (struct sockaddr*)&a, sizeof a) != 0 || listen(fd, 16) != 0) {
     int err = errno;
     if (fd >= 0) {
@@ -3360,6 +3442,7 @@ Term hvf_vsock_listen_run(Env e, Term* f, IoWork* w) {
     }
     return (Term)(u32)err;
   }
+  chmod(a.sun_path, 0600); // this user alone
   fcntl(fd, F_SETFL, O_NONBLOCK);
   hvf_vs_fd = fd;
   return (Term)0;
@@ -3370,8 +3453,10 @@ static Term hvf_vs_line(Env e, IoWork* w);
 static Term hvf_vs_accept(Env e, IoWork* w) {
   int c = accept(hvf_vs_fd, NULL, NULL);
   if (c < 0) {
-    return io_wait_on(w, hvf_vs_fd, POLLIN, 0, hvf_vs_accept);
+    return hvf_accept_full(errno) ? io_wait_on(w, 0, 0, io_tick() + 100000000ull, hvf_vs_accept)
+                                  : io_wait_on(w, hvf_vs_fd, POLLIN, 0, hvf_vs_accept);
   }
+  fcntl(c, F_SETFD, FD_CLOEXEC);
   fcntl(c, F_SETFL, O_NONBLOCK);
   int one = 1;
 #ifdef SO_NOSIGPIPE
@@ -3582,7 +3667,11 @@ Term hvf_fb_dump_run(Env e, Term* f, IoWork* w) {
     free(path);
     return (Term)(u32)ENODEV;
   }
-  FILE* out = fopen(path, "wb");
+  int   ofd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+  FILE* out = ofd >= 0 ? fdopen(ofd, "wb") : NULL;
+  if (!out && ofd >= 0) {
+    close(ofd);
+  }
   free(path);
   if (!out) {
     return (Term)(u32)errno;
@@ -3867,6 +3956,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.signal_wait)
   io_eff(CID(Hvf.signal_wait), hvf_signal_wait_run);
+#endif
+#ifdef CID(Hvf.disk_open_backing)
+  io_eff(CID(Hvf.disk_open_backing), hvf_disk_open_backing_run);
 #endif
 #ifdef CID(Hvf.disk_open_ro)
   io_eff(CID(Hvf.disk_open_ro), hvf_disk_open_ro_run);

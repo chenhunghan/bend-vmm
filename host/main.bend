@@ -91,6 +91,11 @@ def Opts.firmware(o: Opts) -> String:
     case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv}:
       fw
 
+def Opts.vars(o: Opts) -> String:
+  match o:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv}:
+      nv
+
 def Opts.display(o: Opts) -> String:
   match o:
     case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv}:
@@ -1078,7 +1083,7 @@ def path_under(+dir: String, +name: String) -> String:
       do IO<St.Store>:
         name : +List<U32> <- H.Host.disk_read(id, off, len)
         +bpath : String = path_under(path_dir(path), bytes_str(name))
-        bid : U32 <- H.Hvf.disk_open_ro(bpath)
+        bid : U32 <- H.Hvf.disk_open_backing(bpath)
         devices.chain(fuel, bpath, bid)
 
 # A disk image: qcow2 (its header says so) as a store over its backing
@@ -1481,12 +1486,65 @@ def restore.flash_mode(m: Maybe<&2, M.Machine>) -> IO(U32):
     case Some{mc}:
       H.Hvf.flash(3, Bool.to_u32(U32.is_zero(Pf.Pflash.mode(M.Machine.flash_of(mc)))), 0, [])
 
-@unsafe def restore(path: String, now: Opts) -> IO(Unit):
+# A snapshot names the host files and sockets its devices use. Restoring it
+# opens them only when this command line names the same ones, so a snapshot
+# from elsewhere cannot choose what to open, share or replace: the first
+# flag that differs, as a message ("" when none does).
+def restore.differs.one(+flag: String, +was: String, +now: String) -> String:
+  Bool.pick(String, String.eq(was, now), "",
+    Bool.pick(String, String.is_empty(was),
+      "the snapshot was taken without " ++ flag ++ "; restore it without " ++ flag,
+      "the snapshot was taken with " ++ flag ++ " " ++ was ++ "; pass the same " ++ flag ++ " to restore it"))
+
+def restore.differs.first(+a: String, b: String) -> String:
+  Bool.pick(String, String.is_empty(a), b, a)
+
+def restore.differs(+was: Opts, +now: Opts) -> String:
+  restore.differs.first(restore.differs.one("--disk", Opts.disk(was), Opts.disk(now)),
+    restore.differs.first(restore.differs.one("--share", Opts.share(was), Opts.share(now)),
+      restore.differs.first(restore.differs.one("--vsock", Opts.vsock(was), Opts.vsock(now)),
+        restore.differs.first(restore.differs.one("--firmware", Opts.firmware(was), Opts.firmware(now)),
+          restore.differs.one("--vars", Opts.vars(was), Opts.vars(now))))))
+
+# The devices of a machine, as their snapshot words (Snap's Enc.kind).
+def kinds_words(ks: +List<D.DevKind>) -> +List<U32>:
+  match ks:
+    case Nil{}:
+      []
+    case Con{k, rest}:
+      List.append(&2, U32, Snap.Enc.kind(k), kinds_words(rest))
+
+def devs_kinds(ds: +List<D.Dev>) -> +List<D.DevKind>:
+  match ds:
+    case Nil{}:
+      []
+    case Con{D.Dev{k, mm, qs, st}, rest}:
+      k <> devs_kinds(rest)
+
+def machine_kinds(m: Maybe<&2, M.Machine>) -> +List<D.DevKind>:
+  match m:
+    case None{}:
+      []
+    case Some{M.Machine{ps, u, ui, devs, irqs, rtc, ri, net, fl}}:
+      devs_kinds(devs)
+
+def words_eq(a: +List<U32>, b: +List<U32>) -> Bool:
+  match a b:
+    case Nil{} Nil{}:
+      True{}
+    case Con{x, xs} Con{y, ys}:
+      U32.is_eq(x, y) && words_eq(xs, ys)
+    case _ _:
+      False{}
+
+@unsafe def restore(path: String, +now: Opts) -> IO(Unit):
   do IO<Unit>:
     +rc : U32 <- H.Hvf.snap_open(path)
     die_if(U32.is_ne(rc, 0), "cannot read the snapshot (" ++ U32.show(rc) ++ ")")
     saved : List<String> <- H.Hvf.snap_args()
     +o : Opts = restore.opts(saved, now)
+    +why : String = restore.differs(o, now)
+    die_if(Bool.not(String.is_empty(why)), why)
     +vm : U32 <- H.Host.vm_init(Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), ram(), Opts.cpus(o))
     die_if(U32.is_ne(vm, 0), "cannot create the VM (step " ++ U32.show(vm) ++ ")")
     display.map(display_of(Opts.display(o)))
@@ -1494,6 +1552,9 @@ def restore.flash_mode(m: Maybe<&2, M.Machine>) -> IO(U32):
     +kinds : +List<D.DevKind> <- devices(o)
     ws : +List<U32> <- H.Hvf.snap_machine()
     +got : Maybe<&2, M.Machine> = Snap.Snap.decode(ws)
+    # the devices as this run opened them (a disk's size, read-only, its
+    # format) must be the snapshot's
+    die_if(Bool.not(words_eq(kinds_words(machine_kinds(got)), kinds_words(kinds))), "the snapshot's devices differ from the ones opened now (a disk changed size or format?)")
     _ : U32 <- restore.flash_mode(got)
     restore.machine(got, o, kinds)
 
@@ -1519,7 +1580,7 @@ def usage() -> String:
     "                [--disk IMG[:ro],...] [--share DIR] [--vsock PATH] [--control PATH]",
     "                [--display WxH[,headless]]",
     "       bend-vmm --firmware CODE.fd --vars VARS.fd [--disk IMG] ...   (UEFI)",
-    "       bend-vmm --restore SNAPSHOT [--control PATH]",
+    "       bend-vmm --restore SNAPSHOT [--disk, --share, ... as taken] [--control PATH]",
     "       bend-vmm --payload FILE.bin                                   (bare metal)",
     "       bend-vmm --version"], "\n")
 
