@@ -140,6 +140,18 @@ def Sim.gather(ss: +List<V.Iov>, +s: Sim) -> +List<U32>:
     case V.Iov{a, l} <> t:
       List.append(&2, U32, Sim.read(s, a, l), Sim.gather(t, s))
 
+# bs cut or zero-padded to len bytes.
+def Sim.fill(bs: +List<U32>, +len: U32) -> +List<U32>:
+  +n = U32.to_nat(len)
+  List.take(&2, U32, List.append(&2, U32, bs, B.Bytes.zeros(n)), n)
+
+# VmDiskAlloc on the simulated disk: the first multiple of len at or past its
+# end (disks stay below 4 GiB here).
+def Sim.alloc_at(d: +List<U32>, +len: U32) -> U.U64:
+  +n = U32.from_nat(List.length(&2, U32, d))
+  +r = (n % len : U32)
+  U.U64.from_u32(Bool.pick(U32, U32.is_zero(r), n, (n + (len - r : U32) : U32)))
+
 # VmDiskToRam: the disk's bytes, zero-padded to the pieces' length, laid
 # over them.
 def Sim.disk_to_ram(+s: Sim, disk: U32, offset: U.U64, +iovs: +List<V.Iov>) -> Sim:
@@ -346,6 +358,20 @@ def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
         case V.VmRamToDisk{dk, off, iovs, next}:
           +s = s
           Sim.run(f, A, Sim.disk_write(s, dk, off, Sim.gather(iovs, s)), next)
+        case V.VmZeroRam{+iovs, next}:
+          Sim.run(f, A, Sim.scatter(iovs, s, B.Bytes.zeros(U32.to_nat(V.Iov.total(iovs)))), next)
+        case V.VmDiskAlloc{dk, +len, k}:
+          +s = s
+          +at = Sim.alloc_at(Sim.disk(s), len)
+          Sim.run(f, A, Sim.disk_write(s, dk, at, B.Bytes.zeros(U32.to_nat(len))), k(at))
+        case V.VmDiskCopy{sd, so, dd, doff, +len, next}:
+          +s = s
+          Sim.run(f, A, Sim.disk_write(s, dd, doff, Sim.fill(Sim.disk_read(s, sd, so, len), len)), next)
+        case V.VmInflateToRam{dk, off, clen, skip, +iovs, next}:
+          # no inflater here: zeros
+          Sim.run(f, A, Sim.scatter(iovs, s, B.Bytes.zeros(U32.to_nat(V.Iov.total(iovs)))), next)
+        case V.VmInflateToDisk{dk, off, clen, dd, doff, +len, next}:
+          Sim.run(f, A, Sim.disk_write(s, dd, doff, B.Bytes.zeros(U32.to_nat(len))), next)
         case V.VmStage{iovs, k}:
           # the simulator stages everything in slot 0
           Sim.run(f, A, s, k(0))

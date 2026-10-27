@@ -830,9 +830,8 @@ static int vmb_gic_restore(const uint8_t* blob, size_t size) {
     uint64_t               v32 = (uint32_t)e[i].val, v64 = e[i].val;
     struct kvm_device_attr a   = {0, e[i].group, e[i].attr, (uint64_t)(uintptr_t)(e[i].width == 4 ? &v32 : &v64)};
     if (ioctl(kvm_gic, KVM_SET_DEVICE_ATTR, &a) != 0) {
-      bad++;
-      if (hvf_trace & 1) {
-        fprintf(stderr, "[trace] vGIC restore: group %u attr %#llx: %s\n", e[i].group, (unsigned long long)e[i].attr,
+      if (bad++ == 0 || (hvf_trace & 1)) {
+        fprintf(stderr, "bend-vmm: vGIC restore: group %u attr %#llx: %s\n", e[i].group, (unsigned long long)e[i].attr,
                 strerror(errno));
       }
     }
@@ -1261,9 +1260,10 @@ static struct {
   int (*end)(hvf_zstream*);
 } hvf_z;
 
-// Inflates a gzip file of n bytes at src into dst (room bytes); the output
-// size, or -1.
-static int64_t hvf_gunzip(uint8_t* src, uint64_t n, uint8_t* dst, uint64_t room) {
+// Inflates n bytes at src into dst (room bytes): a gzip file (bits 31) or a
+// raw deflate stream (bits -12, as qcow2's compressed clusters). The output
+// size, or -1 (room filling up is no error for a raw stream).
+static int64_t hvf_inflate(const uint8_t* src, uint64_t n, uint8_t* dst, uint64_t room, int bits) {
   if (!hvf_z.lib) {
 #ifdef __APPLE__
     hvf_z.lib = dlopen("/usr/lib/libz.1.dylib", RTLD_NOW);
@@ -1280,8 +1280,7 @@ static int64_t hvf_gunzip(uint8_t* src, uint64_t n, uint8_t* dst, uint64_t room)
   hvf_zstream z = {0};
   z.next_in  = src;
   z.avail_in = (unsigned)n;
-  // windowBits 15 + 16: a gzip wrapper
-  if (!hvf_z.init2 || hvf_z.init2(&z, 31, "1.2.12", (int)sizeof z) != HVF_Z_OK) {
+  if (!hvf_z.init2 || hvf_z.init2(&z, bits, "1.2.12", (int)sizeof z) != HVF_Z_OK) {
     return -1;
   }
   uint64_t out = 0;
@@ -1294,7 +1293,12 @@ static int64_t hvf_gunzip(uint8_t* src, uint64_t n, uint8_t* dst, uint64_t room)
     out += chunk - z.avail_out;
   }
   hvf_z.end(&z);
-  return r == HVF_Z_STREAM_END ? (int64_t)out : -1;
+  return r == HVF_Z_STREAM_END || (bits < 0 && out > 0) ? (int64_t)out : -1;
+}
+
+static int64_t hvf_gunzip(uint8_t* src, uint64_t n, uint8_t* dst, uint64_t room) {
+  // windowBits 15 + 16: a gzip wrapper
+  return hvf_inflate(src, n, dst, room, 31);
 }
 
 // Hvf.load(path, gpa_hi, gpa_lo) -> U32: copies a file into RAM, inflating
@@ -1355,8 +1359,9 @@ Term hvf_reexec_run(Env e, Term* f, IoWork* w) {
   if (fd >= 0) {
     close(fd);
   }
-  if (n > 0 && readlink("/proc/self/exe", path, sizeof path - 1) > 0) {
-    path[sizeof path - 1] = 0;
+  ssize_t pl = readlink("/proc/self/exe", path, sizeof path - 1);
+  path[pl > 0 ? pl : 0] = 0; // readlink does not end the string
+  if (n > 0 && pl > 0) {
     char* argv[1024];
     int   argc = 0;
     for (ssize_t at = 0; at < n && argc < 1023; at += (ssize_t)strlen(args + at) + 1) {
@@ -1365,6 +1370,7 @@ Term hvf_reexec_run(Env e, Term* f, IoWork* w) {
     argv[argc] = NULL;
     execv(path, argv);
   }
+  fprintf(stderr, "bend-vmm: cannot re-execute %s: %s\n", path, strerror(errno));
 #endif
   return (Term)HVF_ERR;
 }
@@ -1855,6 +1861,108 @@ Term hvf_disk_copy_run(Env e, Term* f, IoWork* w) {
   }
   int64_t k = hvf_iov_io(fd, out, off, hva, len, n, !out);
   return (Term)(k < 0 || (out && (u64)k < want) ? HVF_ERR : 0);
+}
+
+// Disk images by layout (src/disk)
+// ================================
+
+// Hvf.zero_ram(iovs) -> U32: zeros over the pieces of guest memory.
+Term hvf_zero_ram_run(Env e, Term* f, IoWork* w) {
+  static uint8_t* hva[HVF_MAX_IOVS];
+  static u64      len[HVF_MAX_IOVS];
+  u64             nb;
+  char*           b = io_cbuf(e, f[0], &nb, CID(Con));
+  int             n = hvf_iovs(b, nb, hva, len, HVF_MAX_IOVS);
+  free(b);
+  for (int i = 0; i < n; i++) {
+    memset(hva[i], 0, len[i]);
+  }
+  return (Term)(n < 0 ? HVF_ERR : 0);
+}
+
+// Hvf.disk_alloc(disk, len) -> List<U32>: grows the image by len zero bytes
+// from the first multiple of len at or past its end: [hi, lo] of that start,
+// or [] when it cannot.
+Term hvf_disk_alloc_run(Env e, Term* f, IoWork* w) {
+  int         fd  = hvf_disk(f[0]);
+  u64         len = (u32)f[1];
+  struct stat st;
+  if (fd < 0 || len == 0 || fstat(fd, &st) != 0) {
+    return term_pak(CID(Nil), 0);
+  }
+  uint64_t at = ((uint64_t)st.st_size + len - 1) / len * len;
+  if (ftruncate(fd, (off_t)(at + len)) != 0) {
+    return term_pak(CID(Nil), 0);
+  }
+  uint32_t ws[2] = {(uint32_t)(at >> 32), (uint32_t)at};
+  return hvf_words(e, ws, 2);
+}
+
+// Hvf.disk_xcopy(src, soff_hi, soff_lo, dst, doff_hi, doff_lo, len) -> U32:
+// copies len bytes between images (zeros past src's end); 0, or 0xFFFFFFFF.
+Term hvf_disk_xcopy_run(Env e, Term* f, IoWork* w) {
+  int      sfd = hvf_disk(f[0]), dfd = hvf_disk(f[3]);
+  uint64_t so = hvf_u64(f[1], f[2]), dof = hvf_u64(f[4], f[5]);
+  u64      n   = (u32)f[6];
+  if (sfd < 0 || dfd < 0) {
+    return (Term)HVF_ERR;
+  }
+  uint8_t* buf = io_mem(calloc(1, n ? n : 1));
+  ssize_t  k   = pread(sfd, buf, n, (off_t)so);
+  int      ok  = k >= 0 && pwrite(dfd, buf, n, (off_t)dof) == (ssize_t)n;
+  free(buf);
+  return (Term)(ok ? 0 : HVF_ERR);
+}
+
+// The raw-deflate stream of clen bytes at off in image fd, inflated into a
+// new buffer of room bytes (zeros past its end); NULL on an error.
+static uint8_t* hvf_inflate_at(int fd, uint64_t off, u64 clen, u64 room) {
+  uint8_t* in  = io_mem(malloc(clen ? clen : 1));
+  uint8_t* out = io_mem(calloc(1, room ? room : 1));
+  ssize_t  k   = fd >= 0 ? pread(fd, in, clen, (off_t)off) : -1;
+  int64_t  m   = k > 0 ? hvf_inflate(in, (uint64_t)k, out, room, -12) : -1;
+  free(in);
+  if (m < 0) {
+    free(out);
+    return NULL;
+  }
+  return out;
+}
+
+// Hvf.inflate_ram(disk, off_hi, off_lo, clen, skip, iovs) -> U32: inflates
+// a compressed cluster and copies its bytes from skip on over the pieces of
+// guest memory; 0, or 0xFFFFFFFF.
+Term hvf_inflate_ram_run(Env e, Term* f, IoWork* w) {
+  static uint8_t* hva[HVF_MAX_IOVS];
+  static u64      len[HVF_MAX_IOVS];
+  u64             nb;
+  char*           b = io_cbuf(e, f[5], &nb, CID(Con));
+  int             n = hvf_iovs(b, nb, hva, len, HVF_MAX_IOVS);
+  free(b);
+  u64 skip = (u32)f[4], total = 0;
+  for (int i = 0; i < n; i++) {
+    total += len[i];
+  }
+  uint8_t* c = n < 0 ? NULL : hvf_inflate_at(hvf_disk(f[0]), hvf_u64(f[1], f[2]), (u32)f[3], skip + total);
+  if (!c) {
+    return (Term)HVF_ERR;
+  }
+  for (int i = 0, at = 0; i < n; at += (int)len[i], i++) {
+    memcpy(hva[i], c + skip + at, len[i]);
+  }
+  free(c);
+  return (Term)0;
+}
+
+// Hvf.inflate_disk(disk, off_hi, off_lo, clen, dst, doff_hi, doff_lo, len)
+// -> U32: inflates a compressed cluster into image dst: len bytes at doff.
+Term hvf_inflate_disk_run(Env e, Term* f, IoWork* w) {
+  u64      n   = (u32)f[7];
+  int      dfd = hvf_disk(f[4]);
+  uint8_t* c   = hvf_inflate_at(hvf_disk(f[0]), hvf_u64(f[1], f[2]), (u32)f[3], n);
+  int      ok  = c && dfd >= 0 && pwrite(dfd, c, n, (off_t)hvf_u64(f[5], f[6])) == (ssize_t)n;
+  free(c);
+  return (Term)(ok ? 0 : HVF_ERR);
 }
 
 // Network (the host end of src/net/nat.bend)
@@ -3652,5 +3760,20 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.disk_copy)
   io_eff(CID(Hvf.disk_copy), hvf_disk_copy_run);
+#endif
+#ifdef CID(Hvf.zero_ram)
+  io_eff(CID(Hvf.zero_ram), hvf_zero_ram_run);
+#endif
+#ifdef CID(Hvf.disk_alloc)
+  io_eff(CID(Hvf.disk_alloc), hvf_disk_alloc_run);
+#endif
+#ifdef CID(Hvf.disk_xcopy)
+  io_eff(CID(Hvf.disk_xcopy), hvf_disk_xcopy_run);
+#endif
+#ifdef CID(Hvf.inflate_ram)
+  io_eff(CID(Hvf.inflate_ram), hvf_inflate_ram_run);
+#endif
+#ifdef CID(Hvf.inflate_disk)
+  io_eff(CID(Hvf.inflate_disk), hvf_inflate_disk_run);
 #endif
 }

@@ -277,6 +277,26 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
       do IO<A>:
         slot : U32 <- H.Host.stage(iovs)
         interp(cpu, mc, done, A, k(slot))
+    case V.VmZeroRam{iovs, next}:
+      do IO<A>:
+        _ : U32 <- H.Hvf.zero_ram(H.Host.iovs(iovs))
+        interp(cpu, mc, done, A, next)
+    case V.VmDiskAlloc{d, len, k}:
+      do IO<A>:
+        at : U.U64 <- H.Host.disk_alloc(d, len)
+        interp(cpu, mc, done, A, k(at))
+    case V.VmDiskCopy{sd, so, dd, doff, len, next}:
+      do IO<A>:
+        _ : U32 <- H.Host.disk_xcopy(sd, so, dd, doff, len)
+        interp(cpu, mc, done, A, next)
+    case V.VmInflateToRam{d, off, clen, skip, iovs, next}:
+      do IO<A>:
+        _ : U32 <- H.Host.inflate_ram(d, off, clen, skip, iovs)
+        interp(cpu, mc, done, A, next)
+    case V.VmInflateToDisk{d, off, clen, dd, doff, len, next}:
+      do IO<A>:
+        _ : U32 <- H.Host.inflate_disk(d, off, clen, dd, doff, len)
+        interp(cpu, mc, done, A, next)
     case V.VmNetToRam{conn, iovs, next}:
       do IO<A>:
         _ : U32 <- H.Host.net_copy(conn, iovs)

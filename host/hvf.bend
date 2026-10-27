@@ -94,6 +94,26 @@ def Hvf.disk_copy(disk: U32, dir: U32, off_hi: U32, off_lo: U32, iovs: +List<U32
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.zero_ram(iovs: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.disk_alloc(disk: U32, len: U32) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.disk_xcopy(src: U32, soff_hi: U32, soff_lo: U32, dst: U32, doff_hi: U32, doff_lo: U32, len: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.inflate_ram(disk: U32, off_hi: U32, off_lo: U32, clen: U32, skip: U32, iovs: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.inflate_disk(disk: U32, off_hi: U32, off_lo: U32, clen: U32, dst: U32, doff_hi: U32, doff_lo: U32, len: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 # Host sockets for the NAT (see host/hvf.c, "Network").
 def Hvf.tcp_connect(conn: U32, ip: U32, port: U32) -> IO(U32):
   import "./hvf.c"
@@ -380,6 +400,26 @@ def Host.net_copy(conn: U32, iovs: +List<V.Iov>) -> IO(U32):
 # Copies pieces of guest RAM into a staged slot on the host.
 def Host.stage(iovs: +List<V.Iov>) -> IO(U32):
   Hvf.stage(Host.iovs(iovs))
+
+def Host.disk_alloc(disk: U32, len: U32) -> IO(U.U64):
+  do IO<U.U64>:
+    +ws : +List<U32> <- Hvf.disk_alloc(disk, len)
+    return U.U64{Host.first(ws), Host.first(List.drop(&2, U32, ws, 1n))}
+
+def Host.disk_xcopy(src: U32, soff: U.U64, dst: U32, doff: U.U64, len: U32) -> IO(U32):
+  match soff doff:
+    case U.U64{sh, sl} U.U64{dh, dl}:
+      Hvf.disk_xcopy(src, sh, sl, dst, dh, dl, len)
+
+def Host.inflate_ram(disk: U32, off: U.U64, clen: U32, skip: U32, iovs: +List<V.Iov>) -> IO(U32):
+  match off:
+    case U.U64{h, l}:
+      Hvf.inflate_ram(disk, h, l, clen, skip, Host.iovs(iovs))
+
+def Host.inflate_disk(disk: U32, off: U.U64, clen: U32, dst: U32, doff: U.U64, len: U32) -> IO(U32):
+  match off doff:
+    case U.U64{oh, ol} U.U64{dh, dl}:
+      Hvf.inflate_disk(disk, oh, ol, clen, dst, dh, dl, len)
 
 def Host.disk_size(disk: U32) -> IO(U.U64):
   do IO<U.U64>:

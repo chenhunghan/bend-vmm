@@ -213,6 +213,21 @@ type Vm<-A: Type> is Type:
   # Copies the pieces of guest memory, in order, into a new host buffer (a
   # staged slot, sent or freed later by a NetCmd); continues with its slot.
   VmStage{iovs: +List<Iov>, k: U32 -> Vm<A>}
+  # Disk images by layout (src/disk): zeros over the pieces of guest memory.
+  VmZeroRam{iovs: +List<Iov>, next: Vm<A>}
+  # Grows disk image `disk` by len zero bytes, starting at a multiple of
+  # len past its end; continues with that start.
+  VmDiskAlloc{disk: U32, len: U32, k: U.U64 -> Vm<A>}
+  # Copies len bytes of disk image src at soff to disk image dst at doff
+  # (zeros past src's end).
+  VmDiskCopy{src: U32, soff: U.U64, dst: U32, doff: U.U64, len: U32, next: Vm<A>}
+  # Inflates the raw-deflate stream of clen bytes at off in disk image
+  # `disk` and copies its bytes from skip on over the pieces of guest memory
+  # (zeros past its end).
+  VmInflateToRam{disk: U32, off: U.U64, clen: U32, skip: U32, iovs: +List<Iov>, next: Vm<A>}
+  # Inflates that stream into disk image dst at doff: len bytes (zeros past
+  # its end).
+  VmInflateToDisk{disk: U32, off: U.U64, clen: U32, dst: U32, doff: U.U64, len: U32, next: Vm<A>}
 
 # Device code is written in Op, a continuation monad over Vm: its bind needs
 # no recursion, so `do Op<R, A>:` blocks pass Bend's termination check. R is
@@ -279,6 +294,21 @@ def Op.net_to_ram(-R: Type, conn: U32, iovs: +List<Iov>) -> Op<R, Unit>:
 
 def Op.stage(-R: Type, iovs: +List<Iov>) -> Op<R, U32>:
   Op{k => VmStage{iovs, k}}
+
+def Op.zero_ram(-R: Type, iovs: +List<Iov>) -> Op<R, Unit>:
+  Op{k => VmZeroRam{iovs, k(Unit{})}}
+
+def Op.disk_alloc(-R: Type, disk: U32, len: U32) -> Op<R, U.U64>:
+  Op{k => VmDiskAlloc{disk, len, k}}
+
+def Op.disk_copy(-R: Type, src: U32, soff: U.U64, dst: U32, doff: U.U64, len: U32) -> Op<R, Unit>:
+  Op{k => VmDiskCopy{src, soff, dst, doff, len, k(Unit{})}}
+
+def Op.inflate_to_ram(-R: Type, disk: U32, off: U.U64, clen: U32, skip: U32, iovs: +List<Iov>) -> Op<R, Unit>:
+  Op{k => VmInflateToRam{disk, off, clen, skip, iovs, k(Unit{})}}
+
+def Op.inflate_to_disk(-R: Type, disk: U32, off: U.U64, clen: U32, dst: U32, doff: U.U64, len: U32) -> Op<R, Unit>:
+  Op{k => VmInflateToDisk{disk, off, clen, dst, doff, len, k(Unit{})}}
 
 def Op.random(-R: Type, len: U32) -> Op<R, +List<U32>>:
   Op{k => VmRandom{len, k}}
