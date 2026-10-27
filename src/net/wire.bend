@@ -306,16 +306,16 @@ def Tcp.build(src: U32, dst: U32, t: Tcp) -> +List<U32>:
   c = Csum.of(Wire.cat(Wire.pseudo(src, dst, 6, len), Wire.cat(h0, payload)))
   Wire.cat(Tcp.header(t, c), payload)
 
-# A frame whose payload stays on the host: [256, conn, len] then its
+# A frame whose payload stays on the host: [256, conn, off, len] then its
 # headers. 256 is no byte, so such a frame is never a plain one. The device
-# writes the headers and has the host move the len bytes it holds for TCP
-# connection conn right after them (V.VmNetToRam): the payload never passes
-# through Bend.
+# writes the headers and has the host move the len bytes at offset off of
+# what it holds for TCP connection conn right after them (V.VmNetToRam): the
+# payload never passes through Bend.
 def Wire.host_tag() -> U32:
   256
 
-def Wire.host_frame(conn: U32, len: U32, head: +List<U32>) -> +List<U32>:
-  Wire.host_tag() <> conn <> len <> head
+def Wire.host_frame(conn: U32, off: U32, len: U32, head: +List<U32>) -> +List<U32>:
+  Wire.host_tag() <> conn <> off <> len <> head
 
 def Wire.is_host_frame(f: +List<U32>) -> Bool:
   match f:

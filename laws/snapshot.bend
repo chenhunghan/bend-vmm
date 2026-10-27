@@ -32,7 +32,7 @@ def busy_p9() -> D.Dev:
   D.Dev{D.P9Kind{2, "home"}, M.VirtioMmio{9, U.U64{1, 1}, U.U64{1, 1}, 0, 0, 0, [M.QueueCfg{256, 64, True{}, w(1), w(2), w(3)}], 15, 0, 0, [4, 0, 104, 111, 109, 101]}, [], D.P9Dev{F.P9State{65536, [F.Fid{0, "", False{}}, F.Fid{7, "a/b.txt", True{}}]}}}
 
 def busy() -> Mc.Machine:
-  Mc.Machine{P.PsciState{[True{}, False{}, True{}]}, Uart.Pl011{1, 2, 112, 769, 18, 80, [104, 105]}, True{}, [busy_dev(), busy_p9()], [True{}, False{}], Rtc.Pl031{4294967295, 10, 100, 1, 2}, False{}, Nt.Slirp{[Nt.Conn{0, 40000, 16909060, 80, 1, 1000, 2, Nt.Flow{65537, 1200, [7, 8], False{}, 7}}, Nt.Conn{3, 5353, 167772675, 53, 3, 7, 9, Nt.Flow{9, 0, [], True{}, 4294967295}}], 4}, Pf.Pflash{6, 4096, 2, [1, 2, 3, 4]}}
+  Mc.Machine{P.PsciState{[True{}, False{}, True{}]}, Uart.Pl011{1, 2, 112, 769, 18, 80, [104, 105]}, True{}, [busy_dev(), busy_p9()], [True{}, False{}], Rtc.Pl031{4294967295, 10, 100, 1, 2}, False{}, Nt.Slirp{[Nt.Conn{0, 40000, 16909060, 80, 1, 1000, 2, Nt.Flow{65537, 2, 1202, 2, 1200, [7, 8], False{}, 7, 2, 1024, 1}}, Nt.Conn{3, 5353, 167772675, 53, 3, 7, 9, Nt.Flow{9, 9, 9, 9, 0, [], True{}, 4294967295, 9, 0, 1}}], 4}, Pf.Pflash{6, 4096, 2, [1, 2, 3, 4]}}
 
 law snapshot.roundtrip_fresh:
   {S.Snap.decode(S.Snap.encode(fresh())) == Some{fresh()} : Maybe<&2, Mc.Machine>}

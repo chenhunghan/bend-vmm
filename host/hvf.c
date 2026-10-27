@@ -1991,11 +1991,11 @@ typedef struct {
   int      fd;
   int      parked;  // an effect waits on fd in the event loop
   int      closing; // closed while parked: the parked effect closes fd
-  // TCP data held for the guest (Hvf.tcp_fill): rlen bytes, the first roff
-  // of them already moved into guest memory by Hvf.net_copy, which writes to
-  // wake[1] once all are
+  // TCP data held for the guest (Hvf.tcp_fill): rlen bytes, copied into
+  // guest memory by Hvf.net_copy (perhaps more than once) until
+  // Hvf.tcp_release empties the hold and writes to wake[1]
   uint8_t* rbuf;
-  uint32_t rlen, roff;
+  uint32_t rlen;
   int      wake[2];
 } HvfSock;
 
@@ -2175,7 +2175,6 @@ static Term hvf_tcp_fill_read(Env e, IoWork* w) {
     return io_wait_on(w, k->fd, POLLIN, 0, hvf_tcp_fill_read);
   }
   k->rlen = n > 0 ? (uint32_t)n : 0;
-  k->roff = 0;
   if (hvf_trace & 2) {
     fprintf(stderr, "[trace] tcp %u: holds %u\n", k->key, k->rlen);
   }
@@ -2197,8 +2196,8 @@ static Term hvf_tcp_fill_taken(Env e, IoWork* w) {
   return io_wait_on(w, k->fd, POLLIN, 0, hvf_tcp_fill_read);
 }
 
-// Hvf.tcp_fill(conn) -> U32: once the guest has the bytes held for it (by
-// Hvf.net_copy), parks until the socket has data and holds up to 65495
+// Hvf.tcp_fill(conn) -> U32: once the hold is released (Hvf.tcp_release),
+// parks until the socket has data and holds up to 65495
 // bytes of it for the guest: their count; 0 at EOF, on an error, or once the
 // connection is closed.
 Term hvf_tcp_fill_run(Env e, Term* f, IoWork* w) {
@@ -2222,38 +2221,44 @@ Term hvf_tcp_fill_run(Env e, Term* f, IoWork* w) {
   return io_wait_on(w, k->fd, POLLIN, 0, hvf_tcp_fill_read);
 }
 
-// Hvf.net_copy(conn, iovs) -> U32: moves the next bytes held for TCP
-// connection conn into the pieces of guest memory (as Hvf.disk_copy takes
-// them), in order, zeros where they run out; once all held bytes moved, the
-// hold is free for the next Hvf.tcp_fill. The count moved.
+// Hvf.net_copy(conn, off, iovs) -> U32: copies the bytes from offset off of
+// what the host holds for TCP connection conn into the pieces of guest
+// memory (as Hvf.disk_copy takes them), in order, zeros where they run out.
+// The hold stays: the NAT may send those bytes again until the guest
+// acknowledges them (Hvf.tcp_release). The count copied.
 Term hvf_net_copy_run(Env e, Term* f, IoWork* w) {
   static uint8_t* hva[HVF_MAX_IOVS];
   static u64      len[HVF_MAX_IOVS];
-  HvfSock*        k = hvf_sock((u32)f[0], 0);
+  HvfSock*        k   = hvf_sock((u32)f[0], 0);
+  uint32_t        off = (u32)f[1];
   u64             nb;
-  char*           b = io_cbuf(e, f[1], &nb, CID(Con));
+  char*           b = io_cbuf(e, f[2], &nb, CID(Con));
   int             n = hvf_iovs(b, nb, hva, len, HVF_MAX_IOVS);
   free(b);
-  uint32_t have = k && k->rbuf ? k->rlen - k->roff : 0, at = 0;
+  uint32_t have = k && k->rbuf && off < k->rlen ? k->rlen - off : 0, at = 0;
   for (int i = 0; i < n; i++) {
     u64 m = have - at < len[i] ? have - at : len[i];
     if (m) {
-      memcpy(hva[i], k->rbuf + k->roff + at, m);
+      memcpy(hva[i], k->rbuf + off + at, m);
     }
     memset(hva[i] + m, 0, len[i] - m);
     at += (uint32_t)m;
   }
   if (hvf_trace & 2) {
-    fprintf(stderr, "[trace] tcp %u: %u of %u bytes to the guest\n", (u32)f[0], at, have);
-  }
-  if (k && k->rbuf) {
-    k->roff += at;
-    if (k->roff >= k->rlen) {
-      k->rlen = k->roff = 0;
-      (void)!write(k->wake[1], "x", 1);
-    }
+    fprintf(stderr, "[trace] tcp %u: %u bytes from %u of %u to the guest\n", (u32)f[0], at, off, k ? k->rlen : 0);
   }
   return (Term)at;
+}
+
+// Hvf.tcp_release(conn) -> U32: the guest acknowledged all the host held for
+// the connection: the hold empties and Hvf.tcp_fill reads on.
+Term hvf_tcp_release_run(Env e, Term* f, IoWork* w) {
+  HvfSock* k = hvf_sock((u32)f[0], 0);
+  if (k && k->rbuf) {
+    k->rlen = 0;
+    (void)!write(k->wake[1], "x", 1);
+  }
+  return (Term)0;
 }
 
 // Staged transmit data: TCP payloads copied out of guest memory when the
@@ -2341,8 +2346,7 @@ Term hvf_tcp_send_staged_run(Env e, Term* f, IoWork* w) {
 }
 
 // Hvf.net_holds() -> List<U32>: for each TCP connection holding data for the
-// guest, [conn, bytes held, bytes already moved, parked] (the control
-// socket's net command).
+// guest, [conn, bytes held, parked] (the control socket's net command).
 Term hvf_net_holds_run(Env e, Term* f, IoWork* w) {
   uint32_t ws[4 * 64];
   int      n = 0;
@@ -2351,7 +2355,6 @@ Term hvf_net_holds_run(Env e, Term* f, IoWork* w) {
     if (k->used && !k->udp && k->rbuf) {
       ws[n++] = k->key;
       ws[n++] = k->rlen;
-      ws[n++] = k->roff;
       ws[n++] = (uint32_t)k->parked;
     }
   }
@@ -3612,6 +3615,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.tcp_recv)
   io_eff(CID(Hvf.tcp_recv), hvf_tcp_recv_run);
+#endif
+#ifdef CID(Hvf.tcp_release)
+  io_eff(CID(Hvf.tcp_release), hvf_tcp_release_run);
 #endif
 #ifdef CID(Hvf.net_holds)
   io_eff(CID(Hvf.net_holds), hvf_net_holds_run);

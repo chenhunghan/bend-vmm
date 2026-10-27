@@ -301,9 +301,9 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
       do IO<A>:
         _ : U32 <- H.Host.inflate_disk(d, off, clen, dd, doff, skip, len)
         interp(cpu, mc, done, A, next)
-    case V.VmNetToRam{conn, iovs, next}:
+    case V.VmNetToRam{conn, off, iovs, next}:
       do IO<A>:
-        _ : U32 <- H.Host.net_copy(conn, iovs)
+        _ : U32 <- H.Host.net_copy(conn, off, iovs)
         interp(cpu, mc, done, A, next)
     case V.VmRandom{n, k}:
       do IO<A>:
@@ -484,6 +484,10 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
       do IO<Unit>:
         _ : U32 <- H.Hvf.stage_drop(slot)
         return Unit{}
+    case V.TcpRelease{conn}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.tcp_release(conn)
+        return Unit{}
 
 # Management: pause, resume and snapshots, from the console escapes
 # (Ctrl-A p / s) and the control socket (--control PATH).
@@ -641,7 +645,7 @@ def pointer_of(arg: String) -> Maybe<&2, In.Hid>:
         +m : M.Machine <- take(mc)
         put(mc, m)
         holds : +List<U32> <- H.Hvf.net_holds()
-        return M.Machine.net_show(m) ++ "\nheld on the host [conn, bytes, moved, parked]...: " ++ List.show(~&2, ~U32, ~U32.show, holds)
+        return M.Machine.net_show(m) ++ "\nheld on the host [conn, bytes, parked]...: " ++ List.show(~&2, ~U32, ~U32.show, holds)
     case False{}:
       command.type(String.eq(verb, "type"), mc, done, verb, arg)
 

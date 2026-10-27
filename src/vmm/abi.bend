@@ -47,6 +47,9 @@ type NetCmd is Data:
   TcpSendStaged{conn: U32, slot: U32}
   # Frees a staged slot unsent (its segment was out of order, or refused).
   StageDrop{slot: U32}
+  # The guest acknowledged all the host holds for the connection (TcpReady):
+  # the host may drop it and read on.
+  TcpRelease{conn: U32}
 
 # What the host reports back to the NAT.
 type NetEvent is Data:
@@ -207,9 +210,10 @@ type Vm<-A: Type> is Type:
   VmDiskToRam{disk: U32, offset: U.U64, iovs: +List<Iov>, next: Vm<A>}
   # Copies the pieces of guest memory, in order, to the disk from offset.
   VmRamToDisk{disk: U32, offset: U.U64, iovs: +List<Iov>, next: Vm<A>}
-  # Moves the bytes the host holds for TCP connection conn (TcpReady) into
-  # the pieces of guest memory, in order, and frees the host's buffer.
-  VmNetToRam{conn: U32, iovs: +List<Iov>, next: Vm<A>}
+  # Copies the bytes from offset off of what the host holds for TCP
+  # connection conn (TcpReady) into the pieces of guest memory, in order.
+  # The hold stays until TcpRelease (the bytes may be sent again).
+  VmNetToRam{conn: U32, off: U32, iovs: +List<Iov>, next: Vm<A>}
   # Copies the pieces of guest memory, in order, into a new host buffer (a
   # staged slot, sent or freed later by a NetCmd); continues with its slot.
   VmStage{iovs: +List<Iov>, k: U32 -> Vm<A>}
@@ -289,8 +293,8 @@ def Op.disk_to_ram(-R: Type, disk: U32, offset: U.U64, iovs: +List<Iov>) -> Op<R
 def Op.ram_to_disk(-R: Type, disk: U32, offset: U.U64, iovs: +List<Iov>) -> Op<R, Unit>:
   Op{k => VmRamToDisk{disk, offset, iovs, k(Unit{})}}
 
-def Op.net_to_ram(-R: Type, conn: U32, iovs: +List<Iov>) -> Op<R, Unit>:
-  Op{k => VmNetToRam{conn, iovs, k(Unit{})}}
+def Op.net_to_ram(-R: Type, conn: U32, off: U32, iovs: +List<Iov>) -> Op<R, Unit>:
+  Op{k => VmNetToRam{conn, off, iovs, k(Unit{})}}
 
 def Op.stage(-R: Type, iovs: +List<Iov>) -> Op<R, U32>:
   Op{k => VmStage{iovs, k}}

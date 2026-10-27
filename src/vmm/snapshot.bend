@@ -69,8 +69,8 @@ def Enc.conns(cs: +List<Nt.Conn>) -> +List<U32>:
   match cs:
     case Nil{}:
       []
-    case Con{Nt.Conn{id, gp, rip, rp, st, gs, hs, Nt.Flow{wnd, held, queue, eof, sc}}, rest}:
-      List.append(&2, U32, [id, gp, rip, rp, st, gs, hs, wnd, held, Bool.to_u32(eof), sc], List.append(&2, U32, X.Enc.bytes(queue), Enc.conns(rest)))
+    case Con{Nt.Conn{id, gp, rip, rp, st, gs, hs, Nt.Flow{wnd, una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}}, rest}:
+      List.append(&2, U32, [id, gp, rip, rp, st, gs, hs, wnd, una, dend, hbase, hlen, Bool.to_u32(eof), sc, dack, dwin, bk], List.append(&2, U32, X.Enc.bytes(queue), Enc.conns(rest)))
 
 def Enc.slirp(s: Nt.Slirp) -> +List<U32>:
   match s:
@@ -261,12 +261,18 @@ def Dec.conns(n: Nat) -> X.Dec<+List<Nt.Conn>>:
         gs : U32 <- X.Dec.u32()
         hs : U32 <- X.Dec.u32()
         wnd : U32 <- X.Dec.u32()
-        held : U32 <- X.Dec.u32()
+        una : U32 <- X.Dec.u32()
+        dend : U32 <- X.Dec.u32()
+        hbase : U32 <- X.Dec.u32()
+        hlen : U32 <- X.Dec.u32()
         eof : Bool <- X.Dec.bool()
         sc : U32 <- X.Dec.u32()
+        dack : U32 <- X.Dec.u32()
+        dwin : U32 <- X.Dec.u32()
+        bk : U32 <- X.Dec.u32()
         queue : +List<U32> <- X.Dec.bytes()
         rest : +List<Nt.Conn> <- Dec.conns(p)
-        return Nt.Conn{id, gp, rip, rp, st, gs, hs, Nt.Flow{wnd, held, queue, eof, sc}} <> rest
+        return Nt.Conn{id, gp, rip, rp, st, gs, hs, Nt.Flow{wnd, una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}} <> rest
 
 def Dec.slirp() -> X.Dec<Nt.Slirp>:
   do X.Dec<Nt.Slirp>:

@@ -36,6 +36,7 @@ io_eff(CID(Hvf.stdin_tty), () => 0);
 io_eff(CID(Hvf.set_dns), () => 0);
 io_eff(CID(Hvf.set_args), () => 0);
 io_eff(CID(Hvf.net_holds), () => ({ $: CID(Nil) }));
+io_eff(CID(Hvf.tcp_release), () => 0);
 io_eff(CID(Hvf.dns), () => 16843009);
 io_eff(CID(Hvf.disk_flush), hvf_unavailable);
 io_eff(CID(Hvf.now), () => ({ $: CID(Nil) }));

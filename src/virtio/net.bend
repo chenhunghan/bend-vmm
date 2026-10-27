@@ -141,16 +141,16 @@ def Net.host_hdr(+hlen: U32, +len: U32) -> +List<U32>:
   List.append(&2, U32, [2, Bool.pick(U32, gso, 1, 0)], List.append(&2, U32, B.Bytes.le16(hlen),
     List.append(&2, U32, B.Bytes.le16(Bool.pick(U32, gso, 1460, 0)), List.append(&2, U32, B.Bytes.zeros(4n), B.Bytes.le16(1)))))
 
-# A host frame [256, conn, len, headers...] over a receive chain: the
+# A host frame [256, conn, off, len, headers...] over a receive chain: the
 # virtio_net_hdr and the headers through Bend, then the payload from the
 # host straight into the memory after them.
 def Net.rx.deliver.host(-R: Type, q: Q.Vq, +h: U32, +w: +List<Q.Desc>, frame: +List<U32>) -> V.Op<R, Q.Vq>:
   match frame:
-    case Con{tag, Con{conn, Con{+len, +head}}}:
+    case Con{tag, Con{conn, Con{off, Con{+len, +head}}}}:
       +hlen = U32.from_nat(List.length(&2, U32, head))
       do V.Op<R, Q.Vq>:
         n : U32 <- Q.Vq.scatter(R, Q.Chain{h, [], w}, List.append(&2, U32, Net.host_hdr(hlen, len), head))
-        V.Op.net_to_ram(R, conn, Q.Vq.segs(w, (12 + hlen : U32), len))
+        V.Op.net_to_ram(R, conn, off, Q.Vq.segs(w, (12 + hlen : U32), len))
         Q.Vq.push(R, q, h, (12 + (hlen + len : U32) : U32))
     case _:
       Q.Vq.push(R, q, h, 0)
@@ -177,7 +177,7 @@ def Net.rx.deliver(-R: Type, q: Q.Vq, c: Q.Chain, +frame: +List<U32>) -> V.Op<R,
 def Net.size(host: Bool, +frame: +List<U32>) -> Nat:
   match host:
     case True{}:
-      Nat.add(Nat.sub(List.length(&2, U32, frame), 3n), U32.to_nat(Maybe.default(&2, U32, List.get(&2, U32, frame, 2n), 0)))
+      Nat.add(Nat.sub(List.length(&2, U32, frame), 4n), U32.to_nat(Maybe.default(&2, U32, List.get(&2, U32, frame, 3n), 0)))
     case False{}:
       List.length(&2, U32, frame)
 

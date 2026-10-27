@@ -143,6 +143,10 @@ def Hvf.tcp_recv(conn: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.tcp_release(conn: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.net_holds() -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
@@ -151,7 +155,7 @@ def Hvf.tcp_fill(conn: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.net_copy(conn: U32, iovs: +List<U32>) -> IO(U32):
+def Hvf.net_copy(conn: U32, off: U32, iovs: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -412,10 +416,10 @@ def Host.disk_copy(disk: U32, dir: U32, off: U.U64, iovs: +List<V.Iov>) -> IO(U3
     case U.U64{oh, ol}:
       Hvf.disk_copy(disk, dir, oh, ol, Host.iovs(iovs))
 
-# Moves the bytes the host holds for TCP connection conn into pieces of
-# guest RAM.
-def Host.net_copy(conn: U32, iovs: +List<V.Iov>) -> IO(U32):
-  Hvf.net_copy(conn, Host.iovs(iovs))
+# Copies the bytes from offset off of what the host holds for TCP connection
+# conn into pieces of guest RAM.
+def Host.net_copy(conn: U32, off: U32, iovs: +List<V.Iov>) -> IO(U32):
+  Hvf.net_copy(conn, off, Host.iovs(iovs))
 
 # Copies pieces of guest RAM into a staged slot on the host.
 def Host.stage(iovs: +List<V.Iov>) -> IO(U32):

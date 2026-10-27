@@ -78,14 +78,20 @@ def Conn.guest_fin() -> U32:
 def Conn.host_fin() -> U32:
   3
 
-# Flow control toward the guest: the guest takes sequence numbers below wnd
-# (its last ACK plus its window). held bytes wait on the host (TcpReady) and
-# queue bytes here (TcpData) until the window has room; eof: the host
-# finished, so a FIN follows the last of them. scale: the guest's window
-# shift when its SYN offered window scaling (the NAT then answers with its
-# own, Tcp.our_scale), else 4294967295 (no scaling either way).
+# The flow toward the guest, in sequence numbers: the guest acknowledged
+# everything before una and takes what lies before wnd (its last ACK plus
+# its window); the host's data so far ends at dend. Data stays until the
+# guest acknowledges it, so it can be sent again: on the byte path (TcpData)
+# as queue, the bytes from una on; on the held path (TcpReady) as the host's
+# hold of hlen bytes from sequence number hbase, released (TcpRelease) once
+# acknowledged. eof: the host finished, so a FIN follows its data. scale:
+# the guest's window shift when its SYN offered window scaling (the NAT then
+# answers with its own, Tcp.our_scale), else 4294967295 (no scaling either
+# way). dack, dwin: the guest's last ACK and window field, to tell a
+# duplicate ACK. back: una when data was last sent again (one go-back per
+# acknowledged point, so the guest's ACKs of duplicates do not set off more).
 type Flow is Data:
-  Flow{wnd: U32, held: U32, queue: +List<U32>, eof: Bool, scale: U32}
+  Flow{wnd: U32, una: U32, dend: U32, hbase: U32, hlen: U32, queue: +List<U32>, eof: Bool, scale: U32, dack: U32, dwin: U32, back: U32}
 
 # The NAT's window shift when the guest scales: its window field (always
 # 65535) then offers 8 MiB. Guest data goes straight to the host's socket,
@@ -227,7 +233,7 @@ def Tcp.is_open(+flags: U32) -> Bool:
 def Tcp.unknown(syn: Bool, rest: +List<Conn>, +next_id: U32, +rip: U32, +gport: U32, +rport: U32, +seq: U32, ack: U32, win: U32, ws: U32, pl: Payload) -> SlirpOut:
   match syn:
     case True{}:
-      c = {Conn{next_id, gport, rip, rport, Conn.syn_sent(), (seq + 1 : U32), 1, Flow{(2 + win : U32), 0, [], False{}, ws}} : Conn}
+      c = {Conn{next_id, gport, rip, rport, Conn.syn_sent(), (seq + 1 : U32), 1, Flow{(2 + win : U32), 2, 2, 2, 0, [], False{}, ws, 0, 0, 1}} : Conn}
       SlirpOut{Slirp{c <> rest, (next_id + 1 : U32)}, [], V.TcpConnect{next_id, rip, rport} <> Payload.drop(pl)}
     case False{}:
       SlirpOut{Slirp{rest, next_id}, [Slirp.tcp_frame(rip, rport, gport, ack, 0, 4, 0, [])], Payload.drop(pl)}
@@ -345,13 +351,13 @@ def Tcp.data_frames(+c: Conn, +seq: U32, +ack: U32, +bytes: +List<U32>) -> +List
   +n = List.length(&2, +List<U32>, chunks)
   Tcp.par(24n, Tcp.small(n), c, seq, ack, n, chunks)
 
-# The host frame of a PSH|ACK segment of len bytes the host holds for
-# connection id: Ethernet, IPv4 and TCP headers (TCP checksum 0).
-def Tcp.host_frame(+id: U32, +rip: U32, rport: U32, gport: U32, seq: U32, ack: U32, +len: U32) -> +List<U32>:
+# The host frame of a PSH|ACK segment of len bytes at offset off of the hold
+# for connection id: Ethernet, IPv4 and TCP headers (TCP checksum 0).
+def Tcp.host_frame(+id: U32, +rip: U32, rport: U32, gport: U32, seq: U32, ack: U32, +off: U32, +len: U32) -> +List<U32>:
   +tcp = W.Tcp.header(W.Tcp{rport, gport, seq, ack, 24, 65535, 0, []}, 0)
   +ip = W.Ipv4.head(rip, Slirp.guest_ip(), 6, (20 + len : U32))
   +eth = List.append(&2, U32, Slirp.guest_mac(), List.append(&2, U32, Slirp.gateway_mac(), [8, 0]))
-  W.Wire.host_frame(id, len, List.append(&2, U32, eth, List.append(&2, U32, ip, tcp)))
+  W.Wire.host_frame(id, off, len, List.append(&2, U32, eth, List.append(&2, U32, ip, tcp)))
 
 def Conn.hseq(+c: Conn) -> U32:
   match c:
@@ -362,20 +368,54 @@ def Conn.hseq(+c: Conn) -> U32:
 def Tcp.scaled(+sc: U32, +win: U32) -> U32:
   Bool.pick(U32, U32.is_eq(sc, Tcp.no_scale()), win, (win << U32.to_nat(sc) : U32))
 
-# The room left in the guest's window from seq on (0 once seq is past it).
+# The room left before wnd from seq on (0 once seq is at or past it).
 def Flow.room(+wnd: U32, +seq: U32) -> U32:
   +d = (wnd - seq : U32)
   Bool.pick(U32, U32.is_lt(d, 2147483648), d, 0)
 
-# c after a guest segment: with ACK set, the window ends at ack + window.
-def Conn.acked(acked: Bool, c: Conn, +ack: U32, +win: U32) -> Conn:
+# Whether a lies strictly after b (modulo 2^32).
+def Seq.after(+a: U32, +b: U32) -> Bool:
+  +d = (a - b : U32)
+  U32.is_ne(d, 0) && U32.is_lt(d, 2147483648)
+
+def Conn.with_seq(c: Conn, +hseq: U32) -> Conn:
+  match c:
+    case Conn{id, gport, rip, rport, state, gseq, h, fl}:
+      Conn{id, gport, rip, rport, state, gseq, hseq, fl}
+
+# What an ACK did: the connection, and the commands it adds (a release).
+type Acked is Data:
+  Acked{conn: Conn, cmds: +List<V.NetCmd>}
+
+def Acked.go(+id: U32, gport: U32, rip: U32, rport: U32, state: U32, gseq: U32, +hseq: U32, +wnd: U32, +una: U32, +dend: U32, +hbase: U32, +hlen: U32, +queue: +List<U32>, +eof: Bool, +sc: U32, +ack: U32, +win: U32, +pure: Bool, +dack: U32, +dwin: U32, +bk: U32) -> Acked:
+  # the guest acknowledged new data
+  +adv = Seq.after(ack, una) && Bool.not(Seq.after(ack, hseq))
+  +una2 = Bool.pick(U32, adv, ack, una)
+  +queue2 = List.drop(&2, U32, queue, U32.to_nat(Bool.pick(U32, adv, (ack - una : U32), 0)))
+  # the hold is all acknowledged: the host may read on
+  +release = U32.is_ne(hlen, 0) && U32.is_le(hlen, (una2 - hbase : U32)) && U32.is_lt((una2 - hbase : U32), 2147483648)
+  +wnd2 = (ack + Tcp.scaled(sc, win) : U32)
+  # data sent but not acknowledged may be gone: the window's right edge moved
+  # back before what was sent, or a duplicate ACK
+  +shrunk = Seq.after(hseq, wnd2) && Seq.after(hseq, una2)
+  +dup = Bool.not(adv) && pure && U32.is_eq(ack, dack) && U32.is_eq(win, dwin) && U32.is_eq(ack, una2) && U32.is_ne(una2, hseq)
+  +again = (shrunk || dup) && U32.is_ne(una2, bk)
+  +hseq2 = Bool.pick(U32, again, una2, hseq)
+  +c2 = {Conn{id, gport, rip, rport, state, gseq, hseq2, Flow{wnd2, una2, dend, hbase, Bool.pick(U32, release, 0, hlen), queue2, eof, sc, ack, win, Bool.pick(U32, again, una2, bk)}} : Conn}
+  Acked{c2, Bool.pick(+List<V.NetCmd>, release, [V.TcpRelease{id}], [])}
+
+# c after a guest segment: with ACK set, acknowledged data goes, the window
+# ends at ack + window, and data that may have been dropped is sent again
+# from una (go-back): when the window shrank before it, or on a duplicate
+# ACK (pure: the segment carries no data and no SYN or FIN).
+def Conn.acked(acked: Bool, c: Conn, +ack: U32, +win: U32, +pure: Bool) -> Acked:
   match acked:
     case False{}:
-      c
+      Acked{c, []}
     case True{}:
       match c:
-        case Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, held, queue, eof, +sc}}:
-          Conn{id, gport, rip, rport, state, gseq, hseq, Flow{(ack + Tcp.scaled(sc, win) : U32), held, queue, eof, sc}}
+        case Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}}:
+          Acked.go(id, gport, rip, rport, state, gseq, hseq, wnd, una, dend, hbase, hlen, queue, eof, sc, ack, win, pure, dack, dwin, bk)
 
 # What sending what the window has room for gave: the connection after it,
 # and its segments for the guest in order.
@@ -387,62 +427,51 @@ def Sent.more(fs: +List<+List<U32>>, s: Sent) -> Sent:
     case Sent{c, gs}:
       Sent{c, List.append(&2, +List<U32>, fs, gs)}
 
-# How many held bytes the next segment carries: at most the window's room
-# and 65495 (one IPv4 packet).
-def Conn.held_n(+c: Conn) -> U32:
+# How many bytes the next segment carries: what the window has room for, of
+# the data not yet sent, at most 65495 (one IPv4 packet) from the hold, 1460
+# per segment from the queue (Tcp.data_frames cuts them).
+def Conn.next_n(+c: Conn, +cap: U32) -> U32:
   match c:
-    case Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, held, queue, eof, sc}}:
-      U32.min(held, U32.min(Flow.room(wnd, hseq), 65495))
+    case Conn{id, gport, rip, rport, state, gseq, +hseq, Flow{+wnd, una, +dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}}:
+      U32.min(Flow.room(dend, hseq), U32.min(Flow.room(wnd, hseq), cap))
 
-def Conn.held_frame(+c: Conn, n: U32) -> +List<U32>:
+def Conn.held_frame(+c: Conn, +n: U32) -> +List<U32>:
   match c:
-    case Conn{id, gport, rip, rport, state, gseq, hseq, fl}:
-      Tcp.host_frame(id, rip, rport, gport, hseq, gseq, n)
-
-def Conn.held_sent(c: Conn, +n: U32) -> Conn:
-  match c:
-    case Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, held, queue, eof, sc}}:
-      Conn{id, gport, rip, rport, state, gseq, (hseq + n : U32), Flow{wnd, (held - n : U32), queue, eof, sc}}
+    case Conn{id, gport, rip, rport, state, gseq, +hseq, Flow{wnd, una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}}:
+      Tcp.host_frame(id, rip, rport, gport, hseq, gseq, (hseq - hbase : U32), n)
 
 # Held bytes as host frames while the window has room (f bounds the
-# segments: held bytes are at most one host read, 65495 bytes).
+# segments: a hold is at most one host read, 65495 bytes).
 def Tcp.send_held(f: Nat, +c: Conn) -> Sent:
   match f:
     case 0n:
       Sent{c, []}
     case 1n+p:
-      +n = Conn.held_n(c)
-      Bool.pick(Sent, U32.is_zero(n), Sent{c, []}, Sent.more([Conn.held_frame(c, n)], Tcp.send_held(p, Conn.held_sent(c, n))))
+      +n = Conn.next_n(c, 65495)
+      Bool.pick(Sent, U32.is_zero(n), Sent{c, []}, Sent.more([Conn.held_frame(c, n)], Tcp.send_held(p, Conn.with_seq(c, (Conn.hseq(c) + n : U32)))))
 
-# Queued bytes, as many as the window has room for, as segments of at most
-# 1460 bytes.
-def Tcp.send_queue(c: Conn) -> Sent:
+def Tcp.send_queue.go(+c: Conn, +n: U32) -> Sent:
   match c:
-    case Conn{+id, +gport, +rip, +rport, +state, +gseq, +hseq, Flow{+wnd, +held, +queue, +eof, +sc}}:
-      +n = Nat.min(List.length(&2, U32, queue), U32.to_nat(Flow.room(wnd, hseq)))
-      +c1 = {Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, held, [], eof, sc}} : Conn}
-      +c2 = {Conn{id, gport, rip, rport, state, gseq, (hseq + U32.from_nat(n) : U32), Flow{wnd, held, List.drop(&2, U32, queue, n), eof, sc}} : Conn}
-      Sent{c2, Tcp.data_frames(c1, hseq, gseq, List.take(&2, U32, queue, n))}
+    case Conn{id, gport, rip, rport, state, gseq, +hseq, Flow{wnd, +una, dend, hbase, hlen, +queue, eof, sc, dack, dwin, bk}}:
+      +bytes = B.Bytes.slice(queue, U32.to_nat((hseq - una : U32)), U32.to_nat(n))
+      +c1 = {Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}} : Conn}
+      Sent{Conn.with_seq(c1, (hseq + n : U32)), Tcp.data_frames(c1, hseq, gseq, bytes)}
 
-# Whether the host's data is all sent: no held bytes, an empty queue.
-def Flow.empty(f: Flow) -> Bool:
-  match f:
-    case Flow{wnd, held, queue, eof, sc}:
-      U32.is_zero(held) && List.is_empty(&2, U32, queue)
+# Queued bytes not yet sent, as many as the window has room for, as segments
+# of at most 1460 bytes.
+def Tcp.send_queue(+c: Conn) -> Sent:
+  Tcp.send_queue.go(c, Conn.next_n(c, 4294967295))
 
 def Conn.flow(+c: Conn) -> Flow:
   match c:
     case Conn{id, gport, rip, rport, state, gseq, hseq, fl}:
       fl
 
-# The FIN after the host's EOF, once its data is all sent: FIN|ACK (seq
-# hseq, ack gseq), hseq + 1, state HostFin; after GuestFin the connection
-# closes (V.TcpClose) and is forgotten.
-# c after its FIN: hseq + 1, state HostFin, the flow no longer finishing.
+# c after its FIN: hseq one past the data, state HostFin.
 def Conn.fin_sent(c: Conn) -> Conn:
   match c:
-    case Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, held, queue, eof, sc}}:
-      Conn{id, gport, rip, rport, Conn.host_fin(), gseq, (hseq + 1 : U32), Flow{wnd, held, queue, False{}, sc}}
+    case Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, una, +dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}}:
+      Conn{id, gport, rip, rport, Conn.host_fin(), gseq, (dend + 1 : U32), Flow{wnd, una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}}
 
 def Tcp.fin.done(closing: Bool, +c: Conn, rest: +List<Conn>, next_id: U32, fs: +List<+List<U32>>) -> SlirpOut:
   match closing:
@@ -451,6 +480,10 @@ def Tcp.fin.done(closing: Bool, +c: Conn, rest: +List<Conn>, next_id: U32, fs: +
     case False{}:
       SlirpOut{Slirp{c <> rest, next_id}, fs, []}
 
+# The FIN after the host's EOF, once its data is all sent: FIN|ACK (seq
+# dend, ack gseq), state HostFin; after GuestFin the connection closes
+# (V.TcpClose) and is forgotten. A FIN sent again (go-back) changes nothing
+# else.
 def Tcp.fin(go: Bool, closing: Bool, +c: Conn, rest: +List<Conn>, next_id: U32, fs: +List<+List<U32>>) -> SlirpOut:
   match go:
     case False{}:
@@ -458,25 +491,25 @@ def Tcp.fin(go: Bool, closing: Bool, +c: Conn, rest: +List<Conn>, next_id: U32, 
     case True{}:
       Tcp.fin.done(closing, Conn.fin_sent(c), rest, next_id, List.append(&2, +List<U32>, fs, [Conn.frame(c, 17, Conn.hseq(c), Conn.gseq(c), 0, [])]))
 
-def Flow.eof(f: Flow) -> Bool:
+# Whether the FIN goes now: the host finished and its data is all sent.
+def Flow.fin_due(f: Flow, +hseq: U32) -> Bool:
   match f:
-    case Flow{wnd, held, queue, eof, sc}:
-      eof
+    case Flow{wnd, una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}:
+      eof && U32.is_eq(hseq, dend)
 
 def Tcp.push.sent(s: Sent, rest: +List<Conn>, next_id: U32) -> SlirpOut:
   match s:
     case Sent{+c, fs}:
-      +fl = Conn.flow(c)
-      Tcp.fin(Flow.eof(fl) && Flow.empty(fl), U32.is_eq(Conn.state(c), Conn.guest_fin()), c, rest, next_id, fs)
+      Tcp.fin(Flow.fin_due(Conn.flow(c), Conn.hseq(c)), U32.is_eq(Conn.state(c), Conn.guest_fin()), c, rest, next_id, fs)
 
 # Sends what the guest's window has room for: held bytes as host frames,
 # else queued bytes; then the FIN, when the host finished and nothing is
-# left.
+# left to send.
 def Tcp.push(c: Conn, rest: +List<Conn>, next_id: U32) -> SlirpOut:
   match c:
-    case Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, +held, queue, eof, sc}}:
-      +c = {Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, held, queue, eof, sc}} : Conn}
-      Tcp.push.sent(Bool.pick(Sent, U32.is_zero(held), Tcp.send_queue(c), Tcp.send_held(4n, c)), rest, next_id)
+    case Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, una, dend, hbase, +hlen, queue, eof, sc, dack, dwin, bk}}:
+      +c = {Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}} : Conn}
+      Tcp.push.sent(Bool.pick(Sent, U32.is_zero(hlen), Tcp.send_queue(c), Tcp.send_held(4n, c)), rest, next_id)
 
 # o's frames and commands after fs and cs.
 def Tcp.after(fs: +List<+List<U32>>, cs: +List<V.NetCmd>, o: SlirpOut) -> SlirpOut:
@@ -510,8 +543,13 @@ def Tcp.known(syn: Bool, rst: Bool, +c: Conn, rest: +List<Conn>, next_id: U32, +
     case False{} False{}:
       Tcp.in_seq(U32.is_eq(seq, Conn.gseq(c)), c, rest, next_id, pl, fin)
 
+def Tcp.segment.acked(a: Acked, +id: U32, rest: +List<Conn>, next_id: U32, +seq: U32, +flags: U32, pl: Payload) -> SlirpOut:
+  match a:
+    case Acked{c2, cs}:
+      Tcp.after([], cs, Tcp.push_id(Tcp.known(Tcp.is_open(flags), Tcp.flag(flags, 4), c2, rest, next_id, seq, pl, Tcp.flag(flags, 1)), id))
+
 # A guest segment t, its data pl (t's own bytes, or staged on the host).
-def Tcp.segment(f: Found, next_id: U32, rip: U32, t: W.Tcp, pl: Payload, ws: U32) -> SlirpOut:
+def Tcp.segment(f: Found, next_id: U32, rip: U32, t: W.Tcp, +pl: Payload, ws: U32) -> SlirpOut:
   match f:
     case Found{m, rest}:
       match m:
@@ -522,8 +560,8 @@ def Tcp.segment(f: Found, next_id: U32, rip: U32, t: W.Tcp, pl: Payload, ws: U32
         case Some{+c}:
           match t:
             case W.Tcp{sport, dport, seq, ack, +flags, window, mss, data}:
-              +c2 = Conn.acked(Tcp.flag(flags, 16), c, ack, window)
-              Tcp.push_id(Tcp.known(Tcp.is_open(flags), Tcp.flag(flags, 4), c2, rest, next_id, seq, pl, Tcp.flag(flags, 1)), Conn.id(c))
+              +pure = U32.is_zero(Payload.len(pl)) && Bool.not(Tcp.flag(flags, 1)) && Bool.not(Tcp.flag(flags, 2))
+              Tcp.segment.acked(Conn.acked(Tcp.flag(flags, 16), c, ack, window, pure), Conn.id(c), rest, next_id, seq, flags, pl)
 
 # A segment's own bytes, or the staged data when there is a slot.
 def Payload.of(staged: Maybe<&2, Payload>, +t: W.Tcp) -> Payload:
@@ -701,24 +739,26 @@ def Tcp.synack(plain: Bool, +c: Conn, seq: U32, ack: U32) -> +List<U32>:
           +opts = {[2, 4, 5, 180, 1, 3, 3, Tcp.our_scale()] : +List<U32>}
           Slirp.ip_frame(rip, 6, W.Tcp.build_opts(rip, Slirp.guest_ip(), W.Tcp{rport, gport, seq, ack, 18, 65535, 0, []}, opts))
 
-# A host event on c. Data joins the flow (queued bytes, held bytes) and goes
-# out as the guest's window allows; the EOF marks the flow finished.
+# A host event on c. Data joins the flow (queued bytes, or a new hold that
+# starts where the data so far ends) and goes out as the guest's window
+# allows; the EOF marks the flow finished.
 def Tcp.host(+c: Conn, rest: +List<Conn>, next_id: U32, h: HostTcp) -> SlirpOut:
   match c:
-    case Conn{id, gport, rip, rport, state, +gseq, +hseq, Flow{wnd, held, queue, eof, +sc}}:
+    case Conn{id, gport, rip, rport, state, +gseq, +hseq, Flow{wnd, una, +dend, hbase, hlen, queue, eof, +sc, dack, dwin, bk}}:
       match h:
         case HConnected{}:
           +synack = Tcp.synack(U32.is_eq(sc, Tcp.no_scale()), c, hseq, gseq)
-          c2 = {Conn{id, gport, rip, rport, Conn.established(), gseq, (hseq + 1 : U32), Flow{wnd, held, queue, eof, sc}} : Conn}
+          c2 = {Conn{id, gport, rip, rport, Conn.established(), gseq, (hseq + 1 : U32), Flow{wnd, una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}} : Conn}
           SlirpOut{Slirp{c2 <> rest, next_id}, [synack], []}
         case HRefused{}:
           SlirpOut{Slirp{rest, next_id}, [Conn.frame(c, 20, 0, gseq, 0, [])], []}
-        case HData{bytes}:
-          Tcp.push(Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, held, List.append(&2, U32, queue, bytes), eof, sc}}, rest, next_id)
+        case HData{+bytes}:
+          +n = U32.from_nat(List.length(&2, U32, bytes))
+          Tcp.push(Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, una, (dend + n : U32), hbase, hlen, List.append(&2, U32, queue, bytes), eof, sc, dack, dwin, bk}}, rest, next_id)
         case HEof{}:
-          Tcp.push(Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, held, queue, True{}, sc}}, rest, next_id)
-        case HReady{len}:
-          Tcp.push(Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, (held + len : U32), queue, eof, sc}}, rest, next_id)
+          Tcp.push(Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, una, dend, hbase, hlen, queue, True{}, sc, dack, dwin, bk}}, rest, next_id)
+        case HReady{+len}:
+          Tcp.push(Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, una, (dend + len : U32), dend, len, queue, eof, sc, dack, dwin, bk}}, rest, next_id)
 
 def Tcp.host_event(f: Found, next_id: U32, h: HostTcp) -> SlirpOut:
   match f:
@@ -753,8 +793,9 @@ def Conns.queued(cs: +List<Conn>) -> U32:
   match cs:
     case Nil{}:
       0
-    case Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, held, queue, eof, sc}} <> t:
-      (U32.from_nat(List.length(&2, U32, queue)) + Conns.queued(t) : U32)
+    case Conn{id, gport, rip, rport, state, gseq, +hseq, Flow{wnd, +una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}} <> t:
+      # the queued bytes not yet sent
+      (U32.from_nat(Nat.sub(List.length(&2, U32, queue), U32.to_nat((hseq - una : U32)))) + Conns.queued(t) : U32)
 
 def Slirp.queued(n: Slirp) -> U32:
   match n:
@@ -765,8 +806,8 @@ def Slirp.queued(n: Slirp) -> U32:
 # sequence numbers and flow toward the guest.
 def Conn.show(c: Conn) -> String:
   match c:
-    case Conn{id, gport, rip, rport, state, gseq, +hseq, Flow{+wnd, held, queue, eof, sc}}:
-      "tcp " ++ U32.show(id) ++ " " ++ U32.show(gport) ++ " -> " ++ U32.show(rip) ++ ":" ++ U32.show(rport) ++ " state " ++ U32.show(state) ++ " gseq " ++ U32.show(gseq) ++ " hseq " ++ U32.show(hseq) ++ " wnd " ++ U32.show(wnd) ++ " room " ++ U32.show(Flow.room(wnd, hseq)) ++ " held " ++ U32.show(held) ++ " queued " ++ U32.show(U32.from_nat(List.length(&2, U32, queue))) ++ " eof " ++ U32.show(Bool.to_u32(eof)) ++ " scale " ++ U32.show(sc)
+    case Conn{id, gport, rip, rport, state, gseq, +hseq, Flow{+wnd, una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}}:
+      "tcp " ++ U32.show(id) ++ " " ++ U32.show(gport) ++ " -> " ++ U32.show(rip) ++ ":" ++ U32.show(rport) ++ " state " ++ U32.show(state) ++ " gseq " ++ U32.show(gseq) ++ " una " ++ U32.show(una) ++ " hseq " ++ U32.show(hseq) ++ " dend " ++ U32.show(dend) ++ " wnd " ++ U32.show(wnd) ++ " room " ++ U32.show(Flow.room(wnd, hseq)) ++ " hold " ++ U32.show(hbase) ++ "+" ++ U32.show(hlen) ++ " queued " ++ U32.show(U32.from_nat(List.length(&2, U32, queue))) ++ " eof " ++ U32.show(Bool.to_u32(eof)) ++ " scale " ++ U32.show(sc) ++ " last ack " ++ U32.show(dack) ++ "/" ++ U32.show(dwin)
 
 def Conns.show(cs: +List<Conn>) -> String:
   match cs:

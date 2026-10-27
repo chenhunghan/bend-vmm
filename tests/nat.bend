@@ -40,6 +40,8 @@ def show_cmd(c: V.NetCmd) -> String:
       "send " ++ U32.show(id) ++ " staged " ++ U32.show(slot)
     case V.StageDrop{slot}:
       "drop staged " ++ U32.show(slot)
+    case V.TcpRelease{id}:
+      "release " ++ U32.show(id)
 
 def show_cmds(cs: +List<V.NetCmd>) -> String:
   List.show(~&2, ~V.NetCmd, ~show_cmd, cs)
@@ -349,9 +351,10 @@ def first(fs: +List<+List<U32>>) -> +List<U32>:
     case f <> t:
       f
 
-# A host frame's tag, connection, length and TCP sequence number.
+# A host frame's tag, connection, offset into the hold, length and TCP
+# sequence number.
 def host_meta(+f: +List<U32>) -> +List<U32>:
-  List.append(&2, U32, List.take(&2, U32, f, 3n), [B.Bytes.read_be32(List.drop(&2, U32, f, 41n))])
+  List.append(&2, U32, List.take(&2, U32, f, 4n), [B.Bytes.read_be32(List.drop(&2, U32, f, 42n))])
 
 def host_metas(fs: +List<+List<U32>>) -> +List<+List<U32>>:
   match fs:
@@ -397,9 +400,10 @@ def flow_held() -> IO(Unit):
   +o2 = he(net(o1), V.TcpReady{0, 5000})
   +o3 = gf(net(o2), gtcpw(40000, 16, 1000, 3002, 65535, []))
   do IO<Unit>:
-    T.eq_str("held first 3000", show_metas(frames(o2)), "[[256, 0, 3000, 2]]")
-    T.eq_str("held rest on ack", show_metas(frames(o3)), "[[256, 0, 2000, 3002]]")
-    T.eq_str("held frame headers", show(List.take(&2, U32, List.drop(&2, U32, first(frames(o2)), 3n), 14n)), show(List.append(&2, U32, N.Slirp.guest_mac(), List.append(&2, U32, N.Slirp.gateway_mac(), [8, 0]))))
+    T.eq_str("held first 3000", show_metas(frames(o2)), "[[256, 0, 0, 3000, 2]]")
+    T.eq_str("held rest on ack", show_metas(frames(o3)), "[[256, 0, 3000, 2000, 3002]]")
+    T.eq_str("held released once acknowledged", show_cmds(cmds(gf(net(o3), gtcpw(40000, 16, 1000, 5002, 65535, [])))), "[release 0]")
+    T.eq_str("held frame headers", show(List.take(&2, U32, List.drop(&2, U32, first(frames(o2)), 4n), 14n)), show(List.append(&2, U32, N.Slirp.guest_mac(), List.append(&2, U32, N.Slirp.gateway_mac(), [8, 0]))))
 
 # A guest SYN with MSS 1460, NOP and window scale 7 (as Linux sends): the
 # SYN|ACK answers with the NAT's own scale, and the guest's later windows
@@ -418,6 +422,21 @@ def flow_scale() -> IO(Unit):
     T.eq_str("synack offers scale 7", show(List.take(&2, U32, List.drop(&2, U32, first(frames(o2)), 54n), 8n)), "[2, 4, 5, 180, 1, 3, 3, 7]")
     T.eq_u32("window 1 << 7 = 128 bytes go out", U32.from_nat(List.length(&2, +List<U32>, frames(o4))), 1)
     T.eq_u32("the rest waits", N.Slirp.queued(net(o4)), 172)
+
+# Data the guest may have dropped goes again from the oldest unacknowledged
+# byte: when the guest's window shrinks before what was sent, or on a
+# duplicate ACK.
+def flow_resend() -> IO(Unit):
+  +big = noise(3000n, 5)
+  +o1 = he(opened(N.Slirp.new(), 40000, 0), V.TcpData{0, big})
+  +o2 = gf(net(o1), gtcpw(40000, 16, 1000, 1002, 500, []))
+  +o3 = gf(net(o1), gtcpw(40000, 16, 1000, 1002, 65535, []))
+  +o4 = gf(net(o3), gtcpw(40000, 16, 1000, 1002, 65535, []))
+  do IO<Unit>:
+    T.eq_u32("resend: all 3000 sent at once", U32.from_nat(List.length(&2, +List<U32>, frames(o1))), 3)
+    step("resend: a window that shrank sends again from the ACK", o2, [htcp(40000, 24, 1002, 1000, 0, B.Bytes.slice(big, 1000n, 500n))], [])
+    step("resend: an ACK that moves nothing new", o3, [], [])
+    step("resend: its duplicate sends again from the ACK", o4, [htcp(40000, 24, 1002, 1000, 0, B.Bytes.slice(big, 1000n, 1460n)), htcp(40000, 24, 2462, 1000, 0, B.Bytes.slice(big, 2460n, 540n))], [])
 
 def main() -> IO(Unit):
   do IO<Unit>:
@@ -440,3 +459,4 @@ def main() -> IO(Unit):
     flow_eof_waits()
     flow_held()
     flow_scale()
+    flow_resend()
