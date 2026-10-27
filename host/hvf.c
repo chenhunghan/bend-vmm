@@ -3563,6 +3563,13 @@ Term hvf_snap_write_run(Env e, Term* f, IoWork* w) {
     ws[nw++] = (uint32_t)fb[0];
     t        = fb[1];
   }
+  // what the loader takes (hvf_snap_open_run): a larger state is refused
+  // here rather than written as a snapshot that cannot be restored
+  if (nw > (u64)1 << 26) {
+    free(ws);
+    free(path);
+    return (Term)(u32)EFBIG;
+  }
   // every created vCPU saves its registers on its own thread
   int live = 0;
   pthread_mutex_lock(&hvf_gate_mu);
@@ -3654,11 +3661,11 @@ Term hvf_snap_open_run(Env e, Term* f, IoWork* w) {
     return (Term)(u32)EINVAL;
   }
   hvf_snap.args = io_mem(malloc(hvf_snap.nargs + 1));
-  int bad = hvf_get(fd, hvf_snap.args, hvf_snap.nargs) || hvf_get(fd, &hvf_snap.nwords, 8) || hvf_snap.nwords > 1u << 28;
+  int bad = hvf_get(fd, hvf_snap.args, hvf_snap.nargs) || hvf_get(fd, &hvf_snap.nwords, 8) || hvf_snap.nwords > 1u << 26;
   hvf_snap.args[hvf_snap.nargs] = 0;
   if (!bad) {
     hvf_snap.words = io_mem(malloc(hvf_snap.nwords * 4 + 4));
-    bad = hvf_get(fd, hvf_snap.words, hvf_snap.nwords * 4) || hvf_get(fd, &hvf_snap.ngic, 8) || hvf_snap.ngic > 1u << 26;
+    bad = hvf_get(fd, hvf_snap.words, hvf_snap.nwords * 4) || hvf_get(fd, &hvf_snap.ngic, 8) || hvf_snap.ngic > 1u << 24;
   }
   if (!bad) {
     hvf_snap.gic = io_mem(malloc(hvf_snap.ngic + 1));
