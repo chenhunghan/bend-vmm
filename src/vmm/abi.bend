@@ -53,6 +53,9 @@ type NetCmd is Data:
   # Abort: the guest reset the connection. The host drops the data it has
   # not sent yet and resets its socket at once (SO_LINGER 0).
   TcpAbort{conn: U32}
+  # The guest accepted a forwarded connection (TcpIncoming): the host reads
+  # its socket from now on.
+  TcpAccepted{conn: U32}
 
 # What the host reports back to the NAT.
 type NetEvent is Data:
@@ -74,6 +77,12 @@ type NetEvent is Data:
   TcpUnblocked{conn: U32}
   # The host reset the connection (its peer took no data for too long).
   TcpReset{conn: U32}
+  # The host accepted a connection on a forwarded port (--forward) for guest
+  # port gport; conn is a fresh connection id, filed in the host's table.
+  TcpIncoming{conn: U32, gport: U32}
+  # A forwarded connection's SYN went unanswered for a while: the NAT sends
+  # it again or gives up.
+  TcpSynTimeout{conn: U32}
 
 # A piece of guest memory: len bytes at addr. Devices name the memory of a
 # descriptor chain this way, and the host moves bytes in and out of it.

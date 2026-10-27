@@ -10,7 +10,8 @@
 #      through PSCI, driven by host/smoke.bend (host effects only).
 #   2. (when host/main.bend exists) the same payloads on the full machine.
 #   3. Linux (scripts/linux-assets.sh) boots to its init marker and powers off.
-#   4. the guest suite (tests/guest/rootfs/tests.sh), net, 9p, vsock, console.
+#   4. the guest suite (tests/guest/rootfs/tests.sh), net, 9p, vsock, port
+#      forwarding (--forward), console.
 #   5. lifecycle: pause, resume, snapshot, restore; SIGTERM and powerdown
 #      press the guest's power button.
 #   6. display: screendump, and the virtio keyboard and tablet driven through
@@ -130,6 +131,23 @@ open(sys.argv[2],'w').write(str(n))" "${vs}_7000" "$(dirname "$vs")/got" & sink=
     && grn "ok: vsock bulk both ways (4 MiB each: $(grep -a '^BENCH vsock-download ' <<<"$out" | cut -d' ' -f3) / $(grep -a '^BENCH vsock-upload' <<<"$out" | cut -d' ' -f3) MB/s)" \
     || { red "failed: vsock bulk"; grep -a "^BENCH\|bench:" <<<"$out"; echo "host got $(cat "$(dirname "$vs")/got" 2>/dev/null)"; fail=1; }
   kill $src $sink 2>/dev/null
+  # port forwarding (--forward, both forms): a host client reads a guest
+  # server's line, then sends 4 MiB to another guest server that counts them
+  fport=$((20000 + RANDOM % 20000)); bport=$((fport + 1))
+  python3 scripts/forward-test.py $((120 * SLOW)) "$fport" "$bport" 4194304 > "$(dirname "$vs")/fwd.log" 2>&1 & fwd=$!
+  out=$(drive 150 "busybox shell" 'echo forward-ok | nc -l -p 8080; echo go | nc -l -p 8081 | wc -c; echo FWD-DONE\n' "FWD-DONE" 'poweroff -f\n' -- \
+    ./out/bend-vmm --mem 512 --cpus 2 --kernel out/guest/Image --initrd out/guest/guest.cpio --forward "127.0.0.1:$fport:8080,$bport:8081" --cmdline "console=ttyAMA0 quiet" 2>&1 | tr -d '\r')
+  wait $fwd 2>/dev/null
+  hlog=$(cat "$(dirname "$vs")/fwd.log" 2>/dev/null)
+  grep -q "^HOST-FWD-LINE forward-ok$" <<<"$hlog" && grn "ok: --forward host -> guest (127.0.0.1:$fport -> 8080)" || { red "failed: --forward"; echo "$hlog"; grep -a -v sysreg <<<"$out" | tail -8; fail=1; }
+  grep -q "^HOST-FWD-SENT 4194304$" <<<"$hlog" && grep -aqE '^ *4194304 *$' <<<"$out" && grn "ok: --forward bulk (4 MiB host -> guest, every byte counted)" || { red "failed: --forward bulk"; echo "$hlog" | tail -3; grep -a -v sysreg <<<"$out" | tail -8; fail=1; }
+  kill $fwd 2>/dev/null
+  # a forward whose host port is taken stops the VMM at startup
+  python3 -c "import socket,sys,time; s=socket.socket(); s.bind(('127.0.0.1', int(sys.argv[1]))); s.listen(1); time.sleep(int(sys.argv[2]))" "$fport" $((40 * SLOW)) & busy=$!
+  slp 1
+  out=$( (alarm 40 ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --forward "$fport:22" --cmdline "console=ttyAMA0 quiet") 2>&1 < /dev/null)
+  kill $busy 2>/dev/null; wait $busy 2>/dev/null
+  grep -q "cannot listen on 127.0.0.1:$fport: Address already in use" <<<"$out" && grn "ok: --forward on a taken port is a startup error" || { red "failed: --forward on a taken port"; tail -3 <<<"$out"; fail=1; }
   rm -rf "$(dirname "$vs")"
   out=$( (alarm 120 ./out/bend-vmm --mem 4096 --cpus 8 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --disk out/guest/disk.img --cmdline "console=ttyAMA0 bendtest bendcpus=8 quiet") 2>&1 )
   if grep -q GUEST-TESTS-DONE <<<"$out" && ! grep -q "GUEST-TEST FAIL" <<<"$out"; then grn "ok: 8 cpus, 4 GiB (RAM past 4 GiB)"; else red "failed: 8 cpus, 4 GiB"; grep -a GUEST <<<"$out" | tail; fail=1; fi

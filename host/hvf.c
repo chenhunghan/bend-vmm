@@ -4026,6 +4026,123 @@ Term hvf_vsock_accept_run(Env e, Term* f, IoWork* w) {
   return hvf_vs_accept(e, w);
 }
 
+// Port forwarding
+// ===============
+//
+// --forward [ADDR:]HOSTPORT:GUESTPORT: a listening TCP socket per forward.
+// Each accepted socket goes into the NAT's socket table under a fresh
+// connection id, from 0x20000000 up (the NAT numbers the guest's own
+// connections from 0; vsock keys start at 0x40000000), and the Bend side
+// tells the NAT (V.TcpIncoming). From there the tcp_* effects serve it.
+
+#define HVF_MAX_FWDS 16
+static int      hvf_fwd_fd[HVF_MAX_FWDS]; // the listener's fd + 1 (0: none)
+static uint32_t hvf_fwd_next = 0x20000000u;
+
+// Hvf.err_text(code) -> String: an errno's message.
+Term hvf_err_text_run(Env e, Term* f, IoWork* w) {
+  const char* t = strerror((int)(u32)f[0]);
+  return io_str(e, t, strlen(t));
+}
+
+// Hvf.fwd_listen(idx, addr, port) -> U32: listens on the IPv4 address addr,
+// TCP port port, as forward idx; 0, or an errno (EINVAL: a bad address,
+// port or idx; EADDRINUSE: the port is taken).
+Term hvf_fwd_listen_run(Env e, Term* f, IoWork* w) {
+  u32            idx  = (u32)f[0];
+  u32            port = (u32)f[2];
+  u64            n;
+  char*          addr = io_cstr(e, f[1], &n);
+  struct in_addr ia;
+  int            ok = inet_pton(AF_INET, addr, &ia) == 1;
+  free(addr);
+  if (!ok || idx >= HVF_MAX_FWDS || hvf_fwd_fd[idx] || port == 0 || port > 65535) {
+    return (Term)(u32)EINVAL;
+  }
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd >= 0) {
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+  }
+  if (fd < 0) {
+    return (Term)(u32)errno;
+  }
+  // a restarted VMM binds again over its old connections in TIME_WAIT; a
+  // socket that listens on the port still makes bind fail
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  struct sockaddr_in a = {0};
+  a.sin_family         = AF_INET;
+  a.sin_port           = htons((uint16_t)port);
+  a.sin_addr           = ia;
+  if (bind(fd, (struct sockaddr*)&a, sizeof a) != 0 || listen(fd, 64) != 0) {
+    int err = errno;
+    close(fd);
+    return (Term)(u32)err;
+  }
+  fcntl(fd, F_SETFL, O_NONBLOCK);
+  hvf_fwd_fd[idx] = fd + 1;
+  return (Term)0;
+}
+
+// A connection id no socket in the table has.
+static uint32_t hvf_fwd_id(void) {
+  for (;;) {
+    uint32_t id  = hvf_fwd_next;
+    hvf_fwd_next = id == 0x3fffffffu ? 0x20000000u : id + 1;
+    if (!hvf_sock(id, 0)) {
+      return id;
+    }
+  }
+}
+
+static Term hvf_fwd_accept_more(Env e, IoWork* w) {
+  int lfd = hvf_fwd_fd[w->made] - 1;
+  for (;;) {
+    int c = accept(lfd, NULL, NULL);
+    if (c < 0) {
+      int err = errno;
+      if (err == EINTR) {
+        continue;
+      }
+      // nothing to accept (or a client gone already): wait for the next;
+      // anything else (out of descriptors, memory) leaves the listener
+      // readable, so wait 100 ms rather than spin
+      if (err == EAGAIN || err == EWOULDBLOCK || err == ECONNABORTED) {
+        return io_wait_on(w, lfd, POLLIN, 0, hvf_fwd_accept_more);
+      }
+      return io_wait_on(w, 0, 0, io_tick() + 100000000ull, hvf_fwd_accept_more);
+    }
+    fcntl(c, F_SETFD, FD_CLOEXEC);
+    fcntl(c, F_SETFL, O_NONBLOCK);
+    int one = 1;
+#ifdef SO_NOSIGPIPE
+    setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+    setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    uint32_t conn = hvf_fwd_id();
+    // past the descriptor budget (hvf_fd_has) the client is closed at once
+    if (!hvf_sock_new(conn, 0, c, 3)) {
+      close(c);
+      continue;
+    }
+    if (hvf_trace) {
+      fprintf(stderr, "[trace] forward %d: connection %u\n", (int)w->made, conn);
+    }
+    return (Term)conn;
+  }
+}
+
+// Hvf.fwd_accept(idx) -> U32: parks until a client connects to forward idx;
+// its connection id, filed in the socket table (HVF_ERR without a listener).
+Term hvf_fwd_accept_run(Env e, Term* f, IoWork* w) {
+  u32 idx = (u32)f[0];
+  if (idx >= HVF_MAX_FWDS || !hvf_fwd_fd[idx]) {
+    return (Term)HVF_ERR;
+  }
+  w->made = idx;
+  return hvf_fwd_accept_more(e, w);
+}
+
 // UEFI flash
 // ==========
 //
@@ -4423,6 +4540,15 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.vsock_accept)
   io_eff(CID(Hvf.vsock_accept), hvf_vsock_accept_run);
+#endif
+#ifdef CID(Hvf.err_text)
+  io_eff(CID(Hvf.err_text), hvf_err_text_run);
+#endif
+#ifdef CID(Hvf.fwd_listen)
+  io_eff(CID(Hvf.fwd_listen), hvf_fwd_listen_run);
+#endif
+#ifdef CID(Hvf.fwd_accept)
+  io_eff(CID(Hvf.fwd_accept), hvf_fwd_accept_run);
 #endif
 #ifdef CID(Hvf.fw_load)
   io_eff(CID(Hvf.fw_load), hvf_fw_load_run);

@@ -44,6 +44,8 @@ def show_cmd(c: V.NetCmd) -> String:
       "drop staged " ++ U32.show(slot)
     case V.TcpRelease{id}:
       "release " ++ U32.show(id)
+    case V.TcpAccepted{id}:
+      "accepted " ++ U32.show(id)
 
 def show_cmds(cs: +List<V.NetCmd>) -> String:
   List.show(~&2, ~V.NetCmd, ~show_cmd, cs)
@@ -571,6 +573,115 @@ def queue_cap() -> IO(Unit):
     T.eq_u32("queue unsent of the queued connection", N.Slirp.queued(queued_conn(2, 262146, 0)), 262144)
     T.eq_str("queue unknown connection reads", bool_str(N.Slirp.may_read(queued_conn(2, 262146, 0), 7)), "yes")
 
+# Port forwarding: the host accepted connection fid() (its ids start at
+# 2^29) for guest port 22; the NAT talks to the guest from 10.0.2.2:49152.
+def fid() -> U32:
+  536870912
+
+def fsyn(+eport: U32, gport: U32) -> +List<U32>:
+  to_guest(gw(), 6, W.Tcp.build_opts(gw(), g(), W.Tcp{eport, gport, 1, 0, 2, 65535, 0, []}, [2, 4, 5, 180, 1, 3, 3, 7]))
+
+# A segment from the guest's port 22 to 10.0.2.2:49152, and one back.
+def fg(flags: U32, seq: U32, ack: U32, win: U32, data: +List<U32>) -> +List<U32>:
+  to_host(gw(), 6, W.Tcp.build(g(), gw(), W.Tcp{22, 49152, seq, ack, flags, win, 0, data}))
+
+def fh(flags: U32, seq: U32, ack: U32, data: +List<U32>) -> +List<U32>:
+  to_guest(gw(), 6, W.Tcp.build(gw(), g(), W.Tcp{49152, 22, seq, ack, flags, 65535, 0, data}))
+
+# The guest's SYN|ACK (seq 6999) as Linux sends it: MSS 1460, NOP, window
+# scale 7, window 64240.
+def fsynack() -> +List<U32>:
+  to_host(gw(), 6, W.Tcp.build_opts(g(), gw(), W.Tcp{22, 49152, 6999, 2, 18, 64240, 0, []}, [2, 4, 5, 180, 1, 3, 3, 7]))
+
+def fwd_open() -> N.Slirp:
+  net(he(N.Slirp.new(), V.TcpIncoming{fid(), 22}))
+
+def fwd_handshake() -> IO(Unit):
+  +big = noise(300n, 9)
+  +o1 = he(N.Slirp.new(), V.TcpIncoming{fid(), 22})
+  +o2 = gf(net(o1), fsynack())
+  +o3 = he(net(o2), V.TcpData{fid(), big})
+  +o4 = gf(net(o3), fg(24, 7000, 302, 1, [1, 2, 3]))
+  +o5 = he(net(o4), V.TcpData{fid(), big})
+  +o6 = gf(net(o5), fg(17, 7003, 430, 1, []))
+  +o7 = he(net(o6), V.TcpEof{fid()})
+  +o8 = gf(net(o7), fg(16, 7004, 602, 1000, []))
+  +o9 = gf(net(o8), fg(16, 7004, 603, 1000, []))
+  do IO<Unit>:
+    step("fwd syn", o1, [fsyn(49152, 22)], [])
+    T.eq_u32("fwd syn keeps a connection", conns(net(o1)), 1)
+    T.eq_str("fwd syn pending", bool_str(N.Slirp.syn_pending(net(o1), fid())), "yes")
+    step("fwd synack", o2, [fh(16, 2, 7000, [])], [V.TcpAccepted{fid()}])
+    T.eq_str("fwd established not pending", bool_str(N.Slirp.syn_pending(net(o2), fid())), "no")
+    step("fwd host data in the synack's window", o3, [fh(24, 2, 7000, big)], [])
+    step("fwd guest data", o4, [fh(16, 302, 7003, [])], [V.TcpSend{fid(), [1, 2, 3]}])
+    step("fwd window scaled by 7: 128 bytes go", o5, [fh(24, 302, 7003, List.take(&2, U32, big, 128n))], [])
+    step("fwd guest fin", o6, [fh(16, 430, 7004, []), fh(24, 430, 7004, B.Bytes.slice(big, 128n, 128n))], [V.TcpShutdown{fid()}])
+    step("fwd host eof waits", o7, [], [])
+    step("fwd rest then fin", o8, [fh(24, 558, 7004, B.Bytes.slice(big, 256n, 44n)), fh(17, 602, 7004, [])], [V.TcpClose{fid()}])
+    T.eq_u32("fwd closed", conns(net(o8)), 0)
+    step("fwd last ack after close", o9, [fh(4, 603, 0, [])], [])
+
+def fwd_rst() -> IO(Unit):
+  +o1 = gf(fwd_open(), fg(20, 0, 2, 0, []))
+  +o2 = gf(net(o1), fg(16, 7000, 2, 1000, []))
+  +o3 = gf(net(gf(net(gf(fwd_open(), fsynack())), fg(16, 7000, 2, 1000, []))), fg(20, 7000, 2, 0, []))
+  do IO<Unit>:
+    step("fwd guest rst aborts", o1, [], [V.TcpAbort{fid()}])
+    T.eq_u32("fwd guest rst forgets", conns(net(o1)), 0)
+    step("fwd after rst unknown", o2, [fh(4, 2, 0, [])], [])
+    step("fwd rst when established aborts", o3, [], [V.TcpAbort{fid()}])
+
+# Other guest segments before the SYN|ACK are dropped, the SYN pending.
+def fwd_early() -> IO(Unit):
+  +o1 = gf(fwd_open(), fg(16, 7000, 2, 1000, []))
+  +o2 = gf(fwd_open(), fg(18, 6999, 5, 1000, []))
+  +o3 = gf(fwd_open(), fg(2, 6999, 0, 1000, []))
+  +o4 = gf(fwd_open(), fg(24, 7000, 2, 1000, [1]))
+  +o5 = he(fwd_open(), V.TcpBlocked{fid()})
+  +o6 = he(net(o5), V.TcpUnblocked{fid()})
+  do IO<Unit>:
+    step("fwd early ack dropped", o1, [], [])
+    T.eq_str("fwd early ack still pending", bool_str(N.Slirp.syn_pending(net(o1), fid())), "yes")
+    step("fwd synack of something else dropped", o2, [], [])
+    T.eq_str("fwd bad synack still pending", bool_str(N.Slirp.syn_pending(net(o2), fid())), "yes")
+    step("fwd guest syn dropped", o3, [], [])
+    step("fwd early data dropped", o4, [], [])
+    step("fwd unblocked before the synack sends nothing", o6, [fh(16, 2, 0, [])], [])
+
+def fwd_timeouts() -> IO(Unit):
+  +o1 = he(fwd_open(), V.TcpSynTimeout{fid()})
+  +o2 = he(net(o1), V.TcpSynTimeout{fid()})
+  +o3 = he(net(o2), V.TcpSynTimeout{fid()})
+  +o4 = gf(net(o2), fsynack())
+  +o5 = he(net(o4), V.TcpSynTimeout{fid()})
+  do IO<Unit>:
+    step("fwd timeout: second syn", o1, [fsyn(49152, 22)], [])
+    step("fwd timeout: third syn", o2, [fsyn(49152, 22)], [])
+    step("fwd timeout: gives up", o3, [], [V.TcpAbort{fid()}])
+    T.eq_u32("fwd timeout forgets", conns(net(o3)), 0)
+    step("fwd synack after two timeouts", o4, [fh(16, 2, 7000, [])], [V.TcpAccepted{fid()}])
+    step("fwd timeout once established ignored", o5, [], [])
+    step("fwd timeout unknown ignored", he(N.Slirp.new(), V.TcpSynTimeout{5}), [], [])
+    step("fwd timeout of an outbound connection ignored", he(opened(N.Slirp.new(), 40000, 0), V.TcpSynTimeout{0}), [], [])
+
+# Forwarded connections count against the 256: past them the host's socket
+# is aborted. Two on the same addresses (ids 2^14 apart): the second goes.
+def fwd_limit() -> IO(Unit):
+  +s255 = syns(255n, N.Slirp.new())
+  +o1 = he(s255, V.TcpIncoming{fid(), 22})
+  +o2 = he(net(o1), V.TcpIncoming{(fid() + 1 : U32), 22})
+  +o3 = gf(net(o1), gtcp(40000, 2, 999, 0, []))
+  +o4 = he(fwd_open(), V.TcpIncoming{(fid() + 16384 : U32), 22})
+  +o5 = he(fwd_open(), V.TcpIncoming{(fid() + 16384 : U32), 8080})
+  do IO<Unit>:
+    step("fwd 256th accepted", o1, [fsyn(49152, 22)], [])
+    step("fwd 257th aborted", o2, [], [V.TcpAbort{(fid() + 1 : U32)}])
+    T.eq_u32("fwd 257th keeps none", conns(net(o2)), 256)
+    step("fwd counts against guest syns", o3, [htcp(40000, 20, 0, 1000, 0, [])], [])
+    step("fwd same addresses aborted", o4, [], [V.TcpAbort{(fid() + 16384 : U32)}])
+    step("fwd same port, other guest port", o5, [fsyn(49152, 8080)], [])
+
 def main() -> IO(Unit):
   do IO<Unit>:
     lifetime()
@@ -598,3 +709,8 @@ def main() -> IO(Unit):
     policy()
     blocked()
     queue_cap()
+    fwd_handshake()
+    fwd_rst()
+    fwd_early()
+    fwd_timeouts()
+    fwd_limit()

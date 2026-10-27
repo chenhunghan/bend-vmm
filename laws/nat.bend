@@ -160,3 +160,56 @@ law nat.blocked_holds_data:
 # dropped) and the connection is forgotten.
 law nat.guest_rst_aborts:
   {(cmds(N.Slirp.guest_frame(established(), guest_tcp(20, 1000, 2, []))), net(N.Slirp.guest_frame(established(), guest_tcp(20, 1000, 2, [])))) == ([V.TcpAbort{0}], N.Slirp{[], 1}) : +List<V.NetCmd> & N.Slirp}
+
+# Proposed: port forwarding (--forward). The host accepted connection 7 for
+# guest port 8080: the guest gets a SYN from the gateway 10.0.2.2, port
+# 49152 + 7 = 49159 (N.Tcp.fwd_port), seq 1, with MSS 1460 and window scale
+# 7 (the SYN|ACK's options).
+def fwd_syn() -> +List<U32>:
+  to_guest(gw(), 6, W.Tcp.build_opts(gw(), g(), W.Tcp{49159, 8080, 1, 0, 2, 65535, 0, []}, [2, 4, 5, 180, 1, 3, 3, 7]))
+
+def fwd_guest(flags: U32, seq: U32, ack: U32, data: +List<U32>) -> +List<U32>:
+  to_host(W.Tcp.build(g(), gw(), W.Tcp{8080, 49159, seq, ack, flags, 65535, 0, data}), gw(), 6)
+
+def fwd_host(flags: U32, seq: U32, ack: U32, data: +List<U32>) -> +List<U32>:
+  to_guest(gw(), 6, W.Tcp.build(gw(), g(), W.Tcp{49159, 8080, seq, ack, flags, 65535, 0, data}))
+
+def incoming() -> N.Slirp:
+  net(N.Slirp.host_event(N.Slirp.new(), V.TcpIncoming{7, 8080}))
+
+# After the guest's SYN|ACK (seq 5000).
+def fwd_established() -> N.Slirp:
+  net(N.Slirp.guest_frame(incoming(), fwd_guest(18, 5000, 2, [])))
+
+law nat.fwd_syn:
+  {(frames(N.Slirp.host_event(N.Slirp.new(), V.TcpIncoming{7, 8080})), cmds(N.Slirp.host_event(N.Slirp.new(), V.TcpIncoming{7, 8080}))) == ([fwd_syn()], []) : +List<+List<U32>> & +List<V.NetCmd>}
+
+# The guest's SYN|ACK gets the ACK (seq 2, ack 5001), and the host starts
+# reading the socket (V.TcpAccepted).
+law nat.fwd_synack:
+  {(frames(N.Slirp.guest_frame(incoming(), fwd_guest(18, 5000, 2, []))), cmds(N.Slirp.guest_frame(incoming(), fwd_guest(18, 5000, 2, [])))) == ([fwd_host(16, 2, 5001, [])], [V.TcpAccepted{7}]) : +List<+List<U32>> & +List<V.NetCmd>}
+
+# Established, data flows both ways as on an outbound connection.
+law nat.fwd_host_data:
+  {frames(N.Slirp.host_event(fwd_established(), V.TcpData{7, [111, 107]})) == [fwd_host(24, 2, 5001, [111, 107])] : +List<+List<U32>>}
+
+law nat.fwd_guest_data:
+  {(cmds(N.Slirp.guest_frame(fwd_established(), fwd_guest(24, 5001, 2, [104, 105]))), frames(N.Slirp.guest_frame(fwd_established(), fwd_guest(24, 5001, 2, [104, 105])))) == ([V.TcpSend{7, [104, 105]}], [fwd_host(16, 2, 5003, [])]) : +List<V.NetCmd> & +List<+List<U32>>}
+
+# A guest RST to the SYN (nothing listens on the port) aborts the host's
+# socket, and the connection is forgotten.
+law nat.fwd_rst:
+  {(frames(N.Slirp.guest_frame(incoming(), fwd_guest(20, 0, 2, []))), cmds(N.Slirp.guest_frame(incoming(), fwd_guest(20, 0, 2, []))), net(N.Slirp.guest_frame(incoming(), fwd_guest(20, 0, 2, [])))) == ([], [V.TcpAbort{7}], N.Slirp.new()) : +List<+List<U32>> & +List<V.NetCmd> & N.Slirp}
+
+# Unanswered, the SYN goes three times in all (on the host's timeouts); the
+# third timeout aborts the host's socket and forgets the connection.
+def timeout(n: N.Slirp) -> N.SlirpOut:
+  N.Slirp.host_event(n, V.TcpSynTimeout{7})
+
+law nat.fwd_syn_again:
+  {(frames(timeout(incoming())), frames(timeout(net(timeout(incoming())))), cmds(timeout(net(timeout(net(timeout(incoming())))))), net(timeout(net(timeout(net(timeout(incoming()))))))) == ([fwd_syn()], [fwd_syn()], [V.TcpAbort{7}], N.Slirp.new()) : +List<+List<U32>> & +List<+List<U32>> & +List<V.NetCmd> & N.Slirp}
+
+# With N.Slirp.max_conns connections open, the host's socket is aborted at
+# once and the guest sees nothing.
+law nat.fwd_limit:
+  {(frames(N.Slirp.host_event(N.Slirp{busy(256n), 256}, V.TcpIncoming{7, 8080})), cmds(N.Slirp.host_event(N.Slirp{busy(256n), 256}, V.TcpIncoming{7, 8080}))) == ([], [V.TcpAbort{7}]) : +List<+List<U32>> & +List<V.NetCmd>}

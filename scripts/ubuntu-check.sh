@@ -3,7 +3,8 @@
 # ~600 MiB, downloaded once into out/ubuntu) boots through UEFI from a qcow2
 # overlay with a cloud-init seed disk (NoCloud), 4 vCPUs. cloud-init reports
 # on the console: the kernel, the CPUs, systemd's failed units and an HTTPS
-# request through the NAT. Then SIGTERM presses the power button and systemd
+# request through the NAT. sshd's banner must reach the host through a
+# forwarded port (--forward 127.0.0.1:<random>:22). Then SIGTERM presses the power button and systemd
 # must power off cleanly, leaving an overlay qemu-img checks clean.
 #   scripts/ubuntu-check.sh           (needs qemu-img; macOS: hdiutil,
 #                                      Linux: genisoimage or xorriso)
@@ -37,7 +38,8 @@ case "$(uname -s)" in
 esac || { echo "ubuntu-check: cannot make the seed ISO"; exit 1; }
 qemu-img create -q -f qcow2 -b "$(cd "$(dirname "$img")" && pwd)/$(basename "$img")" -F qcow2 "$t/over.qcow2" 8G
 cp out/uefi/vars.fd "$t/vars.fd"
-./out/bend-vmm --firmware out/uefi/code.fd --vars "$t/vars.fd" --mem 2048 --cpus 4 --disk "$t/over.qcow2,$t/seed.iso:ro" \
+sshport=$((20000 + RANDOM % 20000))
+./out/bend-vmm --firmware out/uefi/code.fd --vars "$t/vars.fd" --mem 2048 --cpus 4 --disk "$t/over.qcow2,$t/seed.iso:ro" --forward "127.0.0.1:$sshport:22" \
   < /dev/null > "$t/run.log" 2>&1 &
 vm=$!
 start=$(date +%s)
@@ -48,6 +50,24 @@ fail=0
 grep -aq "^UBUNTU-UP .* 4 cpus" <<<"$log" && grn "ok: Ubuntu boots ($(grep -a '^UBUNTU-UP' <<<"$log" | cut -d' ' -f2), cloud-init done in ${up}s)" || { red "failed: Ubuntu boot"; grep -av sysreg <<<"$log" | tail -20; fail=1; }
 grep -aq "^UBUNTU-HTTPS 200" <<<"$log" && grn "ok: HTTPS through the NAT" || { red "failed: HTTPS from the guest"; grep -a "^UBUNTU-HTTPS" <<<"$log"; fail=1; }
 grep -aq "^UBUNTU-FAILED 0" <<<"$log" && grn "ok: no failed systemd units" || { red "failed: systemd units failed"; grep -a "^UBUNTU-FAILED\|FAILED" <<<"$log" | head; fail=1; }
+# sshd's banner through the forward (the guest's port 22)
+banner=$(python3 - "$sshport" <<'PY'
+import socket, sys, time
+t0 = time.monotonic()
+while time.monotonic() - t0 < 60:
+    try:
+        s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10)
+        b = s.recv(256)
+        s.close()
+        if b:
+            print(b.decode(errors="replace").strip())
+            break
+    except OSError:
+        pass
+    time.sleep(1)
+PY
+)
+grep -q "^SSH-2.0-OpenSSH" <<<"$banner" && grn "ok: --forward reaches sshd ($banner)" || { red "failed: --forward 127.0.0.1:$sshport:22 (got '$banner')"; fail=1; }
 kill -TERM $vm 2>/dev/null
 s=$(date +%s)
 while kill -0 $vm 2>/dev/null && [ $(($(date +%s) - s)) -lt 30 ]; do sleep 0.5; done
