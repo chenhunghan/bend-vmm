@@ -303,6 +303,21 @@ def Hvf.vsock_accept() -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
+# Port forwarding (host/hvf.c): forward idx listens on addr:port; each
+# accepted client is a NAT connection, its id fresh (0x20000000 up).
+def Hvf.fwd_listen(idx: U32, addr: String, port: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.fwd_accept(idx: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+# An errno's message (strerror).
+def Hvf.err_text(code: U32) -> IO(String):
+  import "./hvf.c"
+  import "./hvf.js"
+
 # UEFI flash (host/hvf.c): the firmware and variable banks.
 def Hvf.fw_load(code: String, vars: String) -> IO(U32):
   import "./hvf.c"

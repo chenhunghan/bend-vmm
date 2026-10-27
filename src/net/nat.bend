@@ -64,7 +64,19 @@ import ./dhcp.bend as D
 #     the guest's window again.
 #   TcpReset{id}: RST|ACK (seq hseq, ack gseq), V.TcpClose{id}; the
 #     connection is forgotten.
+#   TcpIncoming{id, gport} (a forwarded port, --forward): a new connection
+#     id from 10.0.2.2, port Tcp.fwd_port(id), to the guest's gport, state
+#     Incoming: a SYN (seq 1, MSS 1460, window scale Tcp.our_scale); hseq 2.
+#     With Slirp.max_conns connections open, or one on the same addresses:
+#     V.TcpAbort{id} and no connection. Slirp.dst_ok does not apply.
+#   TcpSynTimeout{id}, Incoming: the SYN again, up to Tcp.syn_tries SYNs in
+#     all; then V.TcpAbort{id} and the connection is forgotten.
 #   Events for unknown connections: ignored.
+# A guest segment on an Incoming connection: a SYN|ACK that acknowledges the
+# SYN (ack 2) establishes it: gseq = seq + 1, the guest's window from its
+# ACK, its window scale from its options; an ACK (seq 2, ack gseq) and
+# V.TcpAccepted{id} (the host reads the socket from then on). A RST:
+# V.TcpAbort{id}, the connection is forgotten. Anything else: dropped.
 #
 # The host reads a connection on only while Slirp.may_read (its queue for
 # the guest holds less than Slirp.queue_cap bytes).
@@ -93,6 +105,19 @@ def Conn.guest_fin() -> U32:
   2
 def Conn.host_fin() -> U32:
   3
+
+# A forwarded connection (TcpIncoming) whose SYN went to the guest, sent
+# 1 + (phase - incoming) times.
+def Conn.incoming() -> U32:
+  16
+
+# How many SYNs a forwarded connection sends before it gives up.
+def Tcp.syn_tries() -> U32:
+  3
+
+# Whether phase p is Incoming.
+def Conn.is_incoming_phase(+p: U32) -> Bool:
+  U32.is_le(Conn.incoming(), p) && U32.is_lt(p, (Conn.incoming() + Tcp.syn_tries() : U32))
 
 # The blocked mark (V.TcpBlocked), a bit above the state's own values: Conn
 # and Flow are pinned by the snapshot format, so it shares the state word.
@@ -635,6 +660,37 @@ def Tcp.segment.known(early: Bool, +c: Conn, rest: +List<Conn>, next_id: U32, +s
       +pure = U32.is_zero(Payload.len(pl)) && Bool.not(Tcp.flag(flags, 1)) && Bool.not(Tcp.flag(flags, 2))
       Tcp.segment.acked(Conn.acked(Tcp.flag(flags, 16), c, ack, window, pure), Conn.id(c), rest, next_id, seq, flags, pl)
 
+def Conn.is_incoming(+c: Conn) -> Bool:
+  Conn.is_incoming_phase(Conn.state(c))
+
+# The guest's SYN|ACK to a forwarded connection's SYN: established, its
+# window (unscaled in a SYN) and scale from the segment.
+def Tcp.accepted(c: Conn, rest: +List<Conn>, next_id: U32, +seq: U32, +ack: U32, +window: U32, ws: U32) -> SlirpOut:
+  match c:
+    case Conn{+id, gport, rip, rport, state, gseq, hseq, Flow{wnd, una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}}:
+      +c2 = {Conn{id, gport, rip, rport, Conn.with_phase(state, Conn.established()), (seq + 1 : U32), hseq, Flow{(ack + window : U32), una, dend, hbase, hlen, queue, eof, ws, dack, dwin, bk}} : Conn}
+      SlirpOut{Slirp{c2 <> rest, next_id}, [Conn.ack(c2)], [V.TcpAccepted{id}]}
+
+# A guest segment on an Incoming connection: a RST aborts it, a SYN|ACK of
+# the SYN establishes it, anything else is dropped.
+def Tcp.segment.incoming(rst: Bool, synack: Bool, +c: Conn, rest: +List<Conn>, next_id: U32, +seq: U32, +ack: U32, +window: U32, pl: Payload, ws: U32) -> SlirpOut:
+  match rst synack:
+    case True{} _:
+      SlirpOut{Slirp{rest, next_id}, [], V.TcpAbort{Conn.id(c)} <> Payload.drop(pl)}
+    case False{} True{}:
+      Tcp.after([], Payload.drop(pl), Tcp.accepted(c, rest, next_id, seq, ack, window, ws))
+    case False{} False{}:
+      SlirpOut{Slirp{c <> rest, next_id}, [], Payload.drop(pl)}
+
+# A guest segment on known connection c: Incoming, or any other state.
+def Tcp.segment.on(incoming: Bool, +c: Conn, rest: +List<Conn>, next_id: U32, +seq: U32, +ack: U32, +flags: U32, +window: U32, +pl: Payload, ws: U32) -> SlirpOut:
+  match incoming:
+    case True{}:
+      +synack = U32.is_eq((flags .&. 22 : U32), 18) && U32.is_eq(ack, Conn.hseq(c))
+      Tcp.segment.incoming(Tcp.flag(flags, 4), synack, c, rest, next_id, seq, ack, window, pl, ws)
+    case False{}:
+      Tcp.segment.known(U32.is_eq(Conn.state(c), Conn.syn_sent()) && Bool.not(Tcp.flag(flags, 4)), c, rest, next_id, seq, ack, flags, window, pl)
+
 # A guest segment t, its data pl (t's own bytes, or staged on the host).
 def Tcp.segment(f: Found, next_id: U32, rip: U32, t: W.Tcp, +pl: Payload, ws: U32) -> SlirpOut:
   match f:
@@ -647,7 +703,7 @@ def Tcp.segment(f: Found, next_id: U32, rip: U32, t: W.Tcp, +pl: Payload, ws: U3
         case Some{+c}:
           match t:
             case W.Tcp{sport, dport, seq, ack, +flags, window, mss, data}:
-              Tcp.segment.known(U32.is_eq(Conn.state(c), Conn.syn_sent()) && Bool.not(Tcp.flag(flags, 4)), c, rest, next_id, seq, ack, flags, window, pl)
+              Tcp.segment.on(Conn.is_incoming(c), c, rest, next_id, seq, ack, flags, window, pl, ws)
 
 # A segment's own bytes, or the staged data when there is a slot.
 def Payload.of(staged: Maybe<&2, Payload>, +t: W.Tcp) -> Payload:
@@ -870,6 +926,63 @@ def Tcp.host_event(f: Found, next_id: U32, h: HostTcp) -> SlirpOut:
         case Some{c}:
           Tcp.host(c, rest, next_id, h)
 
+# Whether a connection with key k is in the table.
+def Conns.has(cs: +List<Conn>, +k: Key) -> Bool:
+  match cs:
+    case Nil{}:
+      False{}
+    case Con{+c, t}:
+      Conn.hit(c, k) || Conns.has(t, k)
+
+# The gateway's port for forwarded connection id: 49152 up, by id.
+def Tcp.fwd_port(+id: U32) -> U32:
+  (49152 + (id .&. 16383 : U32) : U32)
+
+# The SYN of forwarded connection c (seq 1), with the SYN|ACK's options.
+def Tcp.fwd_syn(+c: Conn) -> +List<U32>:
+  match c:
+    case Conn{id, gport, +rip, rport, state, gseq, hseq, fl}:
+      +opts = {[2, 4, 5, 180, 1, 3, 3, Tcp.our_scale()] : +List<U32>}
+      Slirp.ip_frame(rip, 6, W.Tcp.build_opts(rip, Slirp.guest_ip(), W.Tcp{rport, gport, 1, 0, 2, 65535, 0, []}, opts))
+
+# The host accepted connection id for guest port gport: a connection from the
+# gateway (when ok: room, and no connection on its addresses), its SYN.
+def Tcp.incoming(ok: Bool, conns: +List<Conn>, next_id: U32, +id: U32, +gport: U32) -> SlirpOut:
+  match ok:
+    case True{}:
+      +c = {Conn{id, gport, Slirp.gateway_ip(), Tcp.fwd_port(id), Conn.incoming(), 0, 2, Flow{2, 2, 2, 2, 0, [], False{}, Tcp.no_scale(), 0, 0, 1}} : Conn}
+      SlirpOut{Slirp{c <> conns, next_id}, [Tcp.fwd_syn(c)], []}
+    case False{}:
+      SlirpOut{Slirp{conns, next_id}, [], [V.TcpAbort{id}]}
+
+# A forwarded connection's SYN timed out: again (phase + 1) while tries are
+# left, else the host's socket is aborted and the connection forgotten.
+def Tcp.syn_again(more: Bool, c: Conn, rest: +List<Conn>, next_id: U32) -> SlirpOut:
+  match more:
+    case True{}:
+      match c:
+        case Conn{id, gport, rip, rport, +state, gseq, hseq, fl}:
+          +c2 = {Conn{id, gport, rip, rport, Conn.with_phase(state, (Conn.phase(state) + 1 : U32)), gseq, hseq, fl} : Conn}
+          SlirpOut{Slirp{c2 <> rest, next_id}, [Tcp.fwd_syn(c2)], []}
+    case False{}:
+      SlirpOut{Slirp{rest, next_id}, [], [V.TcpAbort{Conn.id(c)}]}
+
+def Tcp.syn_timeout.on(incoming: Bool, +c: Conn, rest: +List<Conn>, next_id: U32) -> SlirpOut:
+  match incoming:
+    case True{}:
+      Tcp.syn_again(U32.is_lt((Conn.state(c) + 1 : U32), (Conn.incoming() + Tcp.syn_tries() : U32)), c, rest, next_id)
+    case False{}:
+      SlirpOut{Slirp{c <> rest, next_id}, [], []}
+
+def Tcp.syn_timeout(f: Found, next_id: U32) -> SlirpOut:
+  match f:
+    case Found{m, rest}:
+      match m:
+        case None{}:
+          SlirpOut{Slirp{rest, next_id}, [], []}
+        case Some{+c}:
+          Tcp.syn_timeout.on(Conn.is_incoming(c), c, rest, next_id)
+
 def Slirp.host_event(n: Slirp, ev: V.NetEvent) -> SlirpOut:
   match n:
     case Slirp{conns, next_id}:
@@ -893,6 +1006,12 @@ def Slirp.host_event(n: Slirp, ev: V.NetEvent) -> SlirpOut:
         case V.UdpData{+ip, port, dport, bytes}:
           frame = Slirp.ip_frame(ip, 17, W.Udp.build(ip, Slirp.guest_ip(), W.Udp{port, dport, bytes}))
           SlirpOut{Slirp{conns, next_id}, [frame], []}
+        case V.TcpIncoming{+id, +gport}:
+          +conns = conns
+          +ok = Nat.is_lt(List.length(&2, Conn, conns), Slirp.max_conns()) && Bool.not(Conns.has(conns, ByAddr{gport, Slirp.gateway_ip(), Tcp.fwd_port(id)}))
+          Tcp.incoming(ok, conns, next_id, id, gport)
+        case V.TcpSynTimeout{id}:
+          Tcp.syn_timeout(Conns.take(conns, ById{id}), next_id)
 
 # On the byte path (no hold) the queue holds the bytes from una to dend, so
 # its counts come from the sequence numbers, in O(1).
@@ -931,6 +1050,20 @@ def Slirp.may_read(n: Slirp, +id: U32) -> Bool:
   match n:
     case Slirp{conns, next_id}:
       U32.is_lt(Conns.queue_len(conns, id), Slirp.queue_cap())
+
+# Whether connection id is a forwarded one still waiting for the guest's
+# SYN|ACK (the host's SYN timer stops once it is not).
+def Conns.syn_pending(cs: +List<Conn>, +id: U32) -> Bool:
+  match cs:
+    case Nil{}:
+      False{}
+    case +c <> t:
+      Bool.pick(Bool, U32.is_eq(Conn.id(c), id), Conn.is_incoming(c), Conns.syn_pending(t, id))
+
+def Slirp.syn_pending(n: Slirp, +id: U32) -> Bool:
+  match n:
+    case Slirp{conns, next_id}:
+      Conns.syn_pending(conns, id)
 
 # A connection, for the control socket's net command: its addresses, state,
 # sequence numbers and flow toward the guest.

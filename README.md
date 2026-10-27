@@ -24,7 +24,9 @@ sockets and guest memory where Bend tells it to.
   also virtio-console (`hvc0`).
 - Networking with no root or entitlements: virtio-net behind a user-mode NAT
   written in Bend (DHCP, DNS, TCP, UDP, ping to the gateway; the host is
-  10.0.2.2).
+  10.0.2.2), and TCP port forwarding from the host into the guest
+  (`--forward 2222:22`, like QEMU's `hostfwd`: `ssh -p 2222 127.0.0.1`
+  reaches the guest's sshd).
 - Host directory sharing over virtio-9p (9P2000.L).
 - virtio-vsock to Unix sockets on the host (`--vsock PATH`, Firecracker's
   convention: the guest's connection to host port P reaches `PATH_P`; a host
@@ -79,12 +81,13 @@ Options:
 | `--share DIR` | a host directory over virtio-9p (`mount -t 9p -o trans=virtio,version=9p2000.L share /mnt`) |
 | `--payload FILE` | a bare-metal binary entered at the start of RAM |
 | `--vsock PATH` | virtio-vsock (guest CID 3) bridged to Unix sockets under PATH |
+| `--forward [ADDR:]HP:GP[,…]` | TCP port forwarding: the host listens on ADDR (default `127.0.0.1`; `0.0.0.0` for every interface) port HP, and each client is connected to the guest's port GP (from 10.0.2.2); repeatable, at most 16; a port already in use stops the VMM at startup |
 | `--firmware FILE` | UEFI firmware (`out/uefi/code.fd` from `scripts/uefi-assets.sh`) instead of `--kernel` |
 | `--vars FILE` | the UEFI variable store (copy `out/uefi/vars.fd` per VM); without it variables last one run |
 | `--display WxH` | a window showing the guest's framebuffer, with a virtio keyboard and tablet (`WxH,headless`: no window, for `screendump`) |
 | `--version`, `--help` | the release, the options |
 | `--control SOCK` | a Unix socket for management commands (below) |
-| `--restore FILE` | start from a snapshot; pass the same `--disk`, `--share`, `--vsock`, `--firmware` and `--vars` it was taken with (a snapshot cannot choose host files by itself) |
+| `--restore FILE` | start from a snapshot; pass the same `--disk`, `--share`, `--vsock`, `--firmware` and `--vars` it was taken with (a snapshot cannot choose host files by itself); `--forward` comes from this command line, not the snapshot |
 
 Linux (KVM): the same binary builds on Linux arm64 (clang, `libx11-dev` for
 `--display`) with `scripts/build.sh`, and runs with `/dev/kvm`; snapshots
@@ -238,6 +241,14 @@ elsewhere. What holds today:
   pass the socket budget is refused before the VMM runs out of descriptors. A connection queues at most
   1 MiB for the guest before the host stops reading its socket. Nothing
   reaches the host's sockets before the host's connect completes.
+- Forwarded ports (`--forward`): anyone who can reach ADDR can connect to
+  the guest's port through it. The default, 127.0.0.1, is every user and
+  program on this host (not only yours); `0.0.0.0` is the whole network
+  your host is on. Forward only ports whose guest service authenticates
+  its clients, or bind an address only trusted peers reach. Forwarded
+  connections count against the guest's 256 TCP connections and the
+  socket budget: past either, a new client is closed at once. A client the
+  guest does not answer (three SYNs over 6 s) is reset.
 - Not yet: the VMM is not sandboxed (it runs with your user's rights).
 
 ## How it is verified

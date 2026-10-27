@@ -203,6 +203,8 @@ def show_cmd(c: V.NetCmd) -> String:
       "drop staged " ++ U32.show(slot)
     case V.TcpRelease{id}:
       "release " ++ U32.show(id)
+    case V.TcpAccepted{id}:
+      "accepted " ++ U32.show(id)
 
 def cmds(+s: S.Sim) -> String:
   List.show(~&2, ~V.NetCmd, ~show_cmd, S.Sim.net(s))

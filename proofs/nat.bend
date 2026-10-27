@@ -69,3 +69,24 @@ def L.nat.blocked_holds_data():
 
 def L.nat.guest_rst_aborts():
   {==}
+
+def L.nat.fwd_syn():
+  {==}
+
+def L.nat.fwd_synack():
+  {==}
+
+def L.nat.fwd_host_data():
+  {==}
+
+def L.nat.fwd_guest_data():
+  {==}
+
+def L.nat.fwd_rst():
+  {==}
+
+def L.nat.fwd_syn_again():
+  {==}
+
+def L.nat.fwd_limit():
+  {==}
