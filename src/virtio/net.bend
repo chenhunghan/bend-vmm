@@ -66,24 +66,46 @@ def Net.tcp_split(+bs: +List<U32>) -> Nat & Nat:
   +ok = U32.is_eq(W.Wire.u16(bs, 12n), 2048) && U32.is_eq(W.Wire.u8(bs, 23n), 6) && Nat.is_le(20n, ihl) && Nat.is_le(20n, thl) && Nat.is_le(hl, List.length(&2, U32, bs)) && Nat.is_lt(Nat.add(ihl, thl), tot)
   Bool.pick(Nat & Nat, ok, (hl, Nat.sub(tot, Nat.add(ihl, thl))), (0n, 0n))
 
+# The most bytes of a plain frame read through Bend: a 64 KiB TSO segment
+# with its Ethernet header (65550), after the 12-byte virtio_net_hdr. The
+# rest of a longer chain is dropped.
+def Net.max_tx() -> U32:
+  65562
+
+# A TCP segment's payload pieces ss, staged on the host unless the chain is
+# shorter than the IPv4 header says (short): such a frame is dropped.
+def Net.tx.staged(
+  -R: Type, short: Bool, +ss: +List<V.Iov>, +hl: Nat, q: Q.Vq, +h: U32, hb: +List<U32>, acc: +List<+List<U32>>
+) -> V.Op<R, Q.Vq & +List<+List<U32>>>:
+  match short:
+    case True{}:
+      do V.Op<R, Q.Vq & +List<+List<U32>>>:
+        q2 : Q.Vq <- Q.Vq.push(R, q, h, 0)
+        return (q2, acc)
+    case False{}:
+      do V.Op<R, Q.Vq & +List<+List<U32>>>:
+        slot : U32 <- V.Op.stage(R, ss)
+        q2 : Q.Vq <- Q.Vq.push(R, q, h, 0)
+        return (q2, W.Wire.staged_frame(slot, V.Iov.total(ss), List.take(&2, U32, List.drop(&2, U32, hb, 12n), hl)) <> acc)
+
 # A chain whose frame is a TCP segment with data (pl bytes after hl bytes of
 # headers): the payload is staged on the host (V.Op.stage) before the chain
 # goes back to the guest, and the frame keeps only the headers
-# (W.Wire.staged_frame). Any other frame is gathered whole.
+# (W.Wire.staged_frame); a chain shorter than that is dropped. Any other
+# frame is gathered, at most Net.max_tx() bytes of it.
 def Net.tx.stage(
   -R: Type, plain: Bool, +hl: Nat, +pl: Nat, q: Q.Vq, +h: U32, +r: +List<Q.Desc>, hb: +List<U32>, acc: +List<+List<U32>>
 ) -> V.Op<R, Q.Vq & +List<+List<U32>>>:
   match plain:
     case True{}:
       do V.Op<R, Q.Vq & +List<+List<U32>>>:
-        bs : +List<U32> <- Q.Vq.gather(R, Q.Chain{h, r, []})
+        bs : +List<U32> <- Q.Vq.read_segs(R, Q.Vq.segs(r, 0, Net.max_tx()))
         q2 : Q.Vq <- Q.Vq.push(R, q, h, 0)
         return (q2, Net.keep(bs, acc))
     case False{}:
-      do V.Op<R, Q.Vq & +List<+List<U32>>>:
-        slot : U32 <- V.Op.stage(R, Q.Vq.segs(r, (12 + U32.from_nat(hl) : U32), U32.from_nat(pl)))
-        q2 : Q.Vq <- Q.Vq.push(R, q, h, 0)
-        return (q2, W.Wire.staged_frame(slot, U32.from_nat(pl), List.take(&2, U32, List.drop(&2, U32, hb, 12n), hl)) <> acc)
+      +want = U32.from_nat(pl)
+      +ss = Q.Vq.segs(r, (12 + U32.from_nat(hl) : U32), want)
+      Net.tx.staged(R, U32.is_lt(V.Iov.total(ss), want), ss, hl, q, h, hb, acc)
 
 def Net.tx.split(
   -R: Type, sp: Nat & Nat, q: Q.Vq, +h: U32, +r: +List<Q.Desc>, hb: +List<U32>, acc: +List<+List<U32>>
