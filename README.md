@@ -105,7 +105,8 @@ in 0.2 s and Alpine its login prompt in about 5 s.
 Management: on the console, `Ctrl-A p` pauses or resumes, `Ctrl-A s` writes
 `./bend-vmm.snap`, `Ctrl-A x` quits, `Ctrl-A h` lists the keys. Over
 `--control`: `echo pause | nc -U SOCK` (also `resume`, `status`,
-`snapshot PATH`, `quit`; with `--display`, `screendump PATH` writes the
+`snapshot PATH`, `net` (the NAT's connections and flow state), `quit`;
+with `--display`, `screendump PATH` writes the
 screen as a PPM, `type TEXT` types on the virtio keyboard (`\n` is Return),
 `pointer X Y` moves the tablet on its 0..32767 scale). A snapshot holds guest RAM (sparse), every vCPU's
 registers, the GIC, and the whole device state; `--restore` maps the RAM
@@ -152,15 +153,17 @@ the guest pinned to vCPU 0 where device interrupts land):
 | exit (a trapped UART store, end to end) | ~3 µs |
 | disk sequential read / write (1 MiB, O_DIRECT) | ~290 / ~200 MB/s |
 | disk 4 KiB random read, QD1 | ~45k IOPS (~21 µs) |
-| network download / upload through the NAT | ~500 / ~60 MB/s |
+| network download / upload through the NAT | ~430 / ~80 MB/s |
 | 9p read / write | ~170 / ~30 MB/s |
 
 Bulk data never passes through Bend: devices name the guest memory a
 request uses (`V.Iov` pieces) and the host moves the bytes (disk, 9p,
-network). The NAT does TCP flow control (the guest's window, scaled) and
-hands the guest 64 KiB segments (GUEST_TSO4) whose payload goes from a host
-buffer straight into guest memory; the guest's big segments (HOST_TSO4) are
-staged on the host and sent from there.
+network). The NAT does TCP flow control (the guest's window, scaled), keeps
+data until the guest acknowledges it and sends it again when the guest may
+have dropped it (its window shrank, or a duplicate ACK), and hands the guest
+64 KiB segments (GUEST_TSO4) whose payload goes from a host buffer straight
+into guest memory; the guest's big segments (HOST_TSO4) are staged on the
+host and sent from there.
 
 `scripts/soak.sh [MINUTES]` runs the guest through disk, 9p, network and
 memory traffic, checking every byte read back, pausing and resuming it every
