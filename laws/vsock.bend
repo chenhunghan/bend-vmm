@@ -65,3 +65,41 @@ law vsock.unknown_rst:
 
 law vsock.incoming:
   {out(S.Vsock.host_event(S.Vsock.new(cid()), V.VsIncoming{2147483648, 5000})) == [[2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 136, 19, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0]] : +List<+List<U32>>}
+
+# Proposed: guest-driven state is capped. At most 256 packets that answer the
+# guest wait for it (an RST past that is dropped), and at most 128
+# connections are open (a REQUEST past that gets an RST, no host connect).
+def empties(n: Nat) -> +List<+List<U32>>:
+  match n:
+    case 0n:
+      []
+    case 1n+p:
+      [] <> empties(p)
+
+def conns(n: Nat) -> +List<S.VConn>:
+  match n:
+    case 0n:
+      []
+    case 1n+(+p):
+      S.VConn{U32.from_nat(p), U32.from_nat(p), 1, 1, 0, 0, 0, 0, 0, [], False{}} <> conns(p)
+
+law vsock.max_out:
+  {S.Vs.max_out() == 256n : Nat}
+
+law vsock.max_conns:
+  {S.Vs.max_conns() == 128n : Nat}
+
+law vsock.rst_dropped_when_out_full:
+  {out(S.Vsock.guest_packet(S.Vsock{cid(), [], 0, 1024, empties(256n)}, [3, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 64, 156, 0, 0, 210, 4, 0, 0, 2, 0, 0, 0, 1, 0, 5, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 104, 105])) == empties(256n) : +List<+List<U32>>}
+
+law vsock.request_past_max_conns_no_connect:
+  {cmds(S.Vsock.guest_packet(S.Vsock{cid(), conns(128n), 128, 1024, []}, [3, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 64, 156, 0, 0, 210, 4, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0])) == [] : +List<V.VsockCmd>}
+
+law vsock.request_past_max_conns_rst:
+  {out(S.Vsock.guest_packet(S.Vsock{cid(), conns(128n), 128, 1024, []}, [3, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 64, 156, 0, 0, 210, 4, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0])) == [[2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 210, 4, 0, 0, 64, 156, 0, 0, 0, 0, 0, 0, 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0]] : +List<+List<U32>>}
+
+law vsock.request_below_max_conns_connects:
+  {cmds(S.Vsock.guest_packet(S.Vsock{cid(), conns(127n), 127, 1024, []}, [3, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 64, 156, 0, 0, 210, 4, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0])) == [V.VsConnect{127, 1234}] : +List<V.VsockCmd>}
+
+law vsock.max_tx:
+  {S.Vsq.max_tx() == 65580 : U32}

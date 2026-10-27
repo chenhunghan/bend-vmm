@@ -33,6 +33,16 @@ def Vs.buf_alloc() -> U32:
 def Vs.max_payload() -> U32:
   4096
 
+# Caps on what a guest can make the device keep: packets queued for the
+# guest that answer it (RSTs, credit updates on request; further ones are
+# dropped), and connections (a REQUEST past the cap is refused with an RST and
+# no host connect).
+def Vs.max_out() -> Nat:
+  256n
+
+def Vs.max_conns() -> Nat:
+  128n
+
 def Vs.request() -> U32:
   1
 def Vs.response() -> U32:
@@ -231,6 +241,14 @@ def Vsock.with(vs: Vsock, conns: +List<VConn>, out: +List<+List<U32>>) -> Vsock:
     case Vsock{cid, cs, nid, np, old}:
       Vsock{cid, conns, nid, np, List.append(&2, +List<U32>, old, out)}
 
+# Vsock.with for a packet that answers the guest: it is dropped once
+# Vs.max_out() packets wait for the guest.
+def Vsock.with_ctl(vs: Vsock, conns: +List<VConn>, p: +List<U32>) -> Vsock:
+  match vs:
+    case Vsock{cid, cs, nid, np, +old}:
+      +room = Nat.is_lt(List.length(&2, +List<U32>, old), Vs.max_out())
+      Vsock{cid, conns, nid, np, List.append(&2, +List<U32>, old, Bool.pick(+List<+List<U32>>, room, [p], []))}
+
 def Vsock.cid(vs: Vsock) -> U.U64:
   match vs:
     case Vsock{cid, cs, nid, np, out}:
@@ -332,7 +350,7 @@ def Vs.known.by(rw: Bool, rst: Bool, sd: Bool, resp: Bool, creq: Bool, +vs: Vsoc
       Vsock.keep(vs, rest, VConn.flush.all(c2, Vsock.cid(vs)), [V.VsAccepted{VConn.id(c), VConn.hport(c2)}])
     case False{} False{} False{} False{} True{}:
       +c2 = VConn.last_fwd(c)
-      VsOut{Vsock.with(vs, c2 <> rest, [VConn.pkt(Vsock.cid(vs), c2, Vs.credit_update(), 0, [])]), []}
+      VsOut{Vsock.with_ctl(vs, c2 <> rest, VConn.pkt(Vsock.cid(vs), c2, Vs.credit_update(), 0, [])), []}
     case False{} False{} False{} False{} False{}:
       # CREDIT_UPDATE (or anything else): the new credit may let data out
       Vsock.keep(vs, rest, VConn.flush.all(c, Vsock.cid(vs)), [])
@@ -343,17 +361,27 @@ def Vs.known(vs: Vsock, rest: +List<VConn>, c: VConn, +p: Pkt) -> VsOut:
     case Pkt{sc, dc, sp, dp, +op, fl, +ba, +fc, pl}:
       Vs.known.by(U32.is_eq(op, Vs.rw()), U32.is_eq(op, Vs.rst()), U32.is_eq(op, Vs.shutdown()), U32.is_eq(op, Vs.response()), U32.is_eq(op, Vs.credit_request()), vs, rest, VConn.credit(c, ba, fc), p)
 
-# A guest packet for no connection: a REQUEST opens one; an RST is dropped;
-# anything else is answered with an RST.
-def Vs.unknown(is_req: Bool, is_rst: Bool, +vs: Vsock, rest: +List<VConn>, +p: Pkt) -> VsOut:
+# A REQUEST for no connection: a new one, or an RST when Vs.max_conns() are
+# open (full).
+def Vs.open(full: Bool, +vs: Vsock, rest: +List<VConn>, +p: Pkt) -> VsOut:
+  match full:
+    case False{}:
+      Vs.new_conn(Vsock.with(vs, rest, []), p)
+    case True{}:
+      +cid = Vsock.cid(vs)
+      VsOut{Vsock.with_ctl(vs, rest, Vs.rst_for(cid, p)), []}
+
+# A guest packet for no connection: a REQUEST opens one (Vs.open); an RST is
+# dropped; anything else is answered with an RST (Vsock.with_ctl).
+def Vs.unknown(is_req: Bool, is_rst: Bool, +vs: Vsock, +rest: +List<VConn>, +p: Pkt) -> VsOut:
   match is_req is_rst:
     case True{} _:
-      Vs.new_conn(Vsock.with(vs, rest, []), p)
+      Vs.open(Nat.is_le(Vs.max_conns(), List.length(&2, VConn, rest)), vs, rest, p)
     case False{} True{}:
       VsOut{Vsock.with(vs, rest, []), []}
     case False{} False{}:
       +cid = Vsock.cid(vs)
-      VsOut{Vsock.with(vs, rest, [Vs.rst_for(cid, p)]), []}
+      VsOut{Vsock.with_ctl(vs, rest, Vs.rst_for(cid, p)), []}
 
 def Vs.route(pick: Pick, vs: Vsock, +p: Pkt) -> VsOut:
   match pick:
@@ -488,14 +516,20 @@ def Vsq.room(ds: +List<Q.Desc>) -> U32:
 def Vsq.keep(+bs: +List<U32>, +acc: +List<+List<U32>>) -> +List<+List<U32>>:
   bs <> acc
 
-# Gathers one transmit chain, pushes it used with length 0, and keeps its frame.
+# The most bytes of one transmit chain read through Bend: a header and 64
+# KiB of payload (a longer packet does not parse and is dropped).
+def Vsq.max_tx() -> U32:
+  65580
+
+# Gathers one transmit chain (at most Vsq.max_tx() bytes), pushes it used
+# with length 0, and keeps its frame.
 def Vsq.tx.serve(
   -R: Type, q: Q.Vq, c: Q.Chain, acc: +List<+List<U32>>
 ) -> V.Op<R, Q.Vq & +List<+List<U32>>>:
   match c:
     case Q.Chain{+h, r, w}:
       do V.Op<R, Q.Vq & +List<+List<U32>>>:
-        bs : +List<U32> <- Q.Vq.gather(R, Q.Chain{h, r, []})
+        bs : +List<U32> <- Q.Vq.read_segs(R, Q.Vq.segs(r, 0, Vsq.max_tx()))
         q2 : Q.Vq <- Q.Vq.push(R, q, h, 0)
         return (q2, Vsq.keep(bs, acc))
 

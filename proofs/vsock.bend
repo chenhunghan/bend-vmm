@@ -33,3 +33,24 @@ def L.vsock.unknown_rst():
 
 def L.vsock.incoming():
   {==}
+
+def L.vsock.max_out():
+  {==}
+
+def L.vsock.max_conns():
+  {==}
+
+def L.vsock.rst_dropped_when_out_full():
+  {==}
+
+def L.vsock.request_past_max_conns_no_connect():
+  {==}
+
+def L.vsock.request_past_max_conns_rst():
+  {==}
+
+def L.vsock.request_below_max_conns_connects():
+  {==}
+
+def L.vsock.max_tx():
+  {==}
