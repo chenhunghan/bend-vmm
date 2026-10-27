@@ -16,6 +16,8 @@ import ../src/boot/dtb.bend as T
 import ./hvf.bend as H
 import ./fs.bend as Fs
 import ./version.bend as Ver
+import ../src/disk/store.bend as St
+import ../src/disk/qcow2.bend as Qc
 
 # bend-vmm: boots an arm64 Linux kernel (or a bare-metal payload) on
 # Hypervisor.framework. All machine logic is the pure src/vmm/machine.bend;
@@ -293,9 +295,9 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
       do IO<A>:
         _ : U32 <- H.Host.inflate_ram(d, off, clen, skip, iovs)
         interp(cpu, mc, done, A, next)
-    case V.VmInflateToDisk{d, off, clen, dd, doff, len, next}:
+    case V.VmInflateToDisk{d, off, clen, dd, doff, skip, len, next}:
       do IO<A>:
-        _ : U32 <- H.Host.inflate_disk(d, off, clen, dd, doff, len)
+        _ : U32 <- H.Host.inflate_disk(d, off, clen, dd, doff, skip, len)
         interp(cpu, mc, done, A, next)
     case V.VmNetToRam{conn, iovs, next}:
       do IO<A>:
@@ -954,21 +956,90 @@ def devices.kind(ro: Bool, +id: U32, sectors: U.U64) -> D.DevKind:
     case False{}:
       D.BlkKind{id, sectors}
 
-def devices.open(ro: Bool, +id: U32) -> IO(D.DevKind):
+def bytes_str(bs: +List<U32>) -> String:
+  match bs:
+    case Nil{}:
+      SNil{}
+    case b <> t:
+      SCon{Char.from_u32(b), bytes_str(t)}
+
+# The directory part of a path ("." for none), and a path relative to it
+# (an absolute one stays as it is).
+def path_dir(+p: String) -> String:
+  +parts = String.split(p, '/')
+  Bool.pick(String, Nat.is_le(List.length(&2, String, parts), 1n), ".", String.join(List.take(&2, String, parts, Nat.sub(List.length(&2, String, parts), 1n)), "/"))
+
+def path_under(+dir: String, +name: String) -> String:
+  Bool.pick(String, String.starts_with(name, "/"), name, dir ++ "/" ++ name)
+
+# The store an image at path (open as id) gives: a qcow2 image over its
+# backing file's store (none when it names none), or a raw image. fuel
+# bounds the chain.
+@unsafe def devices.chain(fuel: Nat, +path: String, +id: U32) -> IO(St.Store):
+  match fuel:
+    case 0n:
+      IO.die(St.Store, 1, "bend-vmm: a backing chain longer than 8 images")
+    case 1n+f:
+      do IO<St.Store>:
+        die_if(U32.is_eq(id, err()), "cannot open the backing file " ++ path)
+        +head : +List<U32> <- H.Host.disk_read(id, U.U64.zero(), 512)
+        devices.chain.layer(Qc.Qcow.parse(head), f, path, id, head)
+
+@unsafe def devices.chain.layer(m: Maybe<&2, Qc.Qcow>, f: Nat, +path: String, +id: U32, +head: +List<U32>) -> IO(St.Store):
+  match m:
+    case None{}:
+      IO.pure(St.Store, St.RawStore{id})
+    case Some{q}:
+      do IO<St.Store>:
+        below : St.Store <- devices.backing(f, path, id, Qc.Qcow.backing(head))
+        return St.QcowStore{id, q, below}
+
+# The store below a qcow2 image: its backing file (name at off, len bytes;
+# relative to the image's directory), or none.
+@unsafe def devices.backing(fuel: Nat, +path: String, +id: U32, b: U.U64 & U32) -> IO(St.Store):
+  match b:
+    case (off, +len):
+      devices.backing.at(U32.is_zero(len), fuel, path, id, off, len)
+
+@unsafe def devices.backing.at(none: Bool, fuel: Nat, +path: String, +id: U32, off: U.U64, +len: U32) -> IO(St.Store):
+  match none:
+    case True{}:
+      IO.pure(St.Store, St.NoStore{})
+    case False{}:
+      do IO<St.Store>:
+        name : +List<U32> <- H.Host.disk_read(id, off, len)
+        +bpath : String = path_under(path_dir(path), bytes_str(name))
+        bid : U32 <- H.Hvf.disk_open(bpath)
+        devices.chain(fuel, bpath, bid)
+
+# A disk image: qcow2 (its header says so) as a store over its backing
+# chain, anything else raw.
+@unsafe def devices.format(m: Maybe<&2, Qc.Qcow>, ro: Bool, +path: String, +id: U32, +head: +List<U32>) -> IO(D.DevKind):
+  match m:
+    case None{}:
+      do IO<D.DevKind>:
+        size : U.U64 <- H.Host.disk_size(id)
+        return devices.kind(ro, id, U.U64.shr(9n, size))
+    case Some{+q}:
+      do IO<D.DevKind>:
+        below : St.Store <- devices.backing(8n, path, id, Qc.Qcow.backing(head))
+        return D.BlkStoreKind{St.QcowStore{id, q, below}, U.U64.shr(9n, Qc.Qcow.size(q)), ro}
+
+@unsafe def devices.open(ro: Bool, +path: String, +id: U32) -> IO(D.DevKind):
   do IO<D.DevKind>:
     die_if(U32.is_eq(id, err()), "cannot open a disk image")
-    size : U.U64 <- H.Host.disk_size(id)
-    return devices.kind(ro, id, U.U64.shr(9n, size))
+    +head : +List<U32> <- H.Host.disk_read(id, U.U64.zero(), 512)
+    devices.format(Qc.Qcow.parse(head), ro, path, id, head)
 
-def devices.one(+spec: String) -> IO(D.DevKind):
+@unsafe def devices.one(+spec: String) -> IO(D.DevKind):
   +ro = String.ends_with(spec, ":ro")
-  path : String = Bool.pick(String, ro, String.take(spec, Nat.sub(String.length(spec), 3n)), spec)
+  +path : String = Bool.pick(String, ro, String.take(spec, Nat.sub(String.length(spec), 3n)), spec)
   do IO<D.DevKind>:
     id : U32 <- H.Hvf.disk_open(path)
-    devices.open(ro, id)
+    devices.open(ro, path, id)
 
 # --disk a.img,b.img:ro gives one virtio-blk per image, in order.
-def devices.disks(specs: List<&2, String>) -> IO(+List<D.DevKind>):
+@unsafe def devices.disks(specs: List<&2, String>) -> IO(+List<D.DevKind>):
   match specs:
     case Nil{}:
       IO.pure(+List<D.DevKind>, [])
@@ -978,7 +1049,7 @@ def devices.disks(specs: List<&2, String>) -> IO(+List<D.DevKind>):
         ks : +List<D.DevKind> <- devices.disks(rest)
         return k <> ks
 
-def devices.disk(none: Bool, disk: String) -> IO(+List<D.DevKind>):
+@unsafe def devices.disk(none: Bool, disk: String) -> IO(+List<D.DevKind>):
   match none:
     case True{}:
       IO.pure(+List<D.DevKind>, [])
@@ -1015,7 +1086,7 @@ def devices.input(none: Bool) -> +List<D.DevKind>:
     case False{}:
       [D.InputKind{False{}}, D.InputKind{True{}}]
 
-def devices(o: Opts) -> IO(+List<D.DevKind>):
+@unsafe def devices(o: Opts) -> IO(+List<D.DevKind>):
   match o:
     case Opts{k, i, p, c, m, n, +d, +sh, rs, ct, +vk, dp, fw, nv}:
       do IO<+List<D.DevKind>>:

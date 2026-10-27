@@ -13,6 +13,8 @@ import ../fs/p9.bend as F
 import ../virtio/vsock.bend as Vs
 import ../virtio/input.bend as In
 import ./machine.bend as Mc
+import ../disk/store.bend as St
+import ../disk/qcow2.bend as Qc
 
 # The machine's device state as a stream of 32-bit words, for snapshots.
 # Snap.encode and Snap.decode are inverses (laws/snapshot.bend). The stream
@@ -96,6 +98,21 @@ def Enc.vqs(qs: +List<Q.Vq>) -> +List<U32>:
     case Con{Q.Vq{n, d, dr, dv, na, nu}, rest}:
       List.append(&2, U32, [n], List.append(&2, U32, X.Enc.u64(d), List.append(&2, U32, X.Enc.u64(dr), List.append(&2, U32, X.Enc.u64(dv), List.append(&2, U32, [na, nu], Enc.vqs(rest))))))
 
+def Enc.qcow(q: Qc.Qcow) -> +List<U32>:
+  match q:
+    case Qc.Qcow{bits, size, l1, n1, rt, rtc, rb}:
+      List.append(&2, U32, [bits], List.append(&2, U32, X.Enc.u64(size), List.append(&2, U32, X.Enc.u64(l1), List.append(&2, U32, [n1], List.append(&2, U32, X.Enc.u64(rt), [rtc, rb])))))
+
+# A store, top layer first: 0 none, 1 raw, 2 qcow2 (then the layer below).
+def Enc.store(st: St.Store) -> +List<U32>:
+  match st:
+    case St.NoStore{}:
+      [0]
+    case St.RawStore{d}:
+      [1, d]
+    case St.QcowStore{d, q, below}:
+      List.append(&2, U32, [2, d], List.append(&2, U32, Enc.qcow(q), Enc.store(below)))
+
 def Enc.kind(k: D.DevKind) -> +List<U32>:
   match k:
     case D.RngKind{}:
@@ -114,6 +131,8 @@ def Enc.kind(k: D.DevKind) -> +List<U32>:
       6 <> X.Enc.u64(cid)
     case D.InputKind{tablet}:
       [7, Bool.to_u32(tablet)]
+    case D.BlkStoreKind{st, s, ro}:
+      List.append(&2, U32, [8, Bool.to_u32(ro)], List.append(&2, U32, X.Enc.u64(s), Enc.store(st)))
 
 def Enc.fids(fs: +List<F.Fid>) -> +List<U32>:
   match fs:
@@ -336,31 +355,79 @@ def Dec.kind.input() -> X.Dec<D.DevKind>:
     tablet : Bool <- X.Dec.bool()
     return D.InputKind{tablet}
 
-def Dec.kind.by(t0: Bool, t1: Bool, t2: Bool, t3: Bool, t4: Bool, t5: Bool, t6: Bool, t7: Bool) -> X.Dec<D.DevKind>:
-  match t0 t1 t2 t3 t4 t5 t6 t7:
-    case True{} _ _ _ _ _ _ _:
+def Dec.qcow() -> X.Dec<Qc.Qcow>:
+  do X.Dec<Qc.Qcow>:
+    bits : U32 <- X.Dec.u32()
+    size : U.U64 <- X.Dec.u64()
+    l1 : U.U64 <- X.Dec.u64()
+    n1 : U32 <- X.Dec.u32()
+    rt : U.U64 <- X.Dec.u64()
+    rtc : U32 <- X.Dec.u32()
+    rb : U32 <- X.Dec.u32()
+    return Qc.Qcow{bits, size, l1, n1, rt, rtc, rb}
+
+def Dec.store.by(fuel: Nat, t0: Bool, t1: Bool, t2: Bool) -> X.Dec<St.Store>:
+  match fuel:
+    case 0n:
+      X.Dec.fail(St.Store)
+    case 1n+f:
+      match t0 t1 t2:
+        case True{} _ _:
+          X.Dec.pure(St.Store, St.NoStore{})
+        case False{} True{} _:
+          do X.Dec<St.Store>:
+            d : U32 <- X.Dec.u32()
+            return St.RawStore{d}
+        case False{} False{} True{}:
+          do X.Dec<St.Store>:
+            d : U32 <- X.Dec.u32()
+            q : Qc.Qcow <- Dec.qcow()
+            +t : U32 <- X.Dec.u32()
+            below : St.Store <- Dec.store.by(f, U32.is_eq(t, 0), U32.is_eq(t, 1), U32.is_eq(t, 2))
+            return St.QcowStore{d, q, below}
+        case False{} False{} False{}:
+          X.Dec.fail(St.Store)
+
+# A store of at most 16 layers.
+def Dec.store() -> X.Dec<St.Store>:
+  do X.Dec<St.Store>:
+    +t : U32 <- X.Dec.u32()
+    Dec.store.by(16n, U32.is_eq(t, 0), U32.is_eq(t, 1), U32.is_eq(t, 2))
+
+def Dec.kind.store() -> X.Dec<D.DevKind>:
+  do X.Dec<D.DevKind>:
+    ro : Bool <- X.Dec.bool()
+    s : U.U64 <- X.Dec.u64()
+    st : St.Store <- Dec.store()
+    return D.BlkStoreKind{st, s, ro}
+
+def Dec.kind.by(t0: Bool, t1: Bool, t2: Bool, t3: Bool, t4: Bool, t5: Bool, t6: Bool, t7: Bool, t8: Bool) -> X.Dec<D.DevKind>:
+  match t0 t1 t2 t3 t4 t5 t6 t7 t8:
+    case True{} _ _ _ _ _ _ _ _:
       X.Dec.pure(D.DevKind, D.RngKind{})
-    case False{} True{} _ _ _ _ _ _:
+    case False{} True{} _ _ _ _ _ _ _:
       Dec.kind.blk(False{})
-    case False{} False{} True{} _ _ _ _ _:
+    case False{} False{} True{} _ _ _ _ _ _:
       Dec.kind.blk(True{})
-    case False{} False{} False{} True{} _ _ _ _:
+    case False{} False{} False{} True{} _ _ _ _ _:
       X.Dec.pure(D.DevKind, D.ConsoleKind{})
-    case False{} False{} False{} False{} True{} _ _ _:
+    case False{} False{} False{} False{} True{} _ _ _ _:
       Dec.kind.net()
-    case False{} False{} False{} False{} False{} True{} _ _:
+    case False{} False{} False{} False{} False{} True{} _ _ _:
       Dec.kind.p9()
-    case False{} False{} False{} False{} False{} False{} True{} _:
+    case False{} False{} False{} False{} False{} False{} True{} _ _:
       Dec.kind.vsock()
-    case False{} False{} False{} False{} False{} False{} False{} True{}:
+    case False{} False{} False{} False{} False{} False{} False{} True{} _:
       Dec.kind.input()
-    case False{} False{} False{} False{} False{} False{} False{} False{}:
+    case False{} False{} False{} False{} False{} False{} False{} False{} True{}:
+      Dec.kind.store()
+    case False{} False{} False{} False{} False{} False{} False{} False{} False{}:
       X.Dec.fail(D.DevKind)
 
 def Dec.kind() -> X.Dec<D.DevKind>:
   do X.Dec<D.DevKind>:
     +t : U32 <- X.Dec.u32()
-    Dec.kind.by(U32.is_eq(t, 0), U32.is_eq(t, 1), U32.is_eq(t, 2), U32.is_eq(t, 3), U32.is_eq(t, 4), U32.is_eq(t, 5), U32.is_eq(t, 6), U32.is_eq(t, 7))
+    Dec.kind.by(U32.is_eq(t, 0), U32.is_eq(t, 1), U32.is_eq(t, 2), U32.is_eq(t, 3), U32.is_eq(t, 4), U32.is_eq(t, 5), U32.is_eq(t, 6), U32.is_eq(t, 7), U32.is_eq(t, 8))
 
 def Dec.fids(n: Nat) -> X.Dec<+List<F.Fid>>:
   match n:

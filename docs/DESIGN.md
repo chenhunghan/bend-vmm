@@ -149,10 +149,20 @@ one `IO.fork` per vCPU at the host level.
   (vGICv3, PSCI forwarded to the machine by the SMCCC filter, MMIO exits
   rewritten as data aborts with a valid syndrome), and `scripts/check-host.sh`
   passes on Ubuntu 24.04 arm64 (run by `scripts/lima/linux-host.sh`; on an
-  M1/M2 Mac the KVM host is emulated by QEMU), snapshots excepted.
+  M1/M2 Mac the KVM host is emulated by QEMU), snapshots included: vCPU
+  registers by KVM_GET_REG_LIST, the vGIC as an ordered replay of its
+  registers. CI runs the same check on an emulated KVM host
+  (`scripts/ci/emulated-kvm.sh`): GitHub's arm64 runners have no /dev/kvm.
+- Data path: devices name guest memory (`V.Iov`) and the host moves bytes
+  (disk, 9p, network); qcow2 images (src/disk) are walked in Bend.
+- `scripts/bench.sh` and `scripts/soak.sh` measure speed and long runs.
 
 ## Next
 
-- Snapshots on KVM (registers by KVM_GET_REG_LIST, the vGIC's state).
 - UEFI: a fw_cfg device (boot order, kernel loading) and a graphics output
   (ramfb) for the firmware's own screens.
+- Per-request cost: a TCP segment from the guest still costs ~150 µs of Bend
+  work (header parse, NAT, ACK), the bound on upload speed.
+- Less C: the host layer's remaining decisions (the console's escape keys,
+  the control protocol, address mapping, the snapshot file layout) can move
+  into Bend, leaving C as system calls.

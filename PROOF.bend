@@ -31,3 +31,4 @@ import ./proofs/vsock.bend as Proofs_vsock
 import ./proofs/input.bend as Proofs_input
 import ./proofs/keymap.bend as Proofs_keymap
 import ./proofs/pflash.bend as Proofs_pflash
+import ./proofs/qcow2.bend as Proofs_qcow2

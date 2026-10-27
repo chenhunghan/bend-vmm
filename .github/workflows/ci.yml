@@ -81,7 +81,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Bend and the toolchain
         run: |
-          sudo apt-get update && sudo apt-get install -y clang lld libx11-dev zstd qemu-system-arm
+          sudo apt-get update && sudo apt-get install -y clang lld libx11-dev zstd qemu-system-arm qemu-utils
           name="bend-$BEND_VERSION-linux-arm64.tar.gz"
           curl --proto '=https' --tlsv1.2 -fsSL -o "/tmp/$name" "https://github.com/bendlang/bend/releases/download/v$BEND_VERSION/$name"
           echo "$BEND_SHA_LINUX_ARM64  /tmp/$name" | sha256sum -c -

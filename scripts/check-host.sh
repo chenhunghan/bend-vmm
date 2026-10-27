@@ -16,6 +16,9 @@
 #      the control socket's type and pointer commands.
 #   7. UEFI: edk2 firmware boots Alpine's ISO (GRUB, Linux); an EFI variable
 #      written by Linux survives a reboot in the --vars file.
+#   8. qcow2 (with qemu-img): a qcow2 over a raw backing file, a compressed
+#      image and a fresh one read and written by the guest; qemu-img checks
+#      them and reads back what the guest wrote.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 host=$(uname -s)-$(uname -m)
@@ -160,6 +163,37 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   grep -B1 "AFTER-REBOOT" <<<"$out" | grep -q "^bend-ok" && grep -q "bend-ok" "$t/vars.fd" && grn "ok: EFI variable persists (flash, --vars)" || { red "failed: EFI variable"; grep -a -B2 AFTER-REBOOT <<<"$out"; fail=1; }
   grep -q "reboot: Power down" <<<"$out" && grn "ok: UEFI power off" || { red "failed: UEFI power off"; fail=1; }
   rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 8. qcow2: a raw backing file, compressed clusters, writes"
+  if ! command -v qemu-img >/dev/null; then
+    echo "skipped: no qemu-img (it makes the images and checks what the guest wrote)"
+  else
+    t=$(mktemp -d)
+    head -c 33554432 /dev/urandom > "$t/base.raw"
+    want=$(python3 -c 'import hashlib, sys; print(hashlib.md5(open(sys.argv[1], "rb").read()).hexdigest())' "$t/base.raw")
+    qemu-img create -q -f qcow2 -b base.raw -F raw "$t/over.qcow2" 32M
+    qemu-img convert -q -c -O qcow2 "$t/base.raw" "$t/comp.qcow2"
+    qemu-img create -q -f qcow2 "$t/fresh.qcow2" 32M
+    writes='dd if=/dev/urandom of=/dev/vda bs=4096 seek=3 count=5 conv=fsync 2>/dev/null; dd if=/dev/urandom of=/dev/vda bs=1M seek=7 count=3 conv=fsync 2>/dev/null; dd if=/dev/urandom of=/dev/vdb bs=512 seek=999 count=1 conv=fsync 2>/dev/null; dd if=/dev/urandom of=/dev/vdc bs=65536 seek=100 count=40 conv=fsync 2>/dev/null'
+    out=$(drive 120 "busybox shell" 'md5sum /dev/vda /dev/vdb; echo READ-DONE\n' "READ-DONE" "$writes; sync; echo 3 > /proc/sys/vm/drop_caches; md5sum /dev/vda /dev/vdb /dev/vdc; echo WRITE-DONE\n" "WRITE-DONE" 'poweroff -f\n' -- \
+      ./out/bend-vmm --mem 512 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/over.qcow2,$t/comp.qcow2,$t/fresh.qcow2" --cmdline "console=ttyAMA0 quiet" 2>&1 | tr -d '\r')
+    sums=$(grep -E '^[0-9a-f]{32}  /dev/vd[abc]$' <<<"$out")
+    [ "$(head -2 <<<"$sums" | grep -c "^$want ")" = 2 ] && grn "ok: qcow2 reads (a raw backing file; compressed clusters)" || { red "failed: qcow2 reads"; grep -a -v sysreg <<<"$out" | tail -8; fail=1; }
+    after=$(tail -3 <<<"$sums")
+    ok=1
+    for d in a b c; do
+      f=$(case $d in a) echo over ;; b) echo comp ;; c) echo fresh ;; esac)
+      qemu-img check -q "$t/$f.qcow2" || ok=0
+      qemu-img convert -O raw "$t/$f.qcow2" "$t/$f.raw"
+      got=$(python3 -c 'import hashlib, sys; print(hashlib.md5(open(sys.argv[1], "rb").read()).hexdigest())' "$t/$f.raw")
+      grep -q "^$got  /dev/vd$d" <<<"$after" || ok=0
+    done
+    [ "$(python3 -c 'import hashlib, sys; print(hashlib.md5(open(sys.argv[1], "rb").read()).hexdigest())' "$t/base.raw")" = "$want" ] || ok=0
+    [ $ok = 1 ] && grn "ok: qcow2 writes (qemu-img check passes, qemu-img reads what the guest wrote, the backing file is unchanged)" || { red "failed: qcow2 writes"; echo "$after"; fail=1; }
+    rm -rf "$t"
+  fi
 fi
 
 if [ $fail = 0 ]; then grn "CHECK-MAC OK"; else red "CHECK-MAC FAILED"; fi

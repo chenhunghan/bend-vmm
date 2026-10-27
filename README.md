@@ -35,7 +35,10 @@ Hypervisor.framework on macOS, KVM on Linux, behind one small interface.
   from guest memory, with a virtio keyboard and a virtio tablet (absolute
   pointer) fed by the window. The bundled initramfs runs a second shell on
   `tty1` there.
-- virtio-blk disks (read-write or read-only, FLUSH), virtio-rng, the PL031 RTC.
+- virtio-blk disks, raw or qcow2 (read-write or read-only, FLUSH): qcow2
+  images over backing files (raw or qcow2, up to 8 deep), compressed
+  clusters, copy-on-write into new clusters with their reference counts, so
+  `qemu-img check` passes on what the guest wrote. virtio-rng, the PL031 RTC.
 - Reboot (`reboot` in the guest restarts the VM) and power-off.
 
 ## Build and run
@@ -65,19 +68,21 @@ Options:
 | `--cmdline "…"` | kernel command line (default `console=ttyAMA0 earlycon=pl011,0x9000000`) |
 | `--mem MiB` | guest RAM (default 512) |
 | `--cpus N` | vCPUs (default 1) |
-| `--disk A[,B:ro…]` | raw disk images as virtio-blk (`/dev/vda`, `/dev/vdb`, …); `:ro` attaches one read-only |
+| `--disk A[,B:ro…]` | disk images (raw, or qcow2 by its header) as virtio-blk (`/dev/vda`, `/dev/vdb`, …); `:ro` attaches one read-only |
 | `--share DIR` | a host directory over virtio-9p (`mount -t 9p -o trans=virtio,version=9p2000.L share /mnt`) |
 | `--payload FILE` | a bare-metal binary entered at the start of RAM |
 | `--vsock PATH` | virtio-vsock (guest CID 3) bridged to Unix sockets under PATH |
 | `--firmware FILE` | UEFI firmware (`out/uefi/code.fd` from `scripts/uefi-assets.sh`) instead of `--kernel` |
 | `--vars FILE` | the UEFI variable store (copy `out/uefi/vars.fd` per VM); without it variables last one run |
-| `--display WxH` | a window showing the guest's framebuffer, with a virtio keyboard and tablet |
+| `--display WxH` | a window showing the guest's framebuffer, with a virtio keyboard and tablet (`WxH,headless`: no window, for `screendump`) |
+| `--version`, `--help` | the release, the options |
 | `--control SOCK` | a Unix socket for management commands (below) |
 | `--restore FILE` | start from a snapshot (same disks and shares as when it was taken) |
 
 Linux (KVM): the same binary builds on Linux arm64 (clang, `libx11-dev` for
-`--display`) with `scripts/build.sh`, and runs with `/dev/kvm`. Snapshots are
-macOS-only for now. From a Mac, `scripts/lima/linux-host.sh [command]` makes
+`--display`) with `scripts/build.sh`, and runs with `/dev/kvm`; snapshots
+included (a snapshot restores on the hypervisor that took it). From a Mac,
+`scripts/lima/linux-host.sh [command]` makes
 a Lima VM to try it: on M3 and later it nests KVM through
 Virtualization.framework; on M1/M2, which cannot nest, QEMU emulates the
 CPU's virtualization extensions (slow, but a real KVM host).
@@ -107,8 +112,13 @@ registers, the GIC, and the whole device state; `--restore` maps the RAM
 copy-on-write, so restoring is immediate. TCP connections through the NAT do
 not survive a restore.
 
-Debugging: `BEND_VMM_TRACE=1` prints every trapped exit, `=2` console input
-and interrupt line changes.
+Debugging: `BEND_VMM_TRACE=1` prints every trapped exit, `=2` console input,
+interrupt line changes and TCP data held for the guest, `=4` staged
+transmit data.
+
+Releases: a tag `v*` builds `bend-vmm` for macOS (signed with a Developer ID
+and notarized) and Linux arm64 and publishes both on a GitHub release
+(`.github/workflows/release.yml`; the signing secrets are listed there).
 
 ## Start time
 
@@ -130,6 +140,33 @@ before sleeping, register writes ride along with the next run, console
 output is batched, and the host clock is read only while the RTC alarm is
 armed.
 
+## Speed
+
+`scripts/bench.sh` measures boot, exits, disk, network, 9p, snapshots and
+the VMM's memory, and compares with an earlier run
+(`scripts/bench.sh --compare out/bench/<file>.tsv`). On an M2 Pro (2 vCPUs,
+the guest pinned to vCPU 0 where device interrupts land):
+
+| Metric | |
+|---|---|
+| exit (a trapped UART store, end to end) | ~3 µs |
+| disk sequential read / write (1 MiB, O_DIRECT) | ~290 / ~200 MB/s |
+| disk 4 KiB random read, QD1 | ~45k IOPS (~21 µs) |
+| network download / upload through the NAT | ~500 / ~60 MB/s |
+| 9p read / write | ~170 / ~30 MB/s |
+
+Bulk data never passes through Bend: devices name the guest memory a
+request uses (`V.Iov` pieces) and the host moves the bytes (disk, 9p,
+network). The NAT does TCP flow control (the guest's window, scaled) and
+hands the guest 64 KiB segments (GUEST_TSO4) whose payload goes from a host
+buffer straight into guest memory; the guest's big segments (HOST_TSO4) are
+staged on the host and sent from there.
+
+`scripts/soak.sh [MINUTES]` runs the guest through disk, 9p, network and
+memory traffic, checking every byte read back, pausing and resuming it every
+minute, and fails on a mismatch, a hang, or the VMM's memory growing past
+20%.
+
 ## How it is verified
 
 | Level | Command | Where |
@@ -140,14 +177,17 @@ armed.
 | Proofs re-checked by the Lean-proven kernel | `VERDICT=1 scripts/check.sh` | CI (`verdict` job) |
 | Real guests on the host's hypervisor | `scripts/check-host.sh` | macOS (Hypervisor.framework), Linux arm64 (KVM) |
 | The same on a Linux KVM host from a Mac | `scripts/lima/linux-host.sh 'CHECK_SLOW=5 SKIP_NATIVE=1 scripts/check-host.sh'` | a Lima VM |
+| The same on an emulated KVM host (QEMU with EL2) | `scripts/ci/emulated-kvm.sh` | CI (`host-linux` job) |
 
 `scripts/check-host.sh` boots a bare-metal payload, then Linux (1 and 4 CPUs),
 then a busybox userspace that runs an in-guest test suite: disk reads and
 writes, entropy, timers, interrupts, console input, reboot, networking, 9p,
 vsock both ways, pause/resume, snapshot/restore, and the display (a
 screendump, keys typed into the framebuffer console, tablet events read from
-the guest's evdev), and UEFI: edk2 booting Alpine's ISO, an EFI variable
-written from Linux surviving a reboot.
+the guest's evdev), UEFI: edk2 booting Alpine's ISO, an EFI variable
+written from Linux surviving a reboot, and qcow2: images over a raw backing
+file, compressed and fresh, read and written by the guest, then checked by
+`qemu-img check` and read back by `qemu-img`.
 
 ## Layout
 

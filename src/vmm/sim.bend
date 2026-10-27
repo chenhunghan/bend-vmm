@@ -370,7 +370,7 @@ def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
         case V.VmInflateToRam{dk, off, clen, skip, +iovs, next}:
           # no inflater here: zeros
           Sim.run(f, A, Sim.scatter(iovs, s, B.Bytes.zeros(U32.to_nat(V.Iov.total(iovs)))), next)
-        case V.VmInflateToDisk{dk, off, clen, dd, doff, +len, next}:
+        case V.VmInflateToDisk{dk, off, clen, dd, doff, skip, +len, next}:
           Sim.run(f, A, Sim.disk_write(s, dd, doff, B.Bytes.zeros(U32.to_nat(len))), next)
         case V.VmStage{iovs, k}:
           # the simulator stages everything in slot 0

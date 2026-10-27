@@ -30,3 +30,4 @@ import ./laws/vsock.bend as Laws_vsock
 import ./laws/input.bend as Laws_input
 import ./laws/keymap.bend as Laws_keymap
 import ./laws/pflash.bend as Laws_pflash
+import ./laws/qcow2.bend as Laws_qcow2

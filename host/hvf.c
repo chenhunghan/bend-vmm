@@ -1712,12 +1712,16 @@ Term hvf_stdin_wait_run(Env e, Term* f, IoWork* w) {
 static int hvf_disks[HVF_MAX_DISKS];
 static int hvf_ndisks;
 
-// Hvf.disk_open(path) -> U32: opens a disk image read-write; its index, or
+// Hvf.disk_open(path) -> U32: opens a disk image read-write (read-only when
+// the file allows no more); its index, or
 // 0xFFFFFFFF.
 Term hvf_disk_open_run(Env e, Term* f, IoWork* w) {
   u64   n;
   char* path = io_cstr(e, f[0], &n);
   int   fd   = hvf_ndisks < HVF_MAX_DISKS ? open(path, O_RDWR) : -1;
+  if (fd < 0 && hvf_ndisks < HVF_MAX_DISKS && (errno == EACCES || errno == EROFS || errno == EPERM)) {
+    fd = open(path, O_RDONLY); // a read-only file (a qcow2 backing image)
+  }
   free(path);
   if (fd < 0) {
     return (Term)HVF_ERR;
@@ -1954,13 +1958,14 @@ Term hvf_inflate_ram_run(Env e, Term* f, IoWork* w) {
   return (Term)0;
 }
 
-// Hvf.inflate_disk(disk, off_hi, off_lo, clen, dst, doff_hi, doff_lo, len)
-// -> U32: inflates a compressed cluster into image dst: len bytes at doff.
+// Hvf.inflate_disk(disk, off_hi, off_lo, clen, dst, doff_hi, doff_lo, skip,
+// len) -> U32: inflates a compressed cluster into image dst: its len bytes
+// from skip on, at doff.
 Term hvf_inflate_disk_run(Env e, Term* f, IoWork* w) {
-  u64      n   = (u32)f[7];
-  int      dfd = hvf_disk(f[4]);
-  uint8_t* c   = hvf_inflate_at(hvf_disk(f[0]), hvf_u64(f[1], f[2]), (u32)f[3], n);
-  int      ok  = c && dfd >= 0 && pwrite(dfd, c, n, (off_t)hvf_u64(f[5], f[6])) == (ssize_t)n;
+  u64      skip = (u32)f[7], n = (u32)f[8];
+  int      dfd  = hvf_disk(f[4]);
+  uint8_t* c    = hvf_inflate_at(hvf_disk(f[0]), hvf_u64(f[1], f[2]), (u32)f[3], skip + n);
+  int      ok   = c && dfd >= 0 && pwrite(dfd, c + skip, n, (off_t)hvf_u64(f[5], f[6])) == (ssize_t)n;
   free(c);
   return (Term)(ok ? 0 : HVF_ERR);
 }

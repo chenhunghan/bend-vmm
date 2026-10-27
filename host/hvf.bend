@@ -110,7 +110,7 @@ def Hvf.inflate_ram(disk: U32, off_hi: U32, off_lo: U32, clen: U32, skip: U32, i
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.inflate_disk(disk: U32, off_hi: U32, off_lo: U32, clen: U32, dst: U32, doff_hi: U32, doff_lo: U32, len: U32) -> IO(U32):
+def Hvf.inflate_disk(disk: U32, off_hi: U32, off_lo: U32, clen: U32, dst: U32, doff_hi: U32, doff_lo: U32, skip: U32, len: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -416,10 +416,10 @@ def Host.inflate_ram(disk: U32, off: U.U64, clen: U32, skip: U32, iovs: +List<V.
     case U.U64{h, l}:
       Hvf.inflate_ram(disk, h, l, clen, skip, Host.iovs(iovs))
 
-def Host.inflate_disk(disk: U32, off: U.U64, clen: U32, dst: U32, doff: U.U64, len: U32) -> IO(U32):
+def Host.inflate_disk(disk: U32, off: U.U64, clen: U32, dst: U32, doff: U.U64, skip: U32, len: U32) -> IO(U32):
   match off doff:
     case U.U64{oh, ol} U.U64{dh, dl}:
-      Hvf.inflate_disk(disk, oh, ol, clen, dst, dh, dl, len)
+      Hvf.inflate_disk(disk, oh, ol, clen, dst, dh, dl, skip, len)
 
 def Host.disk_size(disk: U32) -> IO(U.U64):
   do IO<U.U64>:

@@ -6,6 +6,7 @@ import ./mmio.bend as M
 import ./queue.bend as Q
 import ./rng.bend as Rng
 import ./blk.bend as Blk
+import ../disk/store.bend as St
 import ./console.bend as Con
 import ./net.bend as N
 import ../fs/p9.bend as P
@@ -21,6 +22,8 @@ import ./input.bend as In
 #   BlkKind:     device id 2, one queue, config space Blk.config(sectors),
 #                also VIRTIO_BLK_F_FLUSH (Blk.features(False))
 #   BlkRoKind:   a read-only BlkKind, also VIRTIO_BLK_F_RO
+#   BlkStoreKind: a BlkKind (BlkRoKind when ro) over a store (qcow2:
+#                src/disk/store.bend)
 #                (Blk.features(True)); OUT requests answer IOERR
 #   ConsoleKind: virtio-console, device id 3, two queues (0 receiveq0,
 #                1 transmitq0), empty config space, no other feature
@@ -59,6 +62,9 @@ type DevKind is Data:
   RngKind{}
   BlkKind{disk: U32, sectors: U.U64}
   BlkRoKind{disk: U32, sectors: U.U64}
+  # A virtio-blk over a store (a qcow2 image over its backing files),
+  # read-only when ro.
+  BlkStoreKind{store: St.Store, sectors: U.U64, ro: Bool}
   ConsoleKind{}
   NetKind{mac: +List<U32>}
   P9Kind{share: U32, tag: String}
@@ -101,6 +107,8 @@ def Dev.mmio(kind: DevKind) -> M.VirtioMmio:
       M.VirtioMmio.new(2, Blk.Blk.features(False{}), 1n, 256, Blk.Blk.config(sectors))
     case BlkRoKind{disk, sectors}:
       M.VirtioMmio.new(2, Blk.Blk.features(True{}), 1n, 256, Blk.Blk.config(sectors))
+    case BlkStoreKind{store, sectors, +ro}:
+      M.VirtioMmio.new(2, Blk.Blk.features(ro), 1n, 256, Blk.Blk.config(sectors))
     case ConsoleKind{}:
       M.VirtioMmio.new(3, Dev.features(), 2n, 256, [])
     case NetKind{mac}:
@@ -120,6 +128,8 @@ def Dev.state(kind: DevKind) -> DevState:
     case BlkKind{disk, sectors}:
       NoState{}
     case BlkRoKind{disk, sectors}:
+      NoState{}
+    case BlkStoreKind{store, sectors, ro}:
       NoState{}
     case ConsoleKind{}:
       ConState{[]}
@@ -194,6 +204,8 @@ def Dev.process(-R: Type, k: DevKind, q: Q.Vq) -> V.Op<R, Q.Vq & Bool>:
       Blk.Blk.process(R, disk, sectors, q)
     case BlkRoKind{disk, sectors}:
       Blk.Blk.serve(R, disk, sectors, True{}, q)
+    case BlkStoreKind{store, sectors, ro}:
+      Blk.Blk.serve_store(R, store, sectors, ro, q)
     case ConsoleKind{}:
       V.Op.pure(R, Q.Vq & Bool, (q, False{}))
     case NetKind{mac}:
@@ -415,6 +427,10 @@ def Dev.pass(-R: Type, k: DevKind, st: DevState, +sel: U32, q: Q.Vq) -> V.Op<R, 
       do V.Op<R, Pass>:
         r : Q.Vq & Bool <- Dev.process(R, BlkRoKind{disk, sectors}, q)
         return Dev.pass.plain(st, r)
+    case BlkStoreKind{store, sectors, ro}:
+      do V.Op<R, Pass>:
+        r : Q.Vq & Bool <- Dev.process(R, BlkStoreKind{store, sectors, ro}, q)
+        return Dev.pass.plain(st, r)
 
 # A device with nothing for the host.
 def Dev.out(d: Dev) -> DevOut:
@@ -527,6 +543,8 @@ def Dev.is_console(k: DevKind) -> Bool:
       False{}
     case BlkRoKind{disk, sectors}:
       False{}
+    case BlkStoreKind{store, sectors, ro}:
+      False{}
     case NetKind{mac}:
       False{}
     case P9Kind{share, tag}:
@@ -545,6 +563,8 @@ def Dev.is_net(k: DevKind) -> Bool:
     case BlkKind{disk, sectors}:
       False{}
     case BlkRoKind{disk, sectors}:
+      False{}
+    case BlkStoreKind{store, sectors, ro}:
       False{}
     case ConsoleKind{}:
       False{}
