@@ -5,12 +5,15 @@ A virtual machine monitor for arm64, written in
 (macOS on Apple Silicon) and on KVM (Linux on arm64).
 
 All of the VMM's logic is pure Bend under `src/`: trap decoding, PSCI, the
-device tree, the PL011 UART, the PL031 RTC, virtio (blk, net, console, rng,
-9p), the user-mode network stack, and the exit handler that ties them
-together. Laws state what each module must do, and proofs check them,
-re-checked by a kernel whose soundness is proven in Lean. A simulator runs
-the same code on any OS. A thin C layer (`host/`) drives the hypervisor:
-Hypervisor.framework on macOS, KVM on Linux, behind one small interface.
+device tree, the PL011 UART, the PL031 RTC, the UEFI flash, virtio (blk,
+net, console, rng, 9p, vsock, input), the qcow2 disk format, the user-mode
+TCP/IP NAT, the console's escape keys, snapshots, and the exit handler that
+ties them together. Laws state what each module must do, and proofs check
+them, re-checked by a kernel whose soundness is proven in Lean. A simulator
+runs the same code on any OS. A thin C layer (`host/`) makes the system
+calls: it drives the hypervisor (Hypervisor.framework on macOS, KVM on
+Linux, behind one small interface) and moves bulk data between files,
+sockets and guest memory where Bend tells it to.
 
 ## What it runs
 
@@ -23,7 +26,7 @@ Hypervisor.framework on macOS, KVM on Linux, behind one small interface.
   written in Bend (DHCP, DNS, TCP, UDP, ping to the gateway; the host is
   10.0.2.2).
 - Host directory sharing over virtio-9p (9P2000.L).
-- virtio-vsock to Unix sockets on the Mac (`--vsock PATH`, Firecracker's
+- virtio-vsock to Unix sockets on the host (`--vsock PATH`, Firecracker's
   convention: the guest's connection to host port P reaches `PATH_P`; a host
   client connects to `PATH` and sends `CONNECT <port>` to reach a guest port).
 - UEFI boot (`--firmware`): edk2's arm64 firmware (ArmVirtQemu, as QEMU
@@ -43,18 +46,22 @@ Hypervisor.framework on macOS, KVM on Linux, behind one small interface.
 
 ## Build and run
 
-Requirements: macOS on Apple Silicon, Bend 2.0.39
-(`curl -fsSL https://bend-lang.com/install.sh | sh`), Xcode Command Line Tools.
+Hosts: macOS 15+ on Apple Silicon, or Linux on arm64 with `/dev/kvm`
+(kernel 6.7+). Tagged releases publish binaries for both (see Releases below).
+
+To build: Bend 2.0.39 (`curl -fsSL https://bend-lang.com/install.sh | sh`),
+and Xcode Command Line Tools on macOS or clang (plus `libx11-dev` for
+`--display`) on Linux.
 
 ```sh
-scripts/build-mac.sh host/main.bend out/bend-vmm      # build and sign (~15 s)
+scripts/build.sh host/main.bend out/bend-vmm          # build (and sign, on macOS)
 scripts/guest-assets.sh                               # fetch Ubuntu's arm64 kernel, build a busybox initramfs
 out/bend-vmm --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio \
              --mem 1024 --cpus 2 --share ~/some/dir --disk disk.img
 ```
 
-The guest boots to a busybox shell in about two seconds, with networking up
-(10.0.2.15 by DHCP; the Mac is 10.0.2.2) and `--share` mounted at
+The guest boots to a busybox shell in about half a second, with networking
+up (10.0.2.15 by DHCP; the host is 10.0.2.2) and `--share` mounted at
 `/mnt/share`. `poweroff -f` stops it; `Ctrl-A x` quits from the host.
 Any arm64 kernel with virtio-mmio and PL011 works; `scripts/guest-assets.sh`
 also bundles the modules Ubuntu's kernel needs for virtio-rng, 9p and the RTC.
@@ -195,7 +202,10 @@ file, compressed and fresh, read and written by the guest, then checked by
 ## Layout
 
 - `src/` the pure VMM; `laws/` its spec; `proofs/` the proofs
-- `host/` Hypervisor.framework effects (C) and the driver (`host/main.bend`)
+- `host/` the system calls (C: Hypervisor.framework and KVM backends, files,
+  sockets, the window) and the driver (`host/main.bend`)
+- `scripts/` builds, checks (`check.sh`, `check-host.sh`), `bench.sh`,
+  `soak.sh`, release and CI helpers
 - `tests/` simulator tests; `tests/guest/` guest payloads and the in-guest suite
 - `docs/DESIGN.md` architecture, verification ladder, roadmap
 - `AGENTS.md` rules for contributors (human or AI)
