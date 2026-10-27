@@ -16,15 +16,20 @@ type ConTx is Data:
 type ConRx is Data:
   ConRx{q: Q.Vq, left: +List<U32>, used: Bool}
 
-# Gathers one transmit chain and pushes it used with length 0; prepends its
-# bytes to acc (newest chain first).
+# The most bytes one transmit chain hands over: the rest of a longer chain
+# is dropped (a guest length must not size a Bend list).
+def Con.max_tx() -> U32:
+  65536
+
+# Gathers one transmit chain (at most Con.max_tx() bytes) and pushes it used
+# with length 0; prepends its bytes to acc (newest chain first).
 def Con.tx.serve(
   -R: Type, q: Q.Vq, c: Q.Chain, acc: +List<+List<U32>>
 ) -> V.Op<R, Q.Vq & +List<+List<U32>>>:
   match c:
     case Q.Chain{+h, r, w}:
       do V.Op<R, Q.Vq & +List<+List<U32>>>:
-        bs : +List<U32> <- Q.Vq.gather(R, Q.Chain{h, r, []})
+        bs : +List<U32> <- Q.Vq.read_segs(R, Q.Vq.segs(r, 0, Con.max_tx()))
         q2 : Q.Vq <- Q.Vq.push(R, q, h, 0)
         return (q2, bs <> acc)
 
