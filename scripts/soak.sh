@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # A long run: the busybox guest (2 vCPUs) loops over disk, shared-folder,
-# network and memory traffic, checking every byte it reads back
+# network, vsock and memory traffic, checking every byte it reads back
 # (tests/guest/rootfs/soak.sh), while the host pauses and resumes it through
 # the control socket every minute (SOAK_PAUSE seconds) and samples the VMM's
 # memory every 10 s.
@@ -21,7 +21,7 @@ scripts/guest-assets.sh >/dev/null || exit 1
 mkdir -p out/soak
 res=out/soak/$(uname -s | tr A-Z a-z)-$(uname -m)-$(date +%Y%m%d-%H%M%S).tsv
 t=$(mktemp -d)
-trap 'kill $http 2>/dev/null; cp "$t/run.log" "${res%.tsv}.log" 2>/dev/null; rm -rf "$t"' EXIT
+trap 'kill $http $echo_pid 2>/dev/null; cp "$t/run.log" "${res%.tsv}.log" 2>/dev/null; rm -rf "$t"' EXIT
 dd if=/dev/zero of="$t/disk.img" bs=1048576 count=0 seek=64 2>/dev/null
 mkdir "$t/www" "$t/share"
 head -c 8388608 /dev/urandom > "$t/www/big"
@@ -29,9 +29,24 @@ python3 -c 'import hashlib, sys; print(hashlib.md5(open(sys.argv[1], "rb").read(
 port=$((20000 + RANDOM % 20000))
 (cd "$t/www" && exec python3 -m http.server "$port" --bind 127.0.0.1 >/dev/null 2>&1) & http=$!
 sleep 1
+# vsock: an echo service on host port 7002 (the guest checks what returns)
+python3 -c "
+import socket, sys, threading
+s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(8)
+def echo(c):
+    while True:
+        b = c.recv(1 << 16)
+        if not b:
+            break
+        c.sendall(b)
+    c.close()
+while True:
+    c, _ = s.accept()
+    threading.Thread(target=echo, args=(c,), daemon=True).start()
+" "$t/v.sock_7002" & echo_pid=$!
 sock=$t/vm.sock
 $vmm --mem 512 --cpus 2 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/disk.img" --share "$t/share" \
-  --control "$sock" --cmdline "console=ttyAMA0 quiet bendsoak=$mins benchttp=$port" < /dev/null > "$t/run.log" 2>&1 &
+  --vsock "$t/v.sock" --control "$sock" --cmdline "console=ttyAMA0 quiet bendsoak=$mins benchttp=$port" < /dev/null > "$t/run.log" 2>&1 &
 vm=$!
 start=$(date +%s); deadline=$((start + mins * 60 + 300)); last_pause=$start; pauses=0
 printf 'seconds\trss_kib\trounds\n' > "$res"

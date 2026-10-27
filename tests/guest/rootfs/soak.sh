@@ -1,7 +1,8 @@
 # The in-guest half of scripts/soak.sh (kernel command line bendsoak=MINUTES
 # benchttp=PORT): for MINUTES, round after round, writes random data to the
 # disk, the shared folder and memory and reads it back, downloads a file from
-# the host and checks its digest, and keeps the other CPUs busy. Prints
+# the host and checks its digest, echoes 1 MiB through vsock and checks it,
+# and keeps the other CPUs busy. Prints
 # SOAK-ITER <n> <seconds> after each round, SOAK-FAIL <what> <n> on a
 # mismatch, and SOAK-DONE <rounds> at the end.
 up() { cut -d. -f1 /proc/uptime; }
@@ -30,6 +31,7 @@ while [ "$(up)" -lt "$end" ]; do
   [ "$(md5sum < /mnt/share/soak.$i)" = "$sum" ] || echo "SOAK-FAIL 9p $i"
   rm -f /mnt/share/soak.$i
   [ "$(wget -q -O - "http://10.0.2.2:$port/big" | md5sum | cut -d' ' -f1)" = "$want" ] || echo "SOAK-FAIL net $i"
+  /bin/bench vecho 7002 16 $i || echo "SOAK-FAIL vsock $i"
   echo "SOAK-ITER $i $(( $(up) - s ))"
   [ $((i % 100)) = 0 ] && echo "SOAK-MEM $i $(awk '/MemAvailable|^Slab|Shmem:|^Buffers|^Cached/ { printf "%s %s ", $1, $2 }' /proc/meminfo)"
 done

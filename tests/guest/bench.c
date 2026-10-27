@@ -10,6 +10,9 @@
 //   bench vsend PORT BYTES  vsock upload: BYTES in 1 MiB writes to the host
 //                    (CID 2) port PORT
 //   bench vrecv PORT  vsock download: reads the host's port PORT to its end
+//   bench vecho PORT ROUNDS SEED  sends ROUNDS blocks of 64 KiB (from SEED)
+//                    to an echoing host port, checks each block it gets back;
+//                    exits 1 on a mismatch
 //   bench peek ADDR N  N 32-bit reads of physical ADDR (decimal) through
 //                    /dev/mem: an unmapped one traps to the VMM each time
 //                    (no tool in between: the NAT's own rate)
@@ -202,6 +205,32 @@ static int send_all(i64 fd, u64 bytes, const char* name) {
   return 0;
 }
 
+static int vecho(u64 port, u64 rounds, u64 seed) {
+  i64 fd = vdial(port);
+  if (fd < 0) return 1;
+  unsigned char* want = buf;
+  unsigned char* got  = buf + 65536;
+  u64 x = seed * 2654435761ul + 1;
+  for (u64 r = 0; r < rounds; r++) {
+    for (int i = 0; i < 65536; i++) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; want[i] = (unsigned char)x; }
+    for (u64 at = 0; at < 65536;) {
+      i64 k = sys(SYS_write, fd, (i64)(want + at), (i64)(65536 - at), 0, 0, 0);
+      if (k <= 0) { put("VECHO-FAIL write"); flush(); return 1; }
+      at += (u64)k;
+    }
+    for (u64 at = 0; at < 65536;) {
+      i64 k = sys(SYS_read, fd, (i64)(got + at), (i64)(65536 - at), 0, 0, 0);
+      if (k <= 0) { put("VECHO-FAIL read"); flush(); return 1; }
+      at += (u64)k;
+    }
+    for (int i = 0; i < 65536; i++) {
+      if (got[i] != want[i]) { put("VECHO-FAIL data"); flush(); return 1; }
+    }
+  }
+  sys(SYS_close, fd, 0, 0, 0, 0, 0);
+  return 0;
+}
+
 static int net(int up, const char* ip, const char* port, u64 bytes) {
   i64 fd = dial(ip, port);
   if (fd < 0) return 1;
@@ -245,6 +274,7 @@ void _start_c(u64* sp) {
   else if (argc >= 5 && eq(argv[1], "send")) rc = net(1, argv[2], argv[3], num(argv[4]));
   else if (argc >= 4 && eq(argv[1], "recv")) rc = net(0, argv[2], argv[3], 0);
   else if (argc >= 4 && eq(argv[1], "peek")) rc = peek(num(argv[2]), num(argv[3]));
+  else if (argc >= 5 && eq(argv[1], "vecho")) rc = vecho(num(argv[2]), num(argv[3]), num(argv[4]));
   else if (argc >= 3 && eq(argv[1], "vrecv")) {
     i64 fd = vdial(num(argv[2]));
     u64 done = 0, t = now_ns();
