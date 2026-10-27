@@ -17,7 +17,8 @@ import ../lib/bytes.bend as B
 # (message type) before the end option 255; pad options (0) are skipped. A
 # list that ends inside an option, or a type option whose length is not 1,
 # yields no type. The walk takes one byte of fuel per option, so the list's
-# length is always enough.
+# length is always enough. Messages with more than 576 bytes of options are
+# ignored.
 
 # The value of a message-type option: its length must be 1.
 def Dhcp.type_of(ok: Bool, body: +List<U32>) -> Maybe<&2, U32>:
@@ -27,13 +28,15 @@ def Dhcp.type_of(ok: Bool, body: +List<U32>) -> Maybe<&2, U32>:
     case _ _:
       None{}
 
-# One step of the walk: the answer, or the options left to walk.
+# One step of the walk: the answer, or the options left to walk and their
+# count (counted once, then down, so the walk stays linear).
 type Dhcp.Step is Data:
   Dhcp.Done{t: Maybe<&2, U32>}
-  Dhcp.Next{rest: +List<U32>}
+  Dhcp.Next{left: Nat, rest: +List<U32>}
 
-# An option's data: complete, then either the type or skipped.
-def Dhcp.step.body(fits: Bool, typ: Bool, one: Bool, n: Nat, +body: +List<U32>) -> Dhcp.Step:
+# An option's data (left: the bytes after its length byte): complete, then
+# either the type or skipped.
+def Dhcp.step.body(fits: Bool, typ: Bool, one: Bool, +n: Nat, left: Nat, +body: +List<U32>) -> Dhcp.Step:
   match fits:
     case False{}:
       Dhcp.Done{None{}}
@@ -42,13 +45,14 @@ def Dhcp.step.body(fits: Bool, typ: Bool, one: Bool, n: Nat, +body: +List<U32>) 
         case True{}:
           Dhcp.Done{Dhcp.type_of(one, body)}
         case False{}:
-          Dhcp.Next{List.drop(&2, U32, body, n)}
+          Dhcp.Next{Nat.sub(left, n), List.drop(&2, U32, body, n)}
 
-# One option: pad, end, message type, or another option to skip.
-def Dhcp.step.code(pad: Bool, end: Bool, typ: Bool, +rest: +List<U32>) -> Dhcp.Step:
+# One option (left: the bytes after its code byte): pad, end, message type,
+# or another option to skip.
+def Dhcp.step.code(pad: Bool, end: Bool, typ: Bool, +left: Nat, +rest: +List<U32>) -> Dhcp.Step:
   match pad:
     case True{}:
-      Dhcp.Next{rest}
+      Dhcp.Next{left, rest}
     case False{}:
       match end:
         case True{}:
@@ -59,32 +63,48 @@ def Dhcp.step.code(pad: Bool, end: Bool, typ: Bool, +rest: +List<U32>) -> Dhcp.S
               Dhcp.Done{None{}}
             case +len <> +body:
               +n = U32.to_nat(len)
-              Dhcp.step.body(Nat.is_le(n, List.length(&2, U32, body)), typ, U32.is_eq(len, 1), n, body)
+              +after = Nat.sub(left, 1n)
+              Dhcp.step.body(Nat.is_le(n, after), typ, U32.is_eq(len, 1), n, after, body)
 
-def Dhcp.step(opts: +List<U32>) -> Dhcp.Step:
+# One step over opts, left of them.
+def Dhcp.step(+left: Nat, opts: +List<U32>) -> Dhcp.Step:
   match opts:
     case Nil{}:
       Dhcp.Done{None{}}
     case +code <> rest:
-      Dhcp.step.code(U32.is_eq(code, 0), U32.is_eq(code, 255), U32.is_eq(code, 53), rest)
+      Dhcp.step.code(U32.is_eq(code, 0), U32.is_eq(code, 255), U32.is_eq(code, 53), Nat.sub(left, 1n), rest)
 
 def Dhcp.walk(fuel: Nat, st: Dhcp.Step) -> Maybe<&2, U32>:
   match fuel st:
     case _ Dhcp.Done{t}:
       t
-    case 0n Dhcp.Next{_}:
+    case 0n Dhcp.Next{_, _}:
       None{}
-    case 1n+p Dhcp.Next{rest}:
-      Dhcp.walk(p, Dhcp.step(rest))
+    case 1n+p Dhcp.Next{left, rest}:
+      Dhcp.walk(p, Dhcp.step(left, rest))
 
-# The message type of a BOOTREQUEST with the magic cookie, if it has one.
+# The most option bytes a message may carry (RFC 2131's minimum message,
+# 576 bytes, bounds what a client needs).
+def Dhcp.max_options() -> Nat:
+  576n
+
+def Dhcp.walk_opts(short: Bool, +n: Nat, opts: +List<U32>) -> Maybe<&2, U32>:
+  match short:
+    case False{}:
+      None{}
+    case True{}:
+      Dhcp.walk(n, Dhcp.step(n, opts))
+
+# The message type of a BOOTREQUEST with the magic cookie, if it has one; a
+# message with more than Dhcp.max_options option bytes has none.
 def Dhcp.msg_type(ok: Bool, +msg: +List<U32>) -> Maybe<&2, U32>:
   match ok:
     case False{}:
       None{}
     case True{}:
       +opts = List.drop(&2, U32, msg, 240n)
-      Dhcp.walk(List.length(&2, U32, opts), Dhcp.step(opts))
+      +n = List.length(&2, U32, opts)
+      Dhcp.walk_opts(Nat.is_le(n, Dhcp.max_options()), n, opts)
 
 def Dhcp.is_request(+msg: +List<U32>) -> Bool:
   +op = B.Bytes.slice(msg, 0n, 1n)
