@@ -23,6 +23,10 @@ if [ -n "$port" ] && [ -e /sys/class/net/eth0 ]; then
   # $bytes bytes and closes
   s=$(up); dd if=/dev/zero bs=1048576 count=$((bytes / 1048576)) 2>/dev/null | /bin/bench on 0 /bin/nc 10.0.2.2 $((port + 1)); e=$(up)
   rate net-upload $bytes $s $e
+  # the same through the NAT with no tool in between (/bin/bench reads and
+  # writes 1 MiB at a time): the host's source on port + 2 sends $bytes
+  /bin/bench on 0 /bin/bench recv 10.0.2.2 $((port + 2))
+  /bin/bench on 0 /bin/bench send 10.0.2.2 $((port + 1)) $bytes
   s=$(up); i=0; while [ $i -lt 50 ]; do wget -q -O /dev/null "http://10.0.2.2:$port/size"; i=$((i + 1)); done; e=$(up)
   awk -v s=$s -v e=$e 'BEGIN { printf "BENCH net-http-request %.1f ms\n", (e - s) * 1000 / 50 }'
 fi

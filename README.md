@@ -167,10 +167,13 @@ the guest pinned to vCPU 0 where device interrupts land):
 | Metric | |
 |---|---|
 | exit (a trapped UART store, end to end) | ~3 µs |
-| disk sequential read / write (1 MiB, O_DIRECT) | ~290 / ~200 MB/s |
-| disk 4 KiB random read, QD1 | ~45k IOPS (~21 µs) |
-| network download / upload through the NAT | ~430 / ~80 MB/s |
-| 9p read / write | ~170 / ~30 MB/s |
+| disk sequential read / write (1 MiB, O_DIRECT) | ~310 / ~190 MB/s |
+| disk 4 KiB random read, QD1 | ~45-50k IOPS (~20 µs) |
+| TCP download / upload through the NAT (1 MiB reads and writes) | ~650 / ~590 MB/s |
+| the same with busybox `wget` / `dd \| nc` in the guest | ~500 / ~70 MB/s |
+| 9p read / write | ~190 / ~33 MB/s |
+
+(busybox's own copy loop, not the VMM, bounds the `nc` upload.)
 
 Bulk data never passes through Bend: devices name the guest memory a
 request uses (`V.Iov` pieces) and the host moves the bytes (disk, 9p,
