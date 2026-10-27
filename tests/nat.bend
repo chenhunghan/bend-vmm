@@ -36,6 +36,10 @@ def show_cmd(c: V.NetCmd) -> String:
       "close " ++ U32.show(id)
     case V.UdpSend{sport, ip, port, bs}:
       "udp " ++ U32.show(sport) ++ " " ++ U32.show(ip) ++ ":" ++ U32.show(port) ++ " " ++ show(bs)
+    case V.TcpSendStaged{id, slot}:
+      "send " ++ U32.show(id) ++ " staged " ++ U32.show(slot)
+    case V.StageDrop{slot}:
+      "drop staged " ++ U32.show(slot)
 
 def show_cmds(cs: +List<V.NetCmd>) -> String:
   List.show(~&2, ~V.NetCmd, ~show_cmd, cs)
@@ -397,6 +401,24 @@ def flow_held() -> IO(Unit):
     T.eq_str("held rest on ack", show_metas(frames(o3)), "[[256, 0, 2000, 3002]]")
     T.eq_str("held frame headers", show(List.take(&2, U32, List.drop(&2, U32, first(frames(o2)), 3n), 14n)), show(List.append(&2, U32, N.Slirp.guest_mac(), List.append(&2, U32, N.Slirp.gateway_mac(), [8, 0]))))
 
+# A guest SYN with MSS 1460, NOP and window scale 7 (as Linux sends): the
+# SYN|ACK answers with the NAT's own scale, and the guest's later windows
+# count in units of 128.
+def syn_ws() -> +List<U32>:
+  to_host(remote(), 6, W.Tcp.build_opts(g(), remote(), W.Tcp{40000, 80, 999, 0, 2, 64240, 0, []}, [2, 4, 5, 180, 1, 3, 3, 7]))
+
+def flow_scale() -> IO(Unit):
+  +o1 = gf(N.Slirp.new(), syn_ws())
+  +o2 = he(net(o1), V.TcpConnected{0})
+  +o3 = gf(net(o2), gtcpw(40000, 16, 1000, 2, 1, []))
+  +o4 = he(net(o3), V.TcpData{0, noise(300n, 3)})
+  do IO<Unit>:
+    T.eq_u32("scale parsed", W.Tcp.wscale(List.drop(&2, U32, syn_ws(), 34n)), 7)
+    T.eq_u32("no scale", W.Tcp.wscale(List.drop(&2, U32, gtcp(40000, 2, 999, 0, []), 34n)), 4294967295)
+    T.eq_str("synack offers scale 7", show(List.take(&2, U32, List.drop(&2, U32, first(frames(o2)), 54n), 8n)), "[2, 4, 5, 180, 1, 3, 3, 7]")
+    T.eq_u32("window 1 << 7 = 128 bytes go out", U32.from_nat(List.length(&2, +List<U32>, frames(o4))), 1)
+    T.eq_u32("the rest waits", N.Slirp.queued(net(o4)), 172)
+
 def main() -> IO(Unit):
   do IO<Unit>:
     lifetime()
@@ -417,3 +439,4 @@ def main() -> IO(Unit):
     flow_window()
     flow_eof_waits()
     flow_held()
+    flow_scale()

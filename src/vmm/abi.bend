@@ -43,6 +43,10 @@ type NetCmd is Data:
   TcpClose{conn: U32}
   # A datagram from guest port sport to ip:port.
   UdpSend{sport: U32, ip: U32, port: U32, bytes: +List<U32>}
+  # Sends the bytes staged on the host in slot (VmStage) and frees it.
+  TcpSendStaged{conn: U32, slot: U32}
+  # Frees a staged slot unsent (its segment was out of order, or refused).
+  StageDrop{slot: U32}
 
 # What the host reports back to the NAT.
 type NetEvent is Data:
@@ -206,6 +210,9 @@ type Vm<-A: Type> is Type:
   # Moves the bytes the host holds for TCP connection conn (TcpReady) into
   # the pieces of guest memory, in order, and frees the host's buffer.
   VmNetToRam{conn: U32, iovs: +List<Iov>, next: Vm<A>}
+  # Copies the pieces of guest memory, in order, into a new host buffer (a
+  # staged slot, sent or freed later by a NetCmd); continues with its slot.
+  VmStage{iovs: +List<Iov>, k: U32 -> Vm<A>}
 
 # Device code is written in Op, a continuation monad over Vm: its bind needs
 # no recursion, so `do Op<R, A>:` blocks pass Bend's termination check. R is
@@ -269,6 +276,9 @@ def Op.ram_to_disk(-R: Type, disk: U32, offset: U.U64, iovs: +List<Iov>) -> Op<R
 
 def Op.net_to_ram(-R: Type, conn: U32, iovs: +List<Iov>) -> Op<R, Unit>:
   Op{k => VmNetToRam{conn, iovs, k(Unit{})}}
+
+def Op.stage(-R: Type, iovs: +List<Iov>) -> Op<R, U32>:
+  Op{k => VmStage{iovs, k}}
 
 def Op.random(-R: Type, len: U32) -> Op<R, +List<U32>>:
   Op{k => VmRandom{len, k}}

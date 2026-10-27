@@ -130,7 +130,7 @@ fi
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 6. display: framebuffer, virtio keyboard and tablet"
   t=$(mktemp -d); sock=$t/vm.sock
-  ( (slp 40) | alarm 40 ./out/bend-vmm --mem 512 --cpus 2 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --control "$sock" --display 640x480 --cmdline "console=ttyAMA0 quiet" > "$t/run.log" 2>&1 & )
+  ( (slp 40) | alarm 40 ./out/bend-vmm --mem 512 --cpus 2 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --control "$sock" --display 640x480,headless --cmdline "console=ttyAMA0 quiet" > "$t/run.log" 2>&1 & )
   slp 7
   # typed on tty1 (the framebuffer console) through the virtio keyboard
   printf '%s\n' 'type echo KEYS-$((6*7)) > /dev/ttyAMA0\n' | nc -U "$sock" >/dev/null; slp 1

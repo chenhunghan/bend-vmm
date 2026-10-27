@@ -15,6 +15,12 @@ import ../net/wire.bend as W
 # csum_offset u16, num_buffers u16. Transmit strips it; receive writes it as
 # all zeros except num_buffers = 1, then the frame.
 #
+# Transmit: a TCP segment with data leaves its payload on the host (a staged
+# frame, W.Wire.staged_frame; the NAT sends or frees it). Offered for it:
+# VIRTIO_NET_F_CSUM (bit 0) and VIRTIO_NET_F_HOST_TSO4 (bit 11): the guest
+# sends TCP segments of up to 64 KiB with checksums left partial (the NAT
+# never checks them).
+#
 # Also offered: VIRTIO_NET_F_GUEST_CSUM (bit 1) and VIRTIO_NET_F_GUEST_TSO4
 # (bit 7), so a guest that takes them posts receive buffers of 64 KiB and
 # more and accepts TCP segments that large. A host frame (W.Wire.host_frame:
@@ -49,16 +55,54 @@ def Net.room(ds: +List<Q.Desc>) -> U32:
 def Net.keep(+bs: +List<U32>, +acc: +List<+List<U32>>) -> +List<+List<U32>>:
   Bool.pick(+List<+List<U32>>, Nat.is_le(List.length(&2, U32, bs), 12n), acc, List.drop(&2, U32, bs, 12n) <> acc)
 
-# Gathers one transmit chain, pushes it used with length 0, and keeps its frame.
-def Net.tx.serve(
-  -R: Type, q: Q.Vq, c: Q.Chain, acc: +List<+List<U32>>
+# The lengths of a frame's Ethernet, IPv4 and TCP headers and of its TCP
+# payload, from its first bytes bs; (0, 0) when it is no TCP segment with
+# data (or its headers pass bs).
+def Net.tcp_split(+bs: +List<U32>) -> Nat & Nat:
+  +ihl = Nat.mul(4n, U32.to_nat((W.Wire.u8(bs, 14n) .&. 15 : U32)))
+  +thl = Nat.mul(4n, U32.to_nat((W.Wire.u8(bs, Nat.add(26n, ihl)) >> 4n : U32)))
+  +hl = Nat.add(14n, Nat.add(ihl, thl))
+  +tot = U32.to_nat(W.Wire.u16(bs, 16n))
+  +ok = U32.is_eq(W.Wire.u16(bs, 12n), 2048) && U32.is_eq(W.Wire.u8(bs, 23n), 6) && Nat.is_le(20n, ihl) && Nat.is_le(20n, thl) && Nat.is_le(hl, List.length(&2, U32, bs)) && Nat.is_lt(Nat.add(ihl, thl), tot)
+  Bool.pick(Nat & Nat, ok, (hl, Nat.sub(tot, Nat.add(ihl, thl))), (0n, 0n))
+
+# A chain whose frame is a TCP segment with data (pl bytes after hl bytes of
+# headers): the payload is staged on the host (V.Op.stage) before the chain
+# goes back to the guest, and the frame keeps only the headers
+# (W.Wire.staged_frame). Any other frame is gathered whole.
+def Net.tx.stage(
+  -R: Type, plain: Bool, +hl: Nat, +pl: Nat, q: Q.Vq, +h: U32, +r: +List<Q.Desc>, hb: +List<U32>, acc: +List<+List<U32>>
 ) -> V.Op<R, Q.Vq & +List<+List<U32>>>:
-  match c:
-    case Q.Chain{+h, r, w}:
+  match plain:
+    case True{}:
       do V.Op<R, Q.Vq & +List<+List<U32>>>:
         bs : +List<U32> <- Q.Vq.gather(R, Q.Chain{h, r, []})
         q2 : Q.Vq <- Q.Vq.push(R, q, h, 0)
         return (q2, Net.keep(bs, acc))
+    case False{}:
+      do V.Op<R, Q.Vq & +List<+List<U32>>>:
+        slot : U32 <- V.Op.stage(R, Q.Vq.segs(r, (12 + U32.from_nat(hl) : U32), U32.from_nat(pl)))
+        q2 : Q.Vq <- Q.Vq.push(R, q, h, 0)
+        return (q2, W.Wire.staged_frame(slot, U32.from_nat(pl), List.take(&2, U32, List.drop(&2, U32, hb, 12n), hl)) <> acc)
+
+def Net.tx.split(
+  -R: Type, sp: Nat & Nat, q: Q.Vq, +h: U32, +r: +List<Q.Desc>, hb: +List<U32>, acc: +List<+List<U32>>
+) -> V.Op<R, Q.Vq & +List<+List<U32>>>:
+  match sp:
+    case (hl, +pl):
+      Net.tx.stage(R, Nat.is_eq(pl, 0n), hl, pl, q, h, r, hb, acc)
+
+# One transmit chain: its frame kept (TCP data staged on the host), the
+# chain pushed used with length 0. Only the first 146 bytes (the
+# virtio_net_hdr and the headers) are read through Bend.
+def Net.tx.serve(
+  -R: Type, q: Q.Vq, c: Q.Chain, acc: +List<+List<U32>>
+) -> V.Op<R, Q.Vq & +List<+List<U32>>>:
+  match c:
+    case Q.Chain{+h, +r, w}:
+      do V.Op<R, Q.Vq & +List<+List<U32>>>:
+        +hb : +List<U32> <- Q.Vq.read_segs(R, Q.Vq.segs(r, 0, 146))
+        Net.tx.split(R, Net.tcp_split(List.drop(&2, U32, hb, 12n)), q, h, r, hb, acc)
 
 def Net.tx.done(-R: Type, q: Q.Vq, acc: +List<+List<U32>>, used: Bool) -> V.Op<R, NetTx>:
   V.Op.pure(R, NetTx, NetTx{q, List.reverse(&2, +List<U32>, acc), used})

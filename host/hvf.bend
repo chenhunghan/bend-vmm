@@ -115,6 +115,18 @@ def Hvf.net_copy(conn: U32, iovs: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.stage(iovs: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.stage_drop(slot: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.tcp_send_staged(conn: U32, slot: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.tcp_send(conn: U32, bytes: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
@@ -364,6 +376,10 @@ def Host.disk_copy(disk: U32, dir: U32, off: U.U64, iovs: +List<V.Iov>) -> IO(U3
 # guest RAM.
 def Host.net_copy(conn: U32, iovs: +List<V.Iov>) -> IO(U32):
   Hvf.net_copy(conn, Host.iovs(iovs))
+
+# Copies pieces of guest RAM into a staged slot on the host.
+def Host.stage(iovs: +List<V.Iov>) -> IO(U32):
+  Hvf.stage(Host.iovs(iovs))
 
 def Host.disk_size(disk: U32) -> IO(U.U64):
   do IO<U.U64>:

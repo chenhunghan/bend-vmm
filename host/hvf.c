@@ -196,7 +196,8 @@ typedef struct {
 static HvfCpu hvf_cpus[HVF_MAX_CPUS];
 
 // BEND_VMM_TRACE: bit 1 prints every exception exit on stderr, bit 2 the
-// console input and interrupt line changes.
+// console input, interrupt line changes and TCP holds, bit 4 staged
+// transmit data.
 static int hvf_trace;
 
 static void hvf_put64(HvfCpu* c, uint64_t v) {
@@ -2156,16 +2157,65 @@ Term hvf_net_copy_run(Env e, Term* f, IoWork* w) {
   return (Term)at;
 }
 
-// Hvf.tcp_send(conn, bytes) -> U32: writes all bytes (waiting for room);
-// 0, or an errno.
-Term hvf_tcp_send_run(Env e, Term* f, IoWork* w) {
-  HvfSock* k = hvf_sock((u32)f[0], 0);
-  u64      n;
-  char*    buf = io_cbuf(e, f[1], &n, CID(Con));
-  if (!k || !buf) {
-    free(buf);
-    return (Term)(u32)EBADF;
+// Staged transmit data: TCP payloads copied out of guest memory when the
+// guest hands a segment over (Hvf.stage), sent or freed later on the NAT's
+// word (Hvf.tcp_send_staged, Hvf.stage_drop).
+#define HVF_STAGES 4096
+static struct {
+  uint8_t* buf;
+  uint32_t len;
+} hvf_stages[HVF_STAGES];
+static uint32_t hvf_stage_next;
+
+// Hvf.stage(iovs) -> U32: copies the pieces of guest memory, in order, into
+// a new slot; the slot, or 0xFFFFFFFF.
+Term hvf_stage_run(Env e, Term* f, IoWork* w) {
+  static uint8_t* hva[HVF_MAX_IOVS];
+  static u64      len[HVF_MAX_IOVS];
+  u64             nb;
+  char*           b = io_cbuf(e, f[0], &nb, CID(Con));
+  int             n = hvf_iovs(b, nb, hva, len, HVF_MAX_IOVS);
+  free(b);
+  if (n < 0) {
+    return (Term)HVF_ERR;
   }
+  u64 total = 0;
+  for (int i = 0; i < n; i++) {
+    total += len[i];
+  }
+  for (uint32_t tries = 0; tries < HVF_STAGES; tries++) {
+    uint32_t s = hvf_stage_next++ % HVF_STAGES;
+    if (hvf_stages[s].buf == NULL) {
+      uint8_t* p = io_mem(malloc(total ? total : 1));
+      for (int i = 0, at = 0; i < n; at += (int)len[i], i++) {
+        memcpy(p + at, hva[i], len[i]);
+      }
+      hvf_stages[s].buf = p;
+      hvf_stages[s].len = (uint32_t)total;
+      if (hvf_trace & 4) {
+        fprintf(stderr, "[trace] stage %u: %llu bytes in %d pieces\n", s, (unsigned long long)total, n);
+      }
+      return (Term)s;
+    }
+  }
+  return (Term)HVF_ERR;
+}
+
+static void hvf_stage_free(uint32_t s) {
+  if (s < HVF_STAGES) {
+    free(hvf_stages[s].buf);
+    hvf_stages[s].buf = NULL;
+  }
+}
+
+// Hvf.stage_drop(slot) -> U32: frees a slot unsent.
+Term hvf_stage_drop_run(Env e, Term* f, IoWork* w) {
+  hvf_stage_free((u32)f[0]);
+  return (Term)0;
+}
+
+// Writes all of buf to the socket, waiting for room; 0, or an errno.
+static u32 hvf_send_all(HvfSock* k, const uint8_t* buf, u64 n) {
   u64 at = 0;
   while (at < n) {
     ssize_t m = send(k->fd, buf + at, n - at, 0);
@@ -2178,8 +2228,28 @@ Term hvf_tcp_send_run(Env e, Term* f, IoWork* w) {
       break;
     }
   }
+  return at == n ? 0 : (u32)EPIPE;
+}
+
+// Hvf.tcp_send_staged(conn, slot) -> U32: sends a slot's bytes (waiting for
+// room) and frees it; 0, or an errno.
+Term hvf_tcp_send_staged_run(Env e, Term* f, IoWork* w) {
+  HvfSock* k = hvf_sock((u32)f[0], 0);
+  u32      s = (u32)f[1];
+  u32      r = !k || s >= HVF_STAGES || !hvf_stages[s].buf ? (u32)EBADF : hvf_send_all(k, hvf_stages[s].buf, hvf_stages[s].len);
+  hvf_stage_free(s);
+  return (Term)r;
+}
+
+// Hvf.tcp_send(conn, bytes) -> U32: writes all bytes (waiting for room);
+// 0, or an errno.
+Term hvf_tcp_send_run(Env e, Term* f, IoWork* w) {
+  HvfSock* k = hvf_sock((u32)f[0], 0);
+  u64      n;
+  char*    buf = io_cbuf(e, f[1], &n, CID(Con));
+  u32      r   = !k || !buf ? (u32)EBADF : hvf_send_all(k, (const uint8_t*)buf, n);
   free(buf);
-  return (Term)(at == n ? 0 : (u32)EPIPE);
+  return (Term)r;
 }
 
 // Hvf.tcp_shutdown(conn) -> U32: no more data from the guest.
@@ -3438,6 +3508,15 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.tcp_fill)
   io_eff(CID(Hvf.tcp_fill), hvf_tcp_fill_run);
+#endif
+#ifdef CID(Hvf.stage)
+  io_eff(CID(Hvf.stage), hvf_stage_run);
+#endif
+#ifdef CID(Hvf.stage_drop)
+  io_eff(CID(Hvf.stage_drop), hvf_stage_drop_run);
+#endif
+#ifdef CID(Hvf.tcp_send_staged)
+  io_eff(CID(Hvf.tcp_send_staged), hvf_tcp_send_staged_run);
 #endif
 #ifdef CID(Hvf.net_copy)
   io_eff(CID(Hvf.net_copy), hvf_net_copy_run);

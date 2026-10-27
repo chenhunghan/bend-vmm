@@ -92,7 +92,7 @@ def Opts.display(o: Opts) -> String:
     case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv}:
       dp
 
-# "WxH" as a display; None for "" or anything malformed.
+# "WxH" as a display; None for anything malformed.
 def display_of.mk(w: Maybe<&2, U32>, h: Maybe<&2, U32>) -> Maybe<&2, T.Display>:
   match w h:
     case Some{x} Some{y}:
@@ -107,8 +107,21 @@ def display_of.go(ws: List<&2, String>) -> Maybe<&2, T.Display>:
     case _:
       None{}
 
+def display_of.size(parts: List<&2, String>) -> Maybe<&2, T.Display>:
+  match parts:
+    case Con{size, rest}:
+      display_of.go(String.split(size, 'x'))
+    case Nil{}:
+      None{}
+
+# "WxH" or "WxH,headless" as a display; None for "" or anything malformed.
 def display_of(spec: String) -> Maybe<&2, T.Display>:
-  display_of.go(String.split(spec, 'x'))
+  display_of.size(String.split(spec, ','))
+
+# The display to open a window for: none when headless ("WxH,headless": the
+# framebuffer and screendump only, no window to take the host's pointer).
+def display_window(+spec: String) -> Maybe<&2, T.Display>:
+  Bool.pick(Maybe<&2, T.Display>, String.ends_with(spec, ",headless"), None{}, display_of(spec))
 
 def Opts.num(s: String, d: U32) -> U32:
   Maybe.default(&2, U32, U32.read(s), d)
@@ -260,6 +273,10 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
       do IO<A>:
         _ : U32 <- H.Host.disk_copy(d, 1, off, iovs)
         interp(cpu, mc, done, A, next)
+    case V.VmStage{iovs, k}:
+      do IO<A>:
+        slot : U32 <- H.Host.stage(iovs)
+        interp(cpu, mc, done, A, k(slot))
     case V.VmNetToRam{conn, iovs, next}:
       do IO<A>:
         _ : U32 <- H.Host.net_copy(conn, iovs)
@@ -432,6 +449,14 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
       do IO<Unit>:
         rc : U32 <- H.Hvf.udp_send(sport, ip, port, bs)
         net_cmd.udp(U32.is_eq(rc, 1), mc, done, sport)
+    case V.TcpSendStaged{conn, slot}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.tcp_send_staged(conn, slot)
+        return Unit{}
+    case V.StageDrop{slot}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.stage_drop(slot)
+        return Unit{}
 
 # Management: pause, resume and snapshots, from the console escapes
 # (Ctrl-A p / s) and the control socket (--control PATH).
@@ -1105,7 +1130,7 @@ def stopped(+code: U32) -> IO(Unit):
 @unsafe def run_machine(+mc: Chan(M.Machine), +done: Chan(U32), +ctl: String, disp: String, cpus: +List<U32>) -> IO(Unit):
   do IO<Unit>:
     spawn_cpus(mc, done, cpus)
-    display.start(display_of(disp), mc, done)
+    display.start(display_window(disp), mc, done)
     IO.spawn(Unit, input_loop(mc, done))
     IO.spawn(Unit, vs_accept_loop(mc, done))
     control(String.is_empty(ctl), ctl, mc, done)
@@ -1258,7 +1283,7 @@ def usage() -> String:
   String.join([
     "usage: bend-vmm --kernel Image [--initrd FILE] [--cmdline \"...\"] [--mem MiB] [--cpus N]",
     "                [--disk IMG[:ro],...] [--share DIR] [--vsock PATH] [--control PATH]",
-    "                [--display WxH]",
+    "                [--display WxH[,headless]]",
     "       bend-vmm --firmware CODE.fd --vars VARS.fd [--disk IMG] ...   (UEFI)",
     "       bend-vmm --restore SNAPSHOT [--control PATH]",
     "       bend-vmm --payload FILE.bin                                   (bare metal)",

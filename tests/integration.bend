@@ -195,6 +195,10 @@ def show_cmd(c: V.NetCmd) -> String:
       "close " ++ U32.show(id)
     case V.UdpSend{sport, ip, port, bs}:
       "udp " ++ U32.show(sport) ++ " " ++ U32.show(ip) ++ ":" ++ U32.show(port) ++ " " ++ show(bs)
+    case V.TcpSendStaged{id, slot}:
+      "send " ++ U32.show(id) ++ " staged " ++ U32.show(slot)
+    case V.StageDrop{slot}:
+      "drop staged " ++ U32.show(slot)
 
 def cmds(+s: S.Sim) -> String:
   List.show(~&2, ~V.NetCmd, ~show_cmd, S.Sim.net(s))

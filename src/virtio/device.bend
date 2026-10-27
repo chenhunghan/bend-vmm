@@ -29,8 +29,9 @@ import ./input.bend as In
 #                space follows the driver's select/subsel writes
 #                (In.Input.config)
 #   NetKind:     virtio-net, device id 1, two queues (0 receiveq1,
-#                1 transmitq1), also VIRTIO_NET_F_MAC, GUEST_CSUM and
-#                GUEST_TSO4 (U.U64{1, 162}: see src/virtio/net.bend), config
+#                1 transmitq1), also VIRTIO_NET_F_MAC, CSUM, GUEST_CSUM,
+#                GUEST_TSO4 and HOST_TSO4 (U.U64{1, 2211}: see
+#                src/virtio/net.bend), config
 #                space N.Net.config(mac)
 #   P9Kind:      virtio-9p on host share `share`, device id 9, one queue,
 #                also VIRTIO_9P_MOUNT_TAG (U.U64{1, 1}), config space
@@ -103,7 +104,7 @@ def Dev.mmio(kind: DevKind) -> M.VirtioMmio:
     case ConsoleKind{}:
       M.VirtioMmio.new(3, Dev.features(), 2n, 256, [])
     case NetKind{mac}:
-      M.VirtioMmio.new(1, U.U64{1, 162}, 2n, 256, N.Net.config(mac))
+      M.VirtioMmio.new(1, U.U64{1, 2211}, 2n, 256, N.Net.config(mac))
     case P9Kind{share, tag}:
       M.VirtioMmio.new(9, U.U64{1, 1}, 1n, 256, P.P9.config(tag))
     case VsockKind{cid}:

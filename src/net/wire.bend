@@ -331,3 +331,52 @@ def Ipv4.head(+src: U32, +dst: U32, +proto: U32, +len: U32) -> +List<U32>:
   +pre = Wire.cat([69, 0], Wire.cat(Wire.be16((20 + len : U32)), Wire.cat([0, 0], ttl_proto)))
   +addrs = Wire.cat(B.Bytes.be32(src), B.Bytes.be32(dst))
   Wire.cat(pre, Wire.cat(Wire.be16(Csum.of(Wire.cat(pre, Wire.cat([0, 0], addrs)))), addrs))
+
+# A frame whose TCP payload waits on the host in a staged slot
+# (V.VmStage): [257, slot, len] then its Ethernet, IPv4 and TCP headers as
+# the guest sent them (the IPv4 total length still counting the payload).
+def Wire.staged_tag() -> U32:
+  257
+
+def Wire.staged_frame(slot: U32, len: U32, head: +List<U32>) -> +List<U32>:
+  Wire.staged_tag() <> slot <> len <> head
+
+def Wire.is_staged(f: +List<U32>) -> Bool:
+  match f:
+    case Nil{}:
+      False{}
+    case x <> t:
+      U32.is_eq(x, Wire.staged_tag())
+
+# The window scale option (kind 3, length 3) of a TCP segment's header bs:
+# its shift (at most 14), or 4294967295 when there is none. Each step of the
+# walk consumes at least one byte of the options.
+def Tcp.wscale.go(fuel: Nat, +opts: +List<U32>) -> U32:
+  match fuel:
+    case 0n:
+      4294967295
+    case 1n+p:
+      +k = Wire.u8(opts, 0n)
+      +l = Wire.u8(opts, 1n)
+      +n = Wire.len(opts)
+      Bool.pick(U32, Nat.is_eq(n, 0n) || U32.is_zero(k) || (Bool.not(U32.is_eq(k, 1)) && (U32.is_lt(l, 2) || Nat.is_lt(n, U32.to_nat(l)))), 4294967295,
+        Bool.pick(U32, U32.is_eq(k, 3) && U32.is_eq(l, 3), U32.min(Wire.u8(opts, 2n), 14),
+          Tcp.wscale.go(p, List.drop(&2, U32, opts, Bool.pick(Nat, U32.is_eq(k, 1), 1n, U32.to_nat(l))))))
+
+def Tcp.wscale(+bs: +List<U32>) -> U32:
+  +hl = Nat.mul(4n, U32.to_nat((Wire.u8(bs, 12n) >> 4n : U32)))
+  +opts = B.Bytes.slice(bs, 20n, Nat.sub(hl, 20n))
+  Tcp.wscale.go(Wire.len(opts), opts)
+
+# The TCP segment with the given option bytes (padded with NOPs to whole
+# words; t's own mss is not used) and its checksum.
+def Tcp.build_opts(src: U32, dst: U32, t: Tcp, +opts: +List<U32>) -> +List<U32>:
+  match t:
+    case Tcp{+sport, +dport, +seq, +ack, +flags, +window, mss, +payload}:
+      +pad = Wire.cat(opts, List.replicate(U32, Nat.mod(Nat.sub(4n, Nat.mod(Wire.len(opts), 4n)), 4n), 1))
+      +off = (U32.from_nat(Nat.add(5n, Nat.div(Wire.len(pad), 4n))) << 4n : U32)
+      +head = Wire.cat(Wire.be16(sport), Wire.cat(Wire.be16(dport), Wire.cat(B.Bytes.be32(seq), B.Bytes.be32(ack))))
+      +h0 = Wire.cat(head, Wire.cat([off, (flags .&. 255 : U32)], Wire.cat(Wire.be16(window), Wire.cat([0, 0, 0, 0], pad))))
+      +len = U32.from_nat(Nat.add(Wire.len(h0), Wire.len(payload)))
+      +c = Csum.of(Wire.cat(Wire.pseudo(src, dst, 6, len), Wire.cat(h0, payload)))
+      Wire.cat(Wire.cat(head, Wire.cat([off, (flags .&. 255 : U32)], Wire.cat(Wire.be16(window), Wire.cat(Wire.be16(c), Wire.cat([0, 0], pad))))), payload)

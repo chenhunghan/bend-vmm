@@ -67,8 +67,8 @@ def Enc.conns(cs: +List<Nt.Conn>) -> +List<U32>:
   match cs:
     case Nil{}:
       []
-    case Con{Nt.Conn{id, gp, rip, rp, st, gs, hs, Nt.Flow{wnd, held, queue, eof}}, rest}:
-      List.append(&2, U32, [id, gp, rip, rp, st, gs, hs, wnd, held, Bool.to_u32(eof)], List.append(&2, U32, X.Enc.bytes(queue), Enc.conns(rest)))
+    case Con{Nt.Conn{id, gp, rip, rp, st, gs, hs, Nt.Flow{wnd, held, queue, eof, sc}}, rest}:
+      List.append(&2, U32, [id, gp, rip, rp, st, gs, hs, wnd, held, Bool.to_u32(eof), sc], List.append(&2, U32, X.Enc.bytes(queue), Enc.conns(rest)))
 
 def Enc.slirp(s: Nt.Slirp) -> +List<U32>:
   match s:
@@ -244,9 +244,10 @@ def Dec.conns(n: Nat) -> X.Dec<+List<Nt.Conn>>:
         wnd : U32 <- X.Dec.u32()
         held : U32 <- X.Dec.u32()
         eof : Bool <- X.Dec.bool()
+        sc : U32 <- X.Dec.u32()
         queue : +List<U32> <- X.Dec.bytes()
         rest : +List<Nt.Conn> <- Dec.conns(p)
-        return Nt.Conn{id, gp, rip, rp, st, gs, hs, Nt.Flow{wnd, held, queue, eof}} <> rest
+        return Nt.Conn{id, gp, rip, rp, st, gs, hs, Nt.Flow{wnd, held, queue, eof, sc}} <> rest
 
 def Dec.slirp() -> X.Dec<Nt.Slirp>:
   do X.Dec<Nt.Slirp>:
