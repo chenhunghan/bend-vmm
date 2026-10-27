@@ -167,13 +167,18 @@ the guest pinned to vCPU 0 where device interrupts land):
 | Metric | |
 |---|---|
 | exit (a trapped UART store, end to end) | ~3 µs |
-| disk sequential read / write (1 MiB, O_DIRECT) | ~310 / ~190 MB/s |
+| disk sequential read / write (1 MiB, O_DIRECT; the host's page cache) | ~2800 / ~1300 MB/s |
 | disk 4 KiB random read, QD1 | ~45-50k IOPS (~20 µs) |
 | TCP download / upload through the NAT (1 MiB reads and writes) | ~650 / ~590 MB/s |
 | the same with busybox `wget` / `dd \| nc` in the guest | ~500-650 / ~80 MB/s |
 | 9p read / write | ~190 / ~100 MB/s |
 
 (busybox's own copy loop, not the VMM, bounds the `nc` upload.)
+
+virtio-blk offers SEG_MAX and SIZE_MAX, so Linux sends a 1 MiB request as
+one chain of up to 128 segments; the host moves it with one preadv/pwritev.
+A failed host operation (a full host disk, an I/O error) answers the request
+with IOERR rather than losing the data quietly.
 
 Bulk data never passes through Bend: devices name the guest memory a
 request uses (`V.Iov` pieces) and the host moves the bytes (disk, 9p,
