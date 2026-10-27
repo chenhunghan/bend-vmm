@@ -51,3 +51,18 @@ def L.nat.ack_opens_window():
 
 def L.nat.fin_waits_for_data():
   {==}
+
+def L.nat.no_data_before_connect():
+  {==}
+
+def L.nat.syn_limit():
+  {==}
+
+def L.nat.no_special_dst():
+  {==}
+
+def L.nat.queue_bounded():
+  {==}
+
+def L.nat.blocked_holds_data():
+  {==}
