@@ -225,6 +225,7 @@ elsewhere. What holds today:
 | Real guests on the host's hypervisor | `scripts/check-host.sh` | macOS (Hypervisor.framework), Linux arm64 (KVM) |
 | The same on a Linux KVM host from a Mac | `scripts/lima/linux-host.sh 'CHECK_SLOW=5 SKIP_NATIVE=1 scripts/check-host.sh'` | a Lima VM |
 | The same on an emulated KVM host (QEMU with EL2) | `scripts/ci/emulated-kvm.sh` | CI (`host-linux` job) |
+| A real distribution: Ubuntu 24.04's cloud image | `scripts/ubuntu-check.sh` | macOS / Linux, on demand (600 MiB download) |
 
 `scripts/check-host.sh` boots a bare-metal payload, then Linux (1 and 4 CPUs),
 then a busybox userspace that runs an in-guest test suite: disk reads and
@@ -234,7 +235,14 @@ screendump, keys typed into the framebuffer console, tablet events read from
 the guest's evdev), UEFI: edk2 booting Alpine's ISO, an EFI variable
 written from Linux surviving a reboot, and qcow2: images over a raw backing
 file, compressed and fresh, read and written by the guest, then checked by
-`qemu-img check` and read back by `qemu-img`.
+`qemu-img check` and read back by `qemu-img`; image locks, the raw-disk
+header guard, restore's path check, and SIGTERM and `powerdown` pressing the
+power button.
+
+`scripts/ubuntu-check.sh` boots Ubuntu 24.04's arm64 cloud image (qcow2,
+through UEFI, cloud-init from a NoCloud seed disk, 4 vCPUs): cloud-init is
+done in about 15 s, HTTPS works through the NAT, no systemd unit fails, and
+SIGTERM shuts it down cleanly in a few seconds.
 
 ## Layout
 
