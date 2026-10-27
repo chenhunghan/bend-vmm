@@ -833,6 +833,12 @@ static int vmb_gic_restore(const uint8_t* blob, size_t size) {
       if (bad++ == 0 || (hvf_trace & 1)) {
         fprintf(stderr, "bend-vmm: vGIC restore: group %u attr %#llx: %s\n", e[i].group, (unsigned long long)e[i].attr,
                 strerror(errno));
+        for (uint32_t c = 0; bad == 1 && c < kvm_ncpus; c++) {
+          uint64_t           mp  = 0;
+          struct kvm_one_reg one = {ARM64_SYS_REG(3, 0, 0, 0, 5), (uint64_t)(uintptr_t)&mp};
+          int                r   = ioctl(hvf_cpus[c].fd, KVM_GET_ONE_REG, &one);
+          fprintf(stderr, "bend-vmm:   vCPU %u (fd %d): MPIDR %#llx (%d)\n", c, hvf_cpus[c].fd, (unsigned long long)mp, r);
+        }
       }
     }
   }
@@ -1361,6 +1367,11 @@ Term hvf_reexec_run(Env e, Term* f, IoWork* w) {
   }
   ssize_t pl = readlink("/proc/self/exe", path, sizeof path - 1);
   path[pl > 0 ? pl : 0] = 0; // readlink does not end the string
+  if (pl <= 0 && n > 0) {
+    // no /proc/self/exe (a chroot, a container): argv[0], from this cwd
+    snprintf(path, sizeof path, "%s", args);
+    pl = (ssize_t)strlen(path);
+  }
   if (n > 0 && pl > 0) {
     char* argv[1024];
     int   argc = 0;
