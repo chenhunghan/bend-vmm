@@ -34,6 +34,8 @@ def show_cmd(c: V.NetCmd) -> String:
       "shutdown " ++ U32.show(id)
     case V.TcpClose{id}:
       "close " ++ U32.show(id)
+    case V.TcpAbort{id}:
+      "abort " ++ U32.show(id)
     case V.UdpSend{sport, ip, port, bs}:
       "udp " ++ U32.show(sport) ++ " " ++ U32.show(ip) ++ ":" ++ U32.show(port) ++ " " ++ show(bs)
     case V.TcpSendStaged{id, slot}:
@@ -210,7 +212,7 @@ def two() -> IO(Unit):
     step("two host data 1", o5, [htcp(40001, 24, 2, 5000, 0, [5])], [])
     step("two guest data 0", o6, [htcp(40000, 16, 2, 1001, 0, [])], [V.TcpSend{0, [6]}])
     step("two guest data 1", o7, [htcp(40001, 16, 3, 5002, 0, [])], [V.TcpSend{1, [7, 7]}])
-    step("two rst 0", o8, [], [V.TcpClose{0}])
+    step("two rst 0", o8, [], [V.TcpAbort{0}])
     step("two 1 still open", o9, [htcp(40001, 24, 3, 5002, 0, [8])], [])
 
 def duplicate_syn() -> IO(Unit):
@@ -229,7 +231,7 @@ def guest_rst() -> IO(Unit):
   +o2 = he(net(o1), V.TcpData{0, [1]})
   +o3 = gf(net(o1), gtcp(40000, 16, 1000, 2, []))
   do IO<Unit>:
-    step("guest rst", o1, [], [V.TcpClose{0}])
+    step("guest rst", o1, [], [V.TcpAbort{0}])
     T.eq_u32("guest rst forgotten", conns(net(o1)), 0)
     step("guest rst then data ignored", o2, [], [])
     step("guest rst then ack gets rst", o3, [htcp(40000, 4, 2, 0, 0, [])], [])
@@ -438,6 +440,137 @@ def flow_resend() -> IO(Unit):
     step("resend: an ACK that moves nothing new", o3, [], [])
     step("resend: its duplicate sends again from the ACK", o4, [htcp(40000, 24, 1002, 1000, 0, B.Bytes.slice(big, 1000n, 1460n)), htcp(40000, 24, 2462, 1000, 0, B.Bytes.slice(big, 2460n, 540n))], [])
 
+# Hardening against a malicious guest
+# ===================================
+
+# Before the host connects, the guest's data, FIN and ACKs are dropped
+# unanswered; a RST closes.
+def syn_sent() -> IO(Unit):
+  +o0 = gf(N.Slirp.new(), gtcp(40000, 2, 999, 0, []))
+  +o1 = gf(net(o0), gtcp(40000, 24, 1000, 2, [1, 2]))
+  +o2 = gf(net(o0), gtcp(40000, 17, 1000, 2, []))
+  +o3 = gf(net(o0), gtcp(40000, 20, 1000, 2, []))
+  +o4 = he(net(o2), V.TcpConnected{0})
+  +o5 = gf(net(o0), gtcp(40000, 16, 1000, 2, []))
+  do IO<Unit>:
+    step("synsent data dropped", o1, [], [])
+    step("synsent fin dropped", o2, [], [])
+    step("synsent ack dropped", o5, [], [])
+    step("synsent rst closes", o3, [], [V.TcpAbort{0}])
+    T.eq_u32("synsent rst forgets", conns(net(o3)), 0)
+    step("synsent then connected", o4, [htcp(40000, 18, 1, 1000, 1460, [])], [])
+
+# SYNs from guest ports 1000 to 1000 + n - 1.
+def syns(n: Nat, s: N.Slirp) -> N.Slirp:
+  match n:
+    case 0n:
+      s
+    case 1n+(+p):
+      syns(p, net(gf(s, gtcp((1000 + U32.from_nat(p) : U32), 2, 999, 0, []))))
+
+# At most 256 connections: the 256th opens, the 257th gets a RST|ACK.
+def conn_limit() -> IO(Unit):
+  +s255 = syns(255n, N.Slirp.new())
+  +o1 = gf(s255, gtcp(40000, 2, 999, 0, []))
+  +o2 = gf(net(o1), gtcp(40001, 2, 999, 0, []))
+  +o3 = gf(net(gf(net(o1), gtcp(40000, 4, 1000, 0, []))), gtcp(40001, 2, 999, 0, []))
+  do IO<Unit>:
+    step("limit 256th connects", o1, [], [V.TcpConnect{255, remote(), 80}])
+    step("limit 257th refused", o2, [htcp(40001, 20, 0, 1000, 0, [])], [])
+    T.eq_u32("limit refused SYN keeps none", conns(net(o2)), 256)
+    step("limit a closed connection makes room", o3, [], [V.TcpConnect{256, remote(), 80}])
+
+def syn_to(+dst: U32, port: U32) -> +List<U32>:
+  to_host(dst, 6, W.Tcp.build(g(), dst, W.Tcp{40000, port, 999, 0, 2, 65535, 0, []}))
+
+def rst_from(+src: U32, port: U32) -> +List<U32>:
+  to_guest(src, 6, W.Tcp.build(src, g(), W.Tcp{port, 40000, 0, 1000, 20, 65535, 0, []}))
+
+def udp_to(+dst: U32, port: U32) -> +List<U32>:
+  to_host(dst, 17, W.Udp.build(g(), dst, W.Udp{5000, port, [1]}))
+
+# Outbound policy: no 0/8, 127/8, 169.254/16, 224/4 or 255.255.255.255, and
+# 10.0.2.3 on port 53 only; 10.0.2.2 (the host) is allowed.
+def policy() -> IO(Unit):
+  do IO<Unit>:
+    step("policy gateway", gf(N.Slirp.new(), syn_to(167772674, 80)), [], [V.TcpConnect{0, 167772674, 80}])
+    step("policy dns tcp 53", gf(N.Slirp.new(), syn_to(167772675, 53)), [], [V.TcpConnect{0, 167772675, 53}])
+    step("policy dns tcp 80", gf(N.Slirp.new(), syn_to(167772675, 80)), [rst_from(167772675, 80)], [])
+    step("policy 0.0.0.0", gf(N.Slirp.new(), syn_to(0, 80)), [rst_from(0, 80)], [])
+    step("policy 127.0.0.1", gf(N.Slirp.new(), syn_to(2130706433, 22)), [rst_from(2130706433, 22)], [])
+    step("policy 127.255.255.254", gf(N.Slirp.new(), syn_to(2147483646, 22)), [rst_from(2147483646, 22)], [])
+    step("policy 169.254.0.1", gf(N.Slirp.new(), syn_to(2852000001, 80)), [rst_from(2852000001, 80)], [])
+    step("policy 169.255.0.1", gf(N.Slirp.new(), syn_to(2852061185, 80)), [], [V.TcpConnect{0, 2852061185, 80}])
+    step("policy 224.0.0.1", gf(N.Slirp.new(), syn_to(3758096385, 80)), [rst_from(3758096385, 80)], [])
+    step("policy 239.255.255.255", gf(N.Slirp.new(), syn_to(4026531839, 80)), [rst_from(4026531839, 80)], [])
+    step("policy 223.255.255.255", gf(N.Slirp.new(), syn_to(3758096383, 80)), [], [V.TcpConnect{0, 3758096383, 80}])
+    step("policy broadcast tcp", gf(N.Slirp.new(), syn_to(4294967295, 80)), [rst_from(4294967295, 80)], [])
+    step("policy udp 8.8.8.8", gf(N.Slirp.new(), udp_to(134744072, 53)), [], [V.UdpSend{5000, 134744072, 53, [1]}])
+    step("policy udp dns 53", gf(N.Slirp.new(), udp_to(167772675, 53)), [], [V.UdpSend{5000, 167772675, 53, [1]}])
+    step("policy udp dns 123", gf(N.Slirp.new(), udp_to(167772675, 123)), [], [])
+    step("policy udp mdns", gf(N.Slirp.new(), udp_to(3758096635, 5353)), [], [])
+    step("policy udp broadcast", gf(N.Slirp.new(), udp_to(4294967295, 9)), [], [])
+    step("policy udp loopback", gf(N.Slirp.new(), udp_to(2130706433, 53)), [], [])
+    step("policy udp 0.0.0.0", gf(N.Slirp.new(), udp_to(0, 53)), [], [])
+
+def ack_zero(seq: U32, ack: U32) -> +List<U32>:
+  to_guest(remote(), 6, W.Tcp.build(remote(), g(), W.Tcp{80, 40000, seq, ack, 16, 0, 0, []}))
+
+# Blocked (the host's socket holds too much): guest data is dropped and
+# answered with a zero window; a FIN still goes; host data still flows;
+# TcpUnblocked opens the window again. TcpReset resets the guest.
+def blocked() -> IO(Unit):
+  +o0 = he(opened(N.Slirp.new(), 40000, 0), V.TcpBlocked{0})
+  +o1 = gf(net(o0), gtcp(40000, 24, 1000, 2, [1, 2]))
+  +o2 = gf(net(o1), gtcp(40000, 17, 1000, 2, []))
+  +o3 = he(net(o1), V.TcpUnblocked{0})
+  +o4 = gf(net(o3), gtcp(40000, 24, 1000, 2, [1, 2]))
+  +o5 = he(net(o0), V.TcpData{0, [9]})
+  +o6 = he(opened(N.Slirp.new(), 40000, 0), V.TcpReset{0})
+  +o7 = he(net(o2), V.TcpEof{0})
+  +o8 = gf(net(o0), gtcp(40000, 25, 1000, 2, [1, 2]))
+  do IO<Unit>:
+    step("blocked no frame", o0, [], [])
+    step("blocked data dropped", o1, [ack_zero(2, 1000)], [])
+    step("blocked data and fin dropped", o8, [ack_zero(2, 1000)], [])
+    step("blocked fin goes", o2, [htcp(40000, 16, 2, 1001, 0, [])], [V.TcpShutdown{0}])
+    step("blocked then host eof closes", o7, [htcp(40000, 17, 2, 1001, 0, [])], [V.TcpClose{0}])
+    step("unblocked opens the window", o3, [htcp(40000, 16, 2, 1000, 0, [])], [])
+    step("unblocked data goes", o4, [htcp(40000, 16, 2, 1002, 0, [])], [V.TcpSend{0, [1, 2]}])
+    step("blocked host data flows", o5, [htcp(40000, 24, 2, 1000, 0, [9])], [])
+    step("reset", o6, [htcp(40000, 20, 2, 1000, 0, [])], [V.TcpClose{0}])
+    T.eq_u32("reset forgets", conns(net(o6)), 0)
+    step("blocked unknown", he(N.Slirp.new(), V.TcpBlocked{5}), [], [])
+    step("unblocked unknown", he(N.Slirp.new(), V.TcpUnblocked{5}), [], [])
+    step("reset unknown", he(N.Slirp.new(), V.TcpReset{5}), [], [])
+    step("unblocked in synsent", he(net(gf(N.Slirp.new(), gtcp(40000, 2, 999, 0, []))), V.TcpUnblocked{0}), [], [])
+
+def bool_str(b: Bool) -> String:
+  Bool.pick(String, b, "yes", "no")
+
+# A connection whose queue for the guest runs from una to dend (the counts
+# come from the sequence numbers, not the queue's length).
+def queued_conn(+una: U32, dend: U32, hlen: U32) -> N.Slirp:
+  N.Slirp{[N.Conn{0, 40000, remote(), 80, 1, 1000, una, N.Flow{una, una, dend, una, hlen, [], False{}, 4294967295, una, 0, 1}}], 1}
+
+# What a connection queues for the guest bounds its reads: sent and unsent
+# bytes count until the guest acknowledges them.
+def queue_cap() -> IO(Unit):
+  +o1 = gf(opened(N.Slirp.new(), 40000, 0), gtcpw(40000, 16, 1000, 2, 1000, []))
+  +o2 = he(net(o1), V.TcpData{0, noise(3000n, 5)})
+  +o3 = gf(net(o2), gtcpw(40000, 16, 1000, 1002, 1000, []))
+  do IO<Unit>:
+    T.eq_str("queue under the cap reads", bool_str(N.Slirp.may_read(net(o2), 0)), "yes")
+    T.eq_u32("queue unsent", N.Slirp.queued(net(o2)), 2000)
+    T.eq_u32("queue unsent after an ack", N.Slirp.queued(net(o3)), 1000)
+    T.eq_str("queue one below the cap reads", bool_str(N.Slirp.may_read(queued_conn(2, 1048577, 0), 0)), "yes")
+    T.eq_str("queue at the cap stops reading", bool_str(N.Slirp.may_read(queued_conn(2, 1048578, 0), 0)), "no")
+    T.eq_str("queue across the wrap", bool_str(N.Slirp.may_read(queued_conn(4294967000, 1048900, 0), 0)), "no")
+    T.eq_str("queue of a hold does not count", bool_str(N.Slirp.may_read(queued_conn(2, 1100000, 1099998), 0)), "yes")
+    T.eq_str("queue after the FIN's ack", bool_str(N.Slirp.may_read(queued_conn(3, 2, 0), 0)), "yes")
+    T.eq_u32("queue unsent of the queued connection", N.Slirp.queued(queued_conn(2, 262146, 0)), 262144)
+    T.eq_str("queue unknown connection reads", bool_str(N.Slirp.may_read(queued_conn(2, 262146, 0), 7)), "yes")
+
 def main() -> IO(Unit):
   do IO<Unit>:
     lifetime()
@@ -460,3 +593,8 @@ def main() -> IO(Unit):
     flow_held()
     flow_scale()
     flow_resend()
+    syn_sent()
+    conn_limit()
+    policy()
+    blocked()
+    queue_cap()

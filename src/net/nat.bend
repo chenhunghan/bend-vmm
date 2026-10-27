@@ -22,12 +22,20 @@ import ./dhcp.bend as D
 #   ARP request for any address but 10.0.2.15: ARP reply from the gateway MAC.
 #   ICMP echo request to 10.0.2.2 or 10.0.2.3: echo reply. Other ICMP: dropped.
 #   UDP to port 67: the D.Dhcp.reply, from 10.0.2.2:67 to port 68.
-#   Other UDP: V.UdpSend{sport, dst, dport, payload}.
+#   Other UDP: V.UdpSend{sport, dst, dport, payload} when Slirp.dst_ok, else
+#     dropped.
 #   TCP, by connection (guest port, remote address, remote port):
 #     SYN without ACK, unknown connection: a new connection numbered next_id
 #       (then next_id + 1), state SynSent, gseq = seq + 1, hseq = 1;
 #       V.TcpConnect{id, dst, dport}. A SYN for a known connection: dropped.
-#     RST, known: V.TcpClose{id}; the connection is forgotten.
+#       With Slirp.max_conns connections open, or to an address that is not
+#       Slirp.dst_ok: RST|ACK (seq 0, ack seq + 1) and no connection.
+#     SynSent (the host is still connecting): everything but a RST is
+#       dropped, unanswered.
+#     RST, known: V.TcpAbort{id}; the connection is forgotten.
+#     Blocked (the host's socket holds too much unsent, V.TcpBlocked):
+#       in-order data is dropped (seq hseq, ack gseq, window 0 answers it)
+#       until V.TcpUnblocked.
 #     known, seq != gseq: an ACK (seq hseq, ack gseq); nothing else.
 #     known, seq == gseq: data (if any) goes to V.TcpSend{id, data} and gseq
 #       advances by its length; then a FIN advances gseq by 1 and sends
@@ -51,7 +59,15 @@ import ./dhcp.bend as D
 #     after GuestFin, V.TcpClose{id} and the connection is forgotten.
 #   UdpData{ip, port, dport, bytes}: a UDP datagram from ip:port to the
 #     guest's dport.
+#   TcpBlocked{id}: the connection is blocked (no frame).
+#   TcpUnblocked{id}: no longer blocked; an ACK (seq hseq, ack gseq) opens
+#     the guest's window again.
+#   TcpReset{id}: RST|ACK (seq hseq, ack gseq), V.TcpClose{id}; the
+#     connection is forgotten.
 #   Events for unknown connections: ignored.
+#
+# The host reads a connection on only while Slirp.may_read (its queue for
+# the guest holds less than Slirp.queue_cap bytes).
 
 def Slirp.guest_ip() -> U32:
   167772687
@@ -77,6 +93,28 @@ def Conn.guest_fin() -> U32:
   2
 def Conn.host_fin() -> U32:
   3
+
+# The blocked mark (V.TcpBlocked), a bit above the state's own values: Conn
+# and Flow are pinned by the snapshot format, so it shares the state word.
+def Conn.blocked() -> U32:
+  256
+
+# A state word's state, its blocked mark dropped.
+def Conn.phase(+state: U32) -> U32:
+  (state .&. 255 : U32)
+
+# The state word with phase p, its blocked mark kept.
+def Conn.with_phase(+state: U32, p: U32) -> U32:
+  ((state .&. Conn.blocked() : U32) .|. p : U32)
+
+# The most connections the NAT keeps open: a SYN past them gets a RST.
+def Slirp.max_conns() -> Nat:
+  256n
+
+# The most bytes a connection queues for the guest (TcpData waiting for the
+# guest's ACK): past them the host reads no more of its socket.
+def Slirp.queue_cap() -> U32:
+  1048576
 
 # The flow toward the guest, in sequence numbers: the guest acknowledged
 # everything before una and takes what lies before wnd (its last ACK plus
@@ -146,7 +184,18 @@ def Conn.id(+c: Conn) -> U32:
 def Conn.state(+c: Conn) -> U32:
   match c:
     case Conn{id, gport, rip, rport, state, gseq, hseq, fl}:
-      state
+      Conn.phase(state)
+
+def Conn.is_blocked(+c: Conn) -> Bool:
+  match c:
+    case Conn{id, gport, rip, rport, state, gseq, hseq, fl}:
+      Bool.not(U32.is_zero((state .&. Conn.blocked() : U32)))
+
+# The ACK of everything the guest sent, with a zero window (blocked).
+def Conn.ack_zero(+c: Conn) -> +List<U32>:
+  match c:
+    case Conn{id, gport, +rip, rport, state, gseq, hseq, fl}:
+      Slirp.ip_frame(rip, 6, W.Tcp.build(rip, Slirp.guest_ip(), W.Tcp{rport, gport, hseq, gseq, 16, 0, 0, []}))
 
 # The connection table.
 
@@ -227,14 +276,33 @@ def Tcp.flag(+flags: U32, f: U32) -> Bool:
 def Tcp.is_open(+flags: U32) -> Bool:
   Tcp.flag(flags, 2) && Bool.not(Tcp.flag(flags, 16))
 
-# Guest segments for an unknown connection: a SYN opens it (the guest's
-# window counts from 2, the first sequence number after the SYN|ACK),
-# anything else gets a RST.
-def Tcp.unknown(syn: Bool, rest: +List<Conn>, +next_id: U32, +rip: U32, +gport: U32, +rport: U32, +seq: U32, ack: U32, win: U32, ws: U32, pl: Payload) -> SlirpOut:
-  match syn:
+# Where the guest may go (TCP and UDP): not 0.0.0.0/8, 127.0.0.0/8 (the
+# host's loopback is 10.0.2.2), 169.254.0.0/16 (link-local: cloud metadata),
+# 224.0.0.0/4 (multicast) or 255.255.255.255, and 10.0.2.3 (the host's
+# resolver) on port 53 only.
+def Slirp.dst_ok(+dst: U32, +port: U32) -> Bool:
+  +a = (dst >> 24n : U32)
+  +bad = U32.is_eq(a, 0) || U32.is_eq(a, 127) || U32.is_eq((dst >> 16n : U32), 43518) || U32.is_eq((dst >> 28n : U32), 14) || U32.is_eq(dst, 4294967295)
+  Bool.not(bad || (U32.is_eq(dst, Slirp.dns_ip()) && U32.is_ne(port, 53)))
+
+# A SYN opens a connection (the guest's window counts from 2, the first
+# sequence number after the SYN|ACK) when ok: below Slirp.max_conns and to
+# an address Slirp.dst_ok; else a RST|ACK refuses it.
+def Tcp.open(ok: Bool, rest: +List<Conn>, +next_id: U32, +rip: U32, +gport: U32, +rport: U32, +seq: U32, win: U32, ws: U32, pl: Payload) -> SlirpOut:
+  match ok:
     case True{}:
       c = {Conn{next_id, gport, rip, rport, Conn.syn_sent(), (seq + 1 : U32), 1, Flow{(2 + win : U32), 2, 2, 2, 0, [], False{}, ws, 0, 0, 1}} : Conn}
       SlirpOut{Slirp{c <> rest, (next_id + 1 : U32)}, [], V.TcpConnect{next_id, rip, rport} <> Payload.drop(pl)}
+    case False{}:
+      SlirpOut{Slirp{rest, next_id}, [Slirp.tcp_frame(rip, rport, gport, 0, (seq + 1 : U32), 20, 0, [])], Payload.drop(pl)}
+
+# Guest segments for an unknown connection: a SYN may open it (Tcp.open),
+# anything else gets a RST.
+def Tcp.unknown(syn: Bool, +rest: +List<Conn>, +next_id: U32, +rip: U32, +gport: U32, +rport: U32, +seq: U32, ack: U32, win: U32, ws: U32, pl: Payload) -> SlirpOut:
+  match syn:
+    case True{}:
+      +ok = Nat.is_lt(List.length(&2, Conn, rest), Slirp.max_conns()) && Slirp.dst_ok(rip, rport)
+      Tcp.open(ok, rest, next_id, rip, gport, rport, seq, win, ws, pl)
     case False{}:
       SlirpOut{Slirp{rest, next_id}, [Slirp.tcp_frame(rip, rport, gport, ack, 0, 4, 0, [])], Payload.drop(pl)}
 
@@ -248,7 +316,7 @@ def Tcp.guest_fin(closing: Bool, c: Conn, rest: +List<Conn>, cmds: +List<V.NetCm
     case False{}:
       match c:
         case Conn{+id, gport, rip, rport, state, gseq, hseq, fl}:
-          (Conn{id, gport, rip, rport, Conn.guest_fin(), (gseq + 1 : U32), hseq, fl} <> rest, List.append(&2, V.NetCmd, cmds, [V.TcpShutdown{id}]))
+          (Conn{id, gport, rip, rport, Conn.with_phase(state, Conn.guest_fin()), (gseq + 1 : U32), hseq, fl} <> rest, List.append(&2, V.NetCmd, cmds, [V.TcpShutdown{id}]))
 
 # c with gseq advanced by one.
 def Conn.fin_seq(c: Conn) -> Conn:
@@ -284,11 +352,20 @@ def Tcp.in_order(c: Conn, rest: +List<Conn>, next_id: U32, +pl: Payload, fin: Bo
       c2 = {Conn{id, gport, rip, rport, state, (gseq + len : U32), hseq, fl} : Conn}
       Tcp.after_data(fin, Bool.not(U32.is_zero(len)), c2, rest, next_id, Payload.send(id, pl))
 
+# An in-order segment; held (data while blocked): dropped, answered with a
+# zero window.
+def Tcp.in_take(held: Bool, +c: Conn, rest: +List<Conn>, next_id: U32, pl: Payload, fin: Bool) -> SlirpOut:
+  match held:
+    case True{}:
+      SlirpOut{Slirp{c <> rest, next_id}, [Conn.ack_zero(c)], Payload.drop(pl)}
+    case False{}:
+      Tcp.in_order(c, rest, next_id, pl, fin)
+
 # A segment on a known connection that is neither a SYN nor a RST.
-def Tcp.in_seq(ok: Bool, +c: Conn, rest: +List<Conn>, next_id: U32, pl: Payload, fin: Bool) -> SlirpOut:
+def Tcp.in_seq(ok: Bool, +c: Conn, rest: +List<Conn>, next_id: U32, +pl: Payload, fin: Bool) -> SlirpOut:
   match ok:
     case True{}:
-      Tcp.in_order(c, rest, next_id, pl, fin)
+      Tcp.in_take(Conn.is_blocked(c) && U32.is_ne(Payload.len(pl), 0), c, rest, next_id, pl, fin)
     case False{}:
       SlirpOut{Slirp{c <> rest, next_id}, [Conn.ack(c)], Payload.drop(pl)}
 
@@ -471,7 +548,7 @@ def Conn.flow(+c: Conn) -> Flow:
 def Conn.fin_sent(c: Conn) -> Conn:
   match c:
     case Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, una, +dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}}:
-      Conn{id, gport, rip, rport, Conn.host_fin(), gseq, (dend + 1 : U32), Flow{wnd, una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}}
+      Conn{id, gport, rip, rport, Conn.with_phase(state, Conn.host_fin()), gseq, (dend + 1 : U32), Flow{wnd, una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}}
 
 def Tcp.fin.done(closing: Bool, +c: Conn, rest: +List<Conn>, next_id: U32, fs: +List<+List<U32>>) -> SlirpOut:
   match closing:
@@ -539,7 +616,7 @@ def Tcp.known(syn: Bool, rst: Bool, +c: Conn, rest: +List<Conn>, next_id: U32, +
     case True{} _:
       SlirpOut{Slirp{c <> rest, next_id}, [], Payload.drop(pl)}
     case False{} True{}:
-      SlirpOut{Slirp{rest, next_id}, [], V.TcpClose{Conn.id(c)} <> Payload.drop(pl)}
+      SlirpOut{Slirp{rest, next_id}, [], V.TcpAbort{Conn.id(c)} <> Payload.drop(pl)}
     case False{} False{}:
       Tcp.in_seq(U32.is_eq(seq, Conn.gseq(c)), c, rest, next_id, pl, fin)
 
@@ -547,6 +624,16 @@ def Tcp.segment.acked(a: Acked, +id: U32, rest: +List<Conn>, next_id: U32, +seq:
   match a:
     case Acked{c2, cs}:
       Tcp.after([], cs, Tcp.push_id(Tcp.known(Tcp.is_open(flags), Tcp.flag(flags, 4), c2, rest, next_id, seq, pl, Tcp.flag(flags, 1)), id))
+
+# A guest segment on known connection c. In SynSent (early) only a RST
+# counts: anything else is dropped and changes nothing.
+def Tcp.segment.known(early: Bool, +c: Conn, rest: +List<Conn>, next_id: U32, +seq: U32, +ack: U32, +flags: U32, +window: U32, +pl: Payload) -> SlirpOut:
+  match early:
+    case True{}:
+      SlirpOut{Slirp{c <> rest, next_id}, [], Payload.drop(pl)}
+    case False{}:
+      +pure = U32.is_zero(Payload.len(pl)) && Bool.not(Tcp.flag(flags, 1)) && Bool.not(Tcp.flag(flags, 2))
+      Tcp.segment.acked(Conn.acked(Tcp.flag(flags, 16), c, ack, window, pure), Conn.id(c), rest, next_id, seq, flags, pl)
 
 # A guest segment t, its data pl (t's own bytes, or staged on the host).
 def Tcp.segment(f: Found, next_id: U32, rip: U32, t: W.Tcp, +pl: Payload, ws: U32) -> SlirpOut:
@@ -560,8 +647,7 @@ def Tcp.segment(f: Found, next_id: U32, rip: U32, t: W.Tcp, +pl: Payload, ws: U3
         case Some{+c}:
           match t:
             case W.Tcp{sport, dport, seq, ack, +flags, window, mss, data}:
-              +pure = U32.is_zero(Payload.len(pl)) && Bool.not(Tcp.flag(flags, 1)) && Bool.not(Tcp.flag(flags, 2))
-              Tcp.segment.acked(Conn.acked(Tcp.flag(flags, 16), c, ack, window, pure), Conn.id(c), rest, next_id, seq, flags, pl)
+              Tcp.segment.known(U32.is_eq(Conn.state(c), Conn.syn_sent()) && Bool.not(Tcp.flag(flags, 4)), c, rest, next_id, seq, ack, flags, window, pl)
 
 # A segment's own bytes, or the staged data when there is a slot.
 def Payload.of(staged: Maybe<&2, Payload>, +t: W.Tcp) -> Payload:
@@ -594,12 +680,12 @@ def Slirp.dhcp(n: Slirp, m: Maybe<&2, +List<U32>>) -> SlirpOut:
       udp = W.Udp.build(gw, bcast, W.Udp{67, 68, r})
       SlirpOut{n, [W.Eth.build(W.Eth{[255, 255, 255, 255, 255, 255], Slirp.gateway_mac(), 2048, W.Ipv4.build(W.Ipv4{gw, bcast, 17, 64, 0, udp})})], []}
 
-def Slirp.udp_to(dhcp: Bool, n: Slirp, sport: U32, dst: U32, dport: U32, data: +List<U32>) -> SlirpOut:
+def Slirp.udp_to(dhcp: Bool, n: Slirp, sport: U32, +dst: U32, +dport: U32, data: +List<U32>) -> SlirpOut:
   match dhcp:
     case True{}:
       Slirp.dhcp(n, D.Dhcp.reply(data))
     case False{}:
-      SlirpOut{n, [], [V.UdpSend{sport, dst, dport, data}]}
+      SlirpOut{n, [], Bool.pick(+List<V.NetCmd>, Slirp.dst_ok(dst, dport), [V.UdpSend{sport, dst, dport, data}], [])}
 
 def Slirp.udp(n: Slirp, dst: U32, m: Maybe<&2, W.Udp>) -> SlirpOut:
   match m:
@@ -726,6 +812,8 @@ type HostTcp is Data:
   HData{bytes: +List<U32>}
   HEof{}
   HReady{len: U32}
+  HBlocked{on: Bool}
+  HReset{}
 
 # The SYN|ACK (MSS 1460): with the window scale option (Tcp.our_scale) when
 # the guest's SYN had one.
@@ -739,6 +827,15 @@ def Tcp.synack(plain: Bool, +c: Conn, seq: U32, ack: U32) -> +List<U32>:
           +opts = {[2, 4, 5, 180, 1, 3, 3, Tcp.our_scale()] : +List<U32>}
           Slirp.ip_frame(rip, 6, W.Tcp.build_opts(rip, Slirp.guest_ip(), W.Tcp{rport, gport, seq, ack, 18, 65535, 0, []}, opts))
 
+# c blocked (on) or not; once unblocked, an ACK opens the guest's window.
+def Tcp.blocked(+on: Bool, c: Conn, rest: +List<Conn>, next_id: U32) -> SlirpOut:
+  match c:
+    case Conn{id, gport, rip, rport, +state, gseq, hseq, fl}:
+      +st = Bool.pick(U32, on, (state .|. Conn.blocked() : U32), Conn.phase(state))
+      +c2 = {Conn{id, gport, rip, rport, st, gseq, hseq, fl} : Conn}
+      +open = Bool.not(on) && U32.is_ne(Conn.phase(st), Conn.syn_sent())
+      SlirpOut{Slirp{c2 <> rest, next_id}, Bool.pick(+List<+List<U32>>, open, [Conn.ack(c2)], []), []}
+
 # A host event on c. Data joins the flow (queued bytes, or a new hold that
 # starts where the data so far ends) and goes out as the guest's window
 # allows; the EOF marks the flow finished.
@@ -748,7 +845,7 @@ def Tcp.host(+c: Conn, rest: +List<Conn>, next_id: U32, h: HostTcp) -> SlirpOut:
       match h:
         case HConnected{}:
           +synack = Tcp.synack(U32.is_eq(sc, Tcp.no_scale()), c, hseq, gseq)
-          c2 = {Conn{id, gport, rip, rport, Conn.established(), gseq, (hseq + 1 : U32), Flow{wnd, una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}} : Conn}
+          c2 = {Conn{id, gport, rip, rport, Conn.with_phase(state, Conn.established()), gseq, (hseq + 1 : U32), Flow{wnd, una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}} : Conn}
           SlirpOut{Slirp{c2 <> rest, next_id}, [synack], []}
         case HRefused{}:
           SlirpOut{Slirp{rest, next_id}, [Conn.frame(c, 20, 0, gseq, 0, [])], []}
@@ -759,6 +856,10 @@ def Tcp.host(+c: Conn, rest: +List<Conn>, next_id: U32, h: HostTcp) -> SlirpOut:
           Tcp.push(Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, una, dend, hbase, hlen, queue, True{}, sc, dack, dwin, bk}}, rest, next_id)
         case HReady{+len}:
           Tcp.push(Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, una, (dend + len : U32), dend, len, queue, eof, sc, dack, dwin, bk}}, rest, next_id)
+        case HBlocked{on}:
+          Tcp.blocked(on, Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}}, rest, next_id)
+        case HReset{}:
+          SlirpOut{Slirp{rest, next_id}, [Conn.frame(c, 20, hseq, gseq, 0, [])], [V.TcpClose{id}]}
 
 def Tcp.host_event(f: Found, next_id: U32, h: HostTcp) -> SlirpOut:
   match f:
@@ -783,9 +884,18 @@ def Slirp.host_event(n: Slirp, ev: V.NetEvent) -> SlirpOut:
           Tcp.host_event(Conns.take(conns, ById{id}), next_id, HEof{})
         case V.TcpReady{id, len}:
           Tcp.host_event(Conns.take(conns, ById{id}), next_id, HReady{len})
+        case V.TcpBlocked{id}:
+          Tcp.host_event(Conns.take(conns, ById{id}), next_id, HBlocked{True{}})
+        case V.TcpUnblocked{id}:
+          Tcp.host_event(Conns.take(conns, ById{id}), next_id, HBlocked{False{}})
+        case V.TcpReset{id}:
+          Tcp.host_event(Conns.take(conns, ById{id}), next_id, HReset{})
         case V.UdpData{+ip, port, dport, bytes}:
           frame = Slirp.ip_frame(ip, 17, W.Udp.build(ip, Slirp.guest_ip(), W.Udp{port, dport, bytes}))
           SlirpOut{Slirp{conns, next_id}, [frame], []}
+
+# On the byte path (no hold) the queue holds the bytes from una to dend, so
+# its counts come from the sequence numbers, in O(1).
 
 # The bytes queued for the guest on every connection (TcpData waiting for
 # room in the guest's window).
@@ -793,14 +903,34 @@ def Conns.queued(cs: +List<Conn>) -> U32:
   match cs:
     case Nil{}:
       0
-    case Conn{id, gport, rip, rport, state, gseq, +hseq, Flow{wnd, +una, dend, hbase, hlen, queue, eof, sc, dack, dwin, bk}} <> t:
+    case Conn{id, gport, rip, rport, state, gseq, +hseq, Flow{wnd, una, +dend, +hbase, +hlen, queue, eof, sc, dack, dwin, bk}} <> t:
       # the queued bytes not yet sent
-      (U32.from_nat(Nat.sub(List.length(&2, U32, queue), U32.to_nat((hseq - una : U32)))) + Conns.queued(t) : U32)
+      (Bool.pick(U32, U32.is_zero(hlen), Flow.room(dend, hseq), 0) + Conns.queued(t) : U32)
 
 def Slirp.queued(n: Slirp) -> U32:
   match n:
     case Slirp{conns, next_id}:
       Conns.queued(conns)
+
+# The bytes connection c queues for the guest, sent or not.
+def Conn.queue_len(+c: Conn) -> U32:
+  match c:
+    case Conn{id, gport, rip, rport, state, gseq, hseq, Flow{wnd, +una, +dend, hbase, +hlen, queue, eof, sc, dack, dwin, bk}}:
+      Bool.pick(U32, U32.is_zero(hlen), Flow.room(dend, una), 0)
+
+def Conns.queue_len(cs: +List<Conn>, +id: U32) -> U32:
+  match cs:
+    case Nil{}:
+      0
+    case +c <> t:
+      Bool.pick(U32, U32.is_eq(Conn.id(c), id), Conn.queue_len(c), Conns.queue_len(t, id))
+
+# Whether the host may read connection id on: its queue for the guest holds
+# less than Slirp.queue_cap bytes (an unknown connection: yes).
+def Slirp.may_read(n: Slirp, +id: U32) -> Bool:
+  match n:
+    case Slirp{conns, next_id}:
+      U32.is_lt(Conns.queue_len(conns, id), Slirp.queue_cap())
 
 # A connection, for the control socket's net command: its addresses, state,
 # sequence numbers and flow toward the guest.

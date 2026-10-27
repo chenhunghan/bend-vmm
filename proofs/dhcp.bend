@@ -15,3 +15,6 @@ def L.dhcp.short_ignored():
 
 def L.dhcp.reply_op_ignored():
   {==}
+
+def L.dhcp.long_ignored():
+  {==}

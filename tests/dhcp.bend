@@ -69,3 +69,7 @@ def main() -> IO(Unit):
     check("dhcp no cookie", D.Dhcp.reply(List.take(&2, U32, req([]), 236n)), "none")
     check("dhcp 239 bytes", D.Dhcp.reply(List.take(&2, U32, req([]), 239n)), "none")
     check("dhcp empty", D.Dhcp.reply([]), "none")
+    check("dhcp 576 option bytes", D.Dhcp.reply(req(cat(B.Bytes.zeros(572n), [53, 1, 1, 255]))), want(2))
+    check("dhcp 577 option bytes", D.Dhcp.reply(req(cat(B.Bytes.zeros(573n), [53, 1, 1, 255]))), "none")
+    check("dhcp option that ends the message", D.Dhcp.reply(req([53, 1, 3, 12, 2, 1, 2])), want(5))
+    check("dhcp option one byte past the message", D.Dhcp.reply(req([12, 3, 1, 2])), "none")

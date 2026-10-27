@@ -362,26 +362,34 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
     m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.net_event(m0, ev))
     put(mc, m1)
 
-# Backpressure: the link to the guest must stay lossless, so a reader waits
-# while too many frames are pending for the guest.
-@unsafe def net_wait(+mc: Chan(M.Machine), fuel: Nat) -> IO(Unit):
-  match fuel:
-    case 0n:
-      IO.pure(Unit, Unit{})
-    case 1n+f:
-      do IO<Unit>:
-        +m : M.Machine <- take(mc)
-        put(mc, m)
-        net_wait.go(U32.is_lt(M.Machine.net_backlog(m), 64), mc, f)
+def net_slirp(m: M.Machine) -> Nt.Slirp:
+  match m:
+    case M.Machine{ps, u, ui, ds, ls, r, ri, n, fl}:
+      n
 
-@unsafe def net_wait.go(ok: Bool, +mc: Chan(M.Machine), fuel: Nat) -> IO(Unit):
+# Whether a reader may read on: few frames pending for the guest, and (a
+# TCP reader, not udp) its connection queues less than Nt.Slirp.queue_cap
+# bytes for the guest.
+def net_room(+m: M.Machine, udp: Bool, +conn: U32) -> Bool:
+  U32.is_lt(M.Machine.net_backlog(m), 64) && (udp || Nt.Slirp.may_read(net_slirp(m), conn))
+
+# Backpressure: the link to the guest must stay lossless, so a reader waits
+# as long as net_room says no (looking again after 2 ms, then less often,
+# at least every 16 ms); it never reads on regardless.
+@unsafe def net_wait(+mc: Chan(M.Machine), +udp: Bool, +conn: U32, +ms: U32) -> IO(Unit):
+  do IO<Unit>:
+    +m : M.Machine <- take(mc)
+    put(mc, m)
+    net_wait.go(net_room(m, udp, conn), mc, udp, conn, ms)
+
+@unsafe def net_wait.go(ok: Bool, +mc: Chan(M.Machine), +udp: Bool, +conn: U32, +ms: U32) -> IO(Unit):
   match ok:
     case True{}:
       IO.pure(Unit, Unit{})
     case False{}:
       do IO<Unit>:
-        IO.sleep(2)
-        net_wait(mc, fuel)
+        IO.sleep(ms)
+        net_wait(mc, udp, conn, U32.min((ms * 2 : U32), 16))
 
 @unsafe def tcp_reader.got(eof: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32, bs: +List<U32>) -> IO(Unit):
   match eof:
@@ -390,7 +398,7 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
     case False{}:
       do IO<Unit>:
         net_deliver(mc, done, V.TcpData{conn, bs})
-        net_wait(mc, 5000n)
+        net_wait(mc, False{}, conn, 2)
         tcp_reader(mc, done, conn)
 
 @unsafe def tcp_reader.small(+mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
@@ -442,7 +450,33 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
     rc : U32 <- H.Hvf.tcp_wait(conn)
     tcp_task.connected(U32.is_zero(rc), mc, done, conn)
 
-@unsafe def udp_task.got(stop: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +sport: U32, +ws: +List<U32>) -> IO(Unit):
+# A NAT connection's flusher (Hvf.tcp_flush): it tells the NAT when the
+# host's pending data for the connection blocks or unblocks it, or when the
+# host reset the connection, and ends once nothing is pending.
+@unsafe def tcp_flusher.got(open: Bool, full: Bool, reset: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  match open full reset:
+    case True{} _ _:
+      do IO<Unit>:
+        net_deliver(mc, done, V.TcpUnblocked{conn})
+        tcp_flusher(mc, done, conn)
+    case False{} True{} _:
+      do IO<Unit>:
+        net_deliver(mc, done, V.TcpBlocked{conn})
+        tcp_flusher(mc, done, conn)
+    case False{} False{} True{}:
+      net_deliver(mc, done, V.TcpReset{conn})
+    case False{} False{} False{}:
+      IO.pure(Unit, Unit{})
+
+@unsafe def tcp_flusher(+mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  do IO<Unit>:
+    +rc : U32 <- H.Hvf.tcp_flush(conn)
+    tcp_flusher.got(U32.is_eq(rc, 0), U32.is_eq(rc, 3), U32.is_eq(rc, 2), mc, done, conn)
+
+# A UDP flow's receiver (flow: its number, Hvf.udp_send): datagrams for
+# guest port sport, as the guest's frames leave room; it ends when the flow
+# closes.
+@unsafe def udp_task.got(stop: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +flow: U32, +sport: U32, +ws: +List<U32>) -> IO(Unit):
   match stop:
     case True{}:
       IO.pure(Unit, Unit{})
@@ -450,12 +484,13 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
       do IO<Unit>:
         dns : U32 <- H.Hvf.dns()
         net_deliver(mc, done, V.UdpData{Ad.Addr.to_guest(H.Host.first(ws), dns), H.Host.first(List.drop(&2, U32, ws, 1n)), sport, List.drop(&2, U32, ws, 2n)})
-        udp_task(mc, done, sport)
+        net_wait(mc, True{}, 0, 2)
+        udp_task(mc, done, flow, sport)
 
-@unsafe def udp_task(+mc: Chan(M.Machine), +done: Chan(U32), +sport: U32) -> IO(Unit):
+@unsafe def udp_task(+mc: Chan(M.Machine), +done: Chan(U32), +flow: U32, +sport: U32) -> IO(Unit):
   do IO<Unit>:
-    +ws : +List<U32> <- H.Hvf.udp_recv(sport)
-    udp_task.got(List.is_empty(&2, U32, ws), mc, done, sport, ws)
+    +ws : +List<U32> <- H.Hvf.udp_recv(flow)
+    udp_task.got(List.is_empty(&2, U32, ws), mc, done, flow, sport, ws)
 
 @unsafe def net_cmd.connect(ok: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
   match ok:
@@ -464,10 +499,19 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
     case False{}:
       IO.spawn(Unit, net_deliver(mc, done, V.TcpRefused{conn}))
 
-@unsafe def net_cmd.udp(fresh: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +sport: U32) -> IO(Unit):
+@unsafe def net_cmd.udp(fresh: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +flow: U32, +sport: U32) -> IO(Unit):
   match fresh:
     case True{}:
-      IO.spawn(Unit, udp_task(mc, done, sport))
+      IO.spawn(Unit, udp_task(mc, done, flow, sport))
+    case False{}:
+      IO.pure(Unit, Unit{})
+
+# Guest data the socket did not take at once waits on the host: a flusher
+# starts when the send says so.
+@unsafe def net_cmd.sent(flush: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  match flush:
+    case True{}:
+      IO.spawn(Unit, tcp_flusher(mc, done, conn))
     case False{}:
       IO.pure(Unit, Unit{})
 
@@ -478,10 +522,10 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
         dns : U32 <- H.Hvf.dns()
         rc : U32 <- H.Hvf.tcp_connect(conn, Ad.Addr.to_host(ip, dns), port)
         net_cmd.connect(U32.is_zero(rc), mc, done, conn)
-    case V.TcpSend{conn, bs}:
+    case V.TcpSend{+conn, bs}:
       do IO<Unit>:
-        _ : U32 <- H.Hvf.tcp_send(conn, bs)
-        return Unit{}
+        rc : U32 <- H.Hvf.nat_send(conn, bs)
+        net_cmd.sent(U32.is_eq(rc, 1), mc, done, conn)
     case V.TcpShutdown{conn}:
       do IO<Unit>:
         _ : U32 <- H.Hvf.tcp_shutdown(conn)
@@ -490,15 +534,19 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
       do IO<Unit>:
         _ : U32 <- H.Hvf.tcp_close(conn)
         return Unit{}
+    case V.TcpAbort{conn}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.tcp_abort(conn)
+        return Unit{}
     case V.UdpSend{+sport, ip, port, bs}:
       do IO<Unit>:
         dns : U32 <- H.Hvf.dns()
-        rc : U32 <- H.Hvf.udp_send(sport, Ad.Addr.to_host(ip, dns), port, bs)
-        net_cmd.udp(U32.is_eq(rc, 1), mc, done, sport)
-    case V.TcpSendStaged{conn, slot}:
+        +rc : U32 <- H.Hvf.udp_send(sport, Ad.Addr.to_host(ip, dns), port, bs)
+        net_cmd.udp(U32.is_ne(rc, 0) && U32.is_ne(rc, 4294967295), mc, done, rc, sport)
+    case V.TcpSendStaged{+conn, slot}:
       do IO<Unit>:
-        _ : U32 <- H.Hvf.tcp_send_staged(conn, slot)
-        return Unit{}
+        rc : U32 <- H.Hvf.tcp_send_staged(conn, slot)
+        net_cmd.sent(U32.is_eq(rc, 1), mc, done, conn)
     case V.StageDrop{slot}:
       do IO<Unit>:
         _ : U32 <- H.Hvf.stage_drop(slot)

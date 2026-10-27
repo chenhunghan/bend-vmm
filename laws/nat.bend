@@ -110,3 +110,53 @@ law nat.ack_opens_window:
 
 law nat.fin_waits_for_data:
   {frames(N.Slirp.host_event(net(N.Slirp.host_event(narrow(), V.TcpData{0, [1, 2, 3]})), V.TcpEof{0})) == [] : +List<+List<U32>>}
+
+# Proposed: hardening against a malicious guest.
+
+# Before the host connected (SynSent), a data segment sends nothing and
+# changes nothing.
+law nat.no_data_before_connect:
+  {(cmds(N.Slirp.guest_frame(after_syn(), guest_tcp(24, 1000, 2, [104, 105]))), net(N.Slirp.guest_frame(after_syn(), guest_tcp(24, 1000, 2, [104, 105])))) == ([], after_syn()) : +List<V.NetCmd> & N.Slirp}
+
+# n connections from guest ports 1 to n (none is 40000).
+def busy(n: Nat) -> +List<N.Conn>:
+  match n:
+    case 0n:
+      []
+    case 1n+(+p):
+      +i = U32.from_nat(p)
+      N.Conn{i, (i + 1 : U32), remote(), 80, 1, 7, 9, N.Flow{9, 9, 9, 9, 0, [], False{}, 4294967295, 9, 0, 1}} <> busy(p)
+
+# A SYN past N.Slirp.max_conns connections gets a RST|ACK and no connect.
+law nat.syn_limit:
+  {(frames(N.Slirp.guest_frame(N.Slirp{busy(256n), 256}, guest_tcp(2, 999, 0, []))), cmds(N.Slirp.guest_frame(N.Slirp{busy(256n), 256}, guest_tcp(2, 999, 0, [])))) == ([host_tcp(20, 0, 1000, 0, [])], []) : +List<+List<U32>> & +List<V.NetCmd>}
+
+# A SYN to 169.254.169.254 (cloud metadata, 2852039166) gets a RST|ACK and
+# no connect; a datagram to 127.0.0.1 (2130706433) or to 10.0.2.3 port 80 is
+# dropped.
+def syn_to(+dst: U32, port: U32) -> +List<U32>:
+  to_host(W.Tcp.build(g(), dst, W.Tcp{40000, port, 999, 0, 2, 65535, 0, []}), dst, 6)
+
+law nat.no_special_dst:
+  {(frames(N.Slirp.guest_frame(N.Slirp.new(), syn_to(2852039166, 80))), cmds(N.Slirp.guest_frame(N.Slirp.new(), syn_to(2852039166, 80))), cmds(N.Slirp.guest_frame(N.Slirp.new(), to_host(W.Udp.build(g(), 2130706433, W.Udp{33000, 53, [7]}), 2130706433, 17))), cmds(N.Slirp.guest_frame(N.Slirp.new(), to_host(W.Udp.build(g(), 167772675, W.Udp{33000, 80, [7]}), 167772675, 17)))) == ([to_guest(2852039166, 6, W.Tcp.build(2852039166, g(), W.Tcp{80, 40000, 0, 1000, 20, 65535, 0, []}))], [], [], []) : +List<+List<U32>> & +List<V.NetCmd> & +List<V.NetCmd> & +List<V.NetCmd>}
+
+# A connection whose queue toward the guest holds n bytes (una 2, dend
+# 2 + n): the counts come from the sequence numbers, so the kernel need not
+# build 1 MiB of queue.
+def queued(n: U32) -> N.Slirp:
+  N.Slirp{[N.Conn{0, 40000, remote(), 80, 1, 1000, 2, N.Flow{2, 2, (2 + n : U32), 2, 0, [], False{}, 4294967295, 2, 0, 1}}], 1}
+
+# The host reads a connection on only while its queue toward the guest
+# holds less than N.Slirp.queue_cap (1 MiB) bytes.
+law nat.queue_bounded:
+  {(N.Slirp.may_read(queued(1048575), 0), N.Slirp.may_read(queued(1048576), 0)) == (True{}, False{}) : Bool & Bool}
+
+# While the host's socket is over its pending cap (TcpBlocked), guest data
+# is not taken: no send, and an ACK of what came before with a zero window.
+law nat.blocked_holds_data:
+  {(cmds(N.Slirp.guest_frame(net(N.Slirp.host_event(established(), V.TcpBlocked{0})), guest_tcp(24, 1000, 2, [104, 105]))), frames(N.Slirp.guest_frame(net(N.Slirp.host_event(established(), V.TcpBlocked{0})), guest_tcp(24, 1000, 2, [104, 105])))) == ([], [to_guest(remote(), 6, W.Tcp.build(remote(), g(), W.Tcp{80, 40000, 2, 1000, 16, 0, 0, []}))]) : +List<V.NetCmd> & +List<+List<U32>>}
+
+# A guest RST aborts the host's socket (V.TcpAbort: its pending data is
+# dropped) and the connection is forgotten.
+law nat.guest_rst_aborts:
+  {(cmds(N.Slirp.guest_frame(established(), guest_tcp(20, 1000, 2, []))), net(N.Slirp.guest_frame(established(), guest_tcp(20, 1000, 2, [])))) == ([V.TcpAbort{0}], N.Slirp{[], 1}) : +List<V.NetCmd> & N.Slirp}

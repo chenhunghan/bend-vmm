@@ -195,6 +195,19 @@ def Hvf.tcp_send(conn: U32, bytes: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+# Guest data on a NAT connection, never waiting: 1 when a flusher must start
+# (Hvf.tcp_flush), else 0.
+def Hvf.nat_send(conn: U32, bytes: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+# A NAT connection's flusher: sends its pending data as the socket takes it.
+# 0: TcpUnblocked, then again; 3: TcpBlocked, then again; 2: TcpReset; 1:
+# done.
+def Hvf.tcp_flush(conn: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.tcp_shutdown(conn: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
@@ -203,11 +216,17 @@ def Hvf.tcp_close(conn: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+# The guest reset a NAT connection: the host resets its socket at once and
+# drops the data it has not sent.
+def Hvf.tcp_abort(conn: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.udp_send(sport: U32, ip: U32, port: U32, bytes: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.udp_recv(sport: U32) -> IO(+List<U32>):
+def Hvf.udp_recv(flow: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 

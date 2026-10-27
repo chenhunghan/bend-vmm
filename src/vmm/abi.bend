@@ -50,6 +50,9 @@ type NetCmd is Data:
   # The guest acknowledged all the host holds for the connection (TcpReady):
   # the host may drop it and read on.
   TcpRelease{conn: U32}
+  # Abort: the guest reset the connection. The host drops the data it has
+  # not sent yet and resets its socket at once (SO_LINGER 0).
+  TcpAbort{conn: U32}
 
 # What the host reports back to the NAT.
 type NetEvent is Data:
@@ -64,6 +67,13 @@ type NetEvent is Data:
   # connection (instead of TcpData when the guest takes big segments): they
   # go to the guest by VmNetToRam, never through Bend.
   TcpReady{conn: U32, len: U32}
+  # The host holds more of the guest's data for the connection than its cap
+  # (its peer reads slowly): the NAT takes no more until TcpUnblocked.
+  TcpBlocked{conn: U32}
+  # The host's pending data for the connection drained below its cap.
+  TcpUnblocked{conn: U32}
+  # The host reset the connection (its peer took no data for too long).
+  TcpReset{conn: U32}
 
 # A piece of guest memory: len bytes at addr. Devices name the memory of a
 # descriptor chain this way, and the host moves bytes in and out of it.

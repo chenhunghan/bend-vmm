@@ -215,9 +215,29 @@ elsewhere. What holds today:
   qcow2 image's
   backing file name is trusted as `qemu-img` trusts it: do not attach
   images from untrusted sources.
-- Not yet: the VMM is not sandboxed (it runs with your user's rights), and
-  the guest's network reaches what your host reaches (10.0.2.2 is the
-  host's loopback).
+- The network (user-mode NAT): the guest reaches what your host reaches,
+  except these, refused by the NAT (a TCP SYN gets a RST, a UDP datagram is
+  dropped): 0.0.0.0/8, 127.0.0.0/8 named directly, 169.254.0.0/16 (link
+  local, where clouds serve instance metadata), 224.0.0.0/4 (multicast) and
+  255.255.255.255; 10.0.2.3 (the host's resolver) takes port 53 only. The
+  host itself stays reachable as 10.0.2.2, which is the host's loopback: a
+  service bound to 127.0.0.1 on the host is open to the guest. The guest
+  holds at most 256 TCP connections and 128 UDP flows (the least recently
+  used closes first; a flow idle for 60 s closes); each UDP flow is a
+  socket connected to the one address and port the guest sent to, so only
+  that peer answers it. No socket send waits: guest data a peer does not
+  take waits on the host, up to 4 MiB per connection and 64 MiB over all
+  connections before the NAT stops taking more from the guest (a zero
+  window); past 32 MiB per connection or 96 MiB in all, or when its peer
+  takes nothing for 60 s, the connection is reset. A guest RST resets the
+  host's socket at once and drops what waits; a closed connection sends
+  what waits for at most 30 s (at most 64 such at once). On macOS the
+  VMM keeps below 1024 descriptors (select() there refuses more); on Linux
+  it raises its soft limit up to 65536. Either way a new flow that would
+  pass the socket budget is refused before the VMM runs out of descriptors. A connection queues at most
+  1 MiB for the guest before the host stops reading its socket. Nothing
+  reaches the host's sockets before the host's connect completes.
+- Not yet: the VMM is not sandboxed (it runs with your user's rights).
 
 ## How it is verified
 
