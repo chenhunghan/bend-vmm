@@ -31,3 +31,5 @@ import ./laws/input.bend as Laws_input
 import ./laws/keymap.bend as Laws_keymap
 import ./laws/pflash.bend as Laws_pflash
 import ./laws/qcow2.bend as Laws_qcow2
+import ./laws/escape.bend as Laws_escape
+import ./laws/addr.bend as Laws_addr

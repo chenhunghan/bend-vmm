@@ -1625,10 +1625,9 @@ Term hvf_random_run(Env e, Term* f, IoWork* w) {
 #include <termios.h>
 
 // When stdin is a terminal it goes raw (keys, Ctrl-C included, go to the
-// guest) and is restored at exit. Ctrl-A then x quits the VMM.
+// guest) and is restored at exit.
 static struct termios hvf_tty;
 static int            hvf_raw;
-static int            hvf_ctrl_a;
 
 static void hvf_tty_restore(void) {
   if (hvf_raw) {
@@ -1649,36 +1648,6 @@ static void hvf_tty_raw(void) {
   }
 }
 
-// Applies the Ctrl-A escape to buf into out (words): Ctrl-A x quits here;
-// Ctrl-A p, Ctrl-A s and Ctrl-A h become the words 256 + 'p' / 's' / 'h'
-// for the VMM to act on; Ctrl-A Ctrl-A sends one Ctrl-A to the guest.
-static ssize_t hvf_escape(const char* buf, ssize_t k, uint32_t* out) {
-  ssize_t n = 0;
-  for (ssize_t i = 0; i < k; i++) {
-    unsigned char ch = (unsigned char)buf[i];
-    if (hvf_ctrl_a) {
-      hvf_ctrl_a = 0;
-      if (ch == 'x') {
-        hvf_tty_restore();
-        fprintf(stderr, "\r\nbend-vmm: quit (Ctrl-A x)\r\n");
-        exit(0);
-      } else if (ch == 'p' || ch == 's' || ch == 'h') {
-        out[n++] = 256u + ch;
-      } else if (ch == 1) {
-        out[n++] = 1;
-      } else {
-        out[n++] = 1;
-        out[n++] = ch;
-      }
-    } else if (ch == 1 && hvf_raw) {
-      hvf_ctrl_a = 1;
-    } else {
-      out[n++] = ch;
-    }
-  }
-  return n;
-}
-
 static Term hvf_stdin_more(Env e, IoWork* w) {
   char    buf[256];
   ssize_t k = read(0, buf, (size_t)w->made);
@@ -1688,19 +1657,22 @@ static Term hvf_stdin_more(Env e, IoWork* w) {
   if (k <= 0) {
     return term_pak(CID(Nil), 0);
   }
-  uint32_t out[512];
-  ssize_t  m = hvf_escape(buf, k, out);
-  if (m == 0) {
-    return io_wait_on(w, 0, POLLIN, 0, hvf_stdin_more);
-  }
   if (hvf_trace & 2) {
-    fprintf(stderr, "[trace] stdin %zd words\n", m);
+    fprintf(stderr, "[trace] stdin %zd bytes\n", k);
   }
-  return hvf_words(e, out, (u64)m);
+  return io_list(e, buf, (u64)k);
+}
+
+// Hvf.stdin_tty() -> U32: 1 when stdin is a terminal (now raw: every key,
+// Ctrl-C included, goes to the guest, and src/dev/escape.bend reads the
+// Ctrl-A keys), else 0.
+Term hvf_stdin_tty_run(Env e, Term* f, IoWork* w) {
+  hvf_tty_raw();
+  return (Term)(u32)hvf_raw;
 }
 
 // Hvf.stdin_wait(max) -> List<U32>: parks until stdin has bytes and answers
-// up to max of them; [] at end of input (or on an error).
+// up to max of them, as typed; [] at end of input (or on an error).
 Term hvf_stdin_wait_run(Env e, Term* f, IoWork* w) {
   hvf_tty_raw();
   fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
@@ -1974,15 +1946,12 @@ Term hvf_inflate_disk_run(Env e, Term* f, IoWork* w) {
 // ============================================
 //
 // TCP connections are keyed by the NAT's connection number, UDP sockets by
-// the guest's source port. Guest addresses map to host ones: 10.0.2.2 (the
-// gateway) is 127.0.0.1, 10.0.2.3 (DNS) is the host's first nameserver in
-// /etc/resolv.conf (1.1.1.1 when there is none); replies map back.
+// the guest's source port. Addresses here are the host's: the Bend side maps
+// the guest's view to them and back (src/net/addr.bend).
 
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#define HVF_GW  0x0A000202u
-#define HVF_DNS 0x0A000203u
 #define HVF_MAX_SOCKS 1024
 
 typedef struct {
@@ -2003,32 +1972,19 @@ typedef struct {
 static HvfSock  hvf_socks[HVF_MAX_SOCKS];
 static uint32_t hvf_dns;
 
-static uint32_t hvf_resolver(void) {
-  if (hvf_dns) {
-    return hvf_dns;
-  }
-  hvf_dns = 0x01010101u;
-  FILE* f = fopen("/etc/resolv.conf", "r");
-  char  line[256], addr[64];
-  while (f && fgets(line, sizeof line, f)) {
-    struct in_addr a;
-    if (sscanf(line, "nameserver %63s", addr) == 1 && inet_pton(AF_INET, addr, &a) == 1) {
-      hvf_dns = ntohl(a.s_addr);
-      break;
-    }
-  }
-  if (f) {
-    fclose(f);
-  }
-  return hvf_dns;
+// The host's resolver (src/net/addr.bend reads /etc/resolv.conf), kept here
+// for the Bend side's address mapping (Hvf.set_dns, Hvf.dns).
+static uint32_t hvf_dns = 0x01010101u;
+
+// Hvf.set_dns(ip) -> U32
+Term hvf_set_dns_run(Env e, Term* f, IoWork* w) {
+  hvf_dns = (u32)f[0];
+  return (Term)0;
 }
 
-static uint32_t hvf_to_host(uint32_t ip) {
-  return ip == HVF_GW ? 0x7F000001u : ip == HVF_DNS ? hvf_resolver() : ip;
-}
-
-static uint32_t hvf_to_guest(uint32_t ip) {
-  return ip == 0x7F000001u ? HVF_GW : ip == hvf_resolver() ? HVF_DNS : ip;
+// Hvf.dns() -> U32
+Term hvf_dns_run(Env e, Term* f, IoWork* w) {
+  return (Term)hvf_dns;
 }
 
 static HvfSock* hvf_sock(uint32_t key, int udp) {
@@ -2096,7 +2052,7 @@ static struct sockaddr_in hvf_addr(uint32_t ip, uint32_t port) {
   struct sockaddr_in a = {0};
   a.sin_family      = AF_INET;
   a.sin_port        = htons((uint16_t)port);
-  a.sin_addr.s_addr = htonl(hvf_to_host(ip));
+  a.sin_addr.s_addr = htonl(ip);
   return a;
 }
 
@@ -2429,7 +2385,7 @@ static Term hvf_udp_recv_more(Env e, IoWork* w) {
   // [ip, port, bytes...]
   Term xs = io_list(e, buf, (u64)n);
   xs = io_node(e, CID(Con), (Term)(u32)ntohs(a.sin_port), xs);
-  return io_node(e, CID(Con), (Term)hvf_to_guest(ntohl(a.sin_addr.s_addr)), xs);
+  return io_node(e, CID(Con), (Term)ntohl(a.sin_addr.s_addr), xs);
 }
 
 // Hvf.udp_recv(sport) -> List<U32>: parks until a datagram arrives for guest
@@ -3646,6 +3602,12 @@ static void __attribute__((constructor)) hvf_use(void) {
 #ifdef CID(Hvf.udp_send)
   io_eff(CID(Hvf.udp_send), hvf_udp_send_run);
 #endif
+#ifdef CID(Hvf.set_dns)
+  io_eff(CID(Hvf.set_dns), hvf_set_dns_run);
+#endif
+#ifdef CID(Hvf.dns)
+  io_eff(CID(Hvf.dns), hvf_dns_run);
+#endif
 #ifdef CID(Hvf.udp_recv)
   io_eff(CID(Hvf.udp_recv), hvf_udp_recv_run);
 #endif
@@ -3738,6 +3700,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.stdin)
   io_eff(CID(Hvf.stdin), hvf_stdin_run);
+#endif
+#ifdef CID(Hvf.stdin_tty)
+  io_eff(CID(Hvf.stdin_tty), hvf_stdin_tty_run);
 #endif
 #ifdef CID(Hvf.stdin_wait)
   io_eff(CID(Hvf.stdin_wait), hvf_stdin_wait_run);

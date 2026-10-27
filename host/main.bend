@@ -11,6 +11,8 @@ import ../src/virtio/device.bend as D
 import ../src/virtio/input.bend as In
 import ../src/dev/keymap.bend as Km
 import ../src/dev/pflash.bend as Pf
+import ../src/dev/escape.bend as Es
+import ../src/net/addr.bend as Ad
 import ../src/boot/image.bend as I
 import ../src/boot/dtb.bend as T
 import ./hvf.bend as H
@@ -427,7 +429,8 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
       IO.pure(Unit, Unit{})
     case False{}:
       do IO<Unit>:
-        net_deliver(mc, done, V.UdpData{H.Host.first(ws), H.Host.first(List.drop(&2, U32, ws, 1n)), sport, List.drop(&2, U32, ws, 2n)})
+        dns : U32 <- H.Hvf.dns()
+        net_deliver(mc, done, V.UdpData{Ad.Addr.to_guest(H.Host.first(ws), dns), H.Host.first(List.drop(&2, U32, ws, 1n)), sport, List.drop(&2, U32, ws, 2n)})
         udp_task(mc, done, sport)
 
 @unsafe def udp_task(+mc: Chan(M.Machine), +done: Chan(U32), +sport: U32) -> IO(Unit):
@@ -453,7 +456,8 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
   match cmd:
     case V.TcpConnect{+conn, ip, port}:
       do IO<Unit>:
-        rc : U32 <- H.Hvf.tcp_connect(conn, ip, port)
+        dns : U32 <- H.Hvf.dns()
+        rc : U32 <- H.Hvf.tcp_connect(conn, Ad.Addr.to_host(ip, dns), port)
         net_cmd.connect(U32.is_zero(rc), mc, done, conn)
     case V.TcpSend{conn, bs}:
       do IO<Unit>:
@@ -469,7 +473,8 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
         return Unit{}
     case V.UdpSend{+sport, ip, port, bs}:
       do IO<Unit>:
-        rc : U32 <- H.Hvf.udp_send(sport, ip, port, bs)
+        dns : U32 <- H.Hvf.dns()
+        rc : U32 <- H.Hvf.udp_send(sport, Ad.Addr.to_host(ip, dns), port, bs)
         net_cmd.udp(U32.is_eq(rc, 1), mc, done, sport)
     case V.TcpSendStaged{conn, slot}:
       do IO<Unit>:
@@ -650,8 +655,8 @@ def pointer_of(arg: String) -> Maybe<&2, In.Hid>:
     +bs : +List<U32> <- H.Hvf.ctl_next()
     ctl_loop.got(List.is_empty(&2, U32, bs), mc, done, bs)
 
-# A console escape (a word above 255): p toggles pause, s snapshots to
-# ./bend-vmm.snap, h prints the keys.
+# A console escape: p toggles pause, s snapshots to ./bend-vmm.snap, h
+# prints the keys.
 @unsafe def escape.run(is_p: Bool, is_s: Bool, paused: Bool, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
   match is_p is_s paused:
     case True{} _ True{}:
@@ -889,27 +894,59 @@ def display.map(d: Maybe<&2, T.Display>) -> IO(Unit):
         IO.sleep(Bool.pick(U32, List.is_empty(&2, U32, List.drop(&2, U32, all, room)), 0, 2))
         input_feed(mc, done, List.drop(&2, U32, all, room), Bool.pick(U32, Nat.is_eq(room, 0n), (tries - 1 : U32), 250))
 
-@unsafe def input_loop.cmd(+mc: Chan(M.Machine), +done: Chan(U32), +key: U32) -> IO(Unit):
-  do IO<Unit>:
-    +st : +List<U32> <- H.Hvf.pause_state()
-    escape.run(U32.is_eq(key, 368), U32.is_eq(key, 371), U32.is_ne(H.Host.first(st), 0), mc, done)
-    input_loop(mc, done)
-
-@unsafe def input_loop.go(eof: Bool, byte: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +bs: +List<U32>) -> IO(Unit):
-  match eof byte:
-    case True{} _:
-      IO.pure(Unit, Unit{})
-    case False{} False{}:
-      input_loop.cmd(mc, done, H.Host.first(bs))
-    case False{} True{}:
+# A console key (src/dev/escape.bend): bytes for the guest's UART, or an
+# escape's action.
+@unsafe def input_key(+mc: Chan(M.Machine), +done: Chan(U32), k: Es.Key) -> IO(Unit):
+  match k:
+    case Es.KBytes{bs}:
+      input_feed(mc, done, bs, 250)
+    case Es.KQuit{}:
       do IO<Unit>:
-        input_feed(mc, done, bs, 250)
-        input_loop(mc, done)
+        log_err("\r\nbend-vmm: quit (Ctrl-A x)\r")
+        IO.exit(0)
+    case Es.KPause{}:
+      do IO<Unit>:
+        +st : +List<U32> <- H.Hvf.pause_state()
+        escape.run(True{}, False{}, U32.is_ne(H.Host.first(st), 0), mc, done)
+    case Es.KSnap{}:
+      escape.run(False{}, True{}, False{}, mc, done)
+    case Es.KHelp{}:
+      escape.run(False{}, False{}, False{}, mc, done)
 
-@unsafe def input_loop(+mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+@unsafe def input_keys(+mc: Chan(M.Machine), +done: Chan(U32), ks: +List<Es.Key>) -> IO(Unit):
+  match ks:
+    case Nil{}:
+      IO.pure(Unit, Unit{})
+    case Con{k, rest}:
+      do IO<Unit>:
+        input_key(mc, done, k)
+        input_keys(mc, done, rest)
+
+@unsafe def input_loop.fed(+mc: Chan(M.Machine), +done: Chan(U32), r: Es.Esc & +List<Es.Key>) -> IO(Unit):
+  match r:
+    case (e, ks):
+      do IO<Unit>:
+        input_keys(mc, done, ks)
+        input_loop(mc, done, e)
+
+@unsafe def input_loop.go(eof: Bool, +mc: Chan(M.Machine), +done: Chan(U32), bs: +List<U32>, e: Es.Esc) -> IO(Unit):
+  match eof:
+    case True{}:
+      IO.pure(Unit, Unit{})
+    case False{}:
+      input_loop.fed(mc, done, Es.Esc.feed(bs, e))
+
+@unsafe def input_loop(+mc: Chan(M.Machine), +done: Chan(U32), e: Es.Esc) -> IO(Unit):
   do IO<Unit>:
     +bs : +List<U32> <- H.Hvf.stdin_wait(64)
-    input_loop.go(List.is_empty(&2, U32, bs), U32.is_lt(H.Host.first(bs), 256), mc, done, bs)
+    input_loop.go(List.is_empty(&2, U32, bs), mc, done, bs, e)
+
+# The console: a terminal's Ctrl-A keys act on the VMM; piped input all
+# goes to the guest.
+@unsafe def input_start(+mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+  do IO<Unit>:
+    tty : U32 <- H.Hvf.stdin_tty()
+    input_loop(mc, done, Es.Esc.new(U32.is_ne(tty, 0)))
 
 # One vCPU: run, hand the exit to the machine, act on the answer, repeat.
 @unsafe def vcpu_loop(+cpu: U32, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
@@ -1218,11 +1255,36 @@ def stopped(+code: U32) -> IO(Unit):
 
 # Runs a machine: the vCPU loops of the given CPUs, console input and the
 # control socket; ends when a vCPU stops the VM.
+def resolver.got(r: File & Result<&1, &1, U32 & String, String>) -> IO(String):
+  match r:
+    case (f, got):
+      do IO<String>:
+        File.close(f)
+        return Result.default(&1, &1, U32 & String, String, got, "")
+
+def resolver.opened(r: Result<&1, &1, U32 & String, File>) -> IO(String):
+  match r:
+    case Fail{e}:
+      IO.pure(String, "")
+    case Done{f}:
+      do IO<String>:
+        got : File & Result<&1, &1, U32 & String, String> <- File.read(f, 65536)
+        resolver.got(got)
+
+# The host's resolver, for the guest's DNS server 10.0.2.3 (src/net/addr.bend).
+def resolver() -> IO(Unit):
+  do IO<Unit>:
+    r : Result<&1, &1, U32 & String, File> <- File.open("/etc/resolv.conf", "r")
+    text : String <- resolver.opened(r)
+    _ : U32 <- H.Hvf.set_dns(Ad.Addr.nameserver(text))
+    return Unit{}
+
 @unsafe def run_machine(+mc: Chan(M.Machine), +done: Chan(U32), +ctl: String, disp: String, cpus: +List<U32>) -> IO(Unit):
   do IO<Unit>:
+    resolver()
     spawn_cpus(mc, done, cpus)
     display.start(display_window(disp), mc, done)
-    IO.spawn(Unit, input_loop(mc, done))
+    IO.spawn(Unit, input_start(mc, done))
     IO.spawn(Unit, vs_accept_loop(mc, done))
     control(String.is_empty(ctl), ctl, mc, done)
     got : Maybe<&1, U32> <- Chan.recv(U32, done)

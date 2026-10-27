@@ -58,6 +58,10 @@ def Hvf.stdin(max: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.stdin_tty() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.stdin_wait(max: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
@@ -115,6 +119,14 @@ def Hvf.inflate_disk(disk: U32, off_hi: U32, off_lo: U32, clen: U32, dst: U32, d
   import "./hvf.js"
 
 # Host sockets for the NAT (see host/hvf.c, "Network").
+def Hvf.set_dns(ip: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.dns() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.tcp_connect(conn: U32, ip: U32, port: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
