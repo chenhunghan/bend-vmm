@@ -81,6 +81,18 @@ def P9.einval() -> U32:
 def P9.eopnotsupp() -> U32:
   95
 
+def P9.emfile() -> U32:
+  24
+
+# The most fids the table holds: a new fid past it is EMFILE.
+def P9.max_fids() -> Nat:
+  4096n
+
+# The permission bits a guest may set on a host file (0777): never setuid,
+# setgid or sticky.
+def P9.mode(m: U32) -> U32:
+  (m .&. 511 : U32)
+
 # The largest msize this server accepts: reads and writes move their data on
 # the host, so a large one costs Bend nothing per byte and saves requests.
 def P9.max_msize() -> U32:
@@ -121,12 +133,30 @@ def P9.fid_find(fids: +List<Fid>, +fid: U32) -> Maybe<&2, Fid>:
     case +f <> t:
       Bool.pick(Maybe<&2, Fid>, U32.is_eq(Fid.id(f), fid), Some{f}, P9.fid_find(t, fid))
 
+def P9.fid_drop.go(hit: Bool, f: Fid, rest: +List<Fid>) -> +List<Fid>:
+  match hit:
+    case True{}:
+      rest
+    case False{}:
+      f <> rest
+
+# The table without fid. One recursive call per entry: both arms of a
+# Bool.pick are evaluated, so recursing in each would take 2^n steps.
 def P9.fid_drop(fids: +List<Fid>, +fid: U32) -> +List<Fid>:
   match fids:
     case Nil{}:
       []
-    case +f <> +t:
-      Bool.pick(+List<Fid>, U32.is_eq(Fid.id(f), fid), P9.fid_drop(t, fid), f <> P9.fid_drop(t, fid))
+    case +f <> t:
+      P9.fid_drop.go(U32.is_eq(Fid.id(f), fid), f, P9.fid_drop(t, fid))
+
+# Whether a fid can be bound in a table of n fids: it already is (bound),
+# or the table has room.
+def P9.room(bound: Bool, n: Nat) -> Bool:
+  bound || Nat.is_lt(n, P9.max_fids())
+
+# Whether fid can be bound in the table fids.
+def P9.fid_room(+fids: +List<Fid>, +fid: U32) -> Bool:
+  P9.room(Maybe.is_some(&2, Fid, P9.fid_find(fids, fid)), List.length(&2, Fid, fids))
 
 # The state with fid bound to f (replacing any earlier binding).
 def P9.bind(s: P9State, +f: Fid) -> P9State:
@@ -335,9 +365,23 @@ def P9.version(-R: Type, +tag: U32, +msize: U32, version: +List<U32>) -> V.Op<R,
   +exact = P9.bytes_eq(version, want)
   P9.answer(R, P9State{m, []}, tag, W.Rversion{m, Bool.pick(+List<U32>, exact, want, B.Bytes.of_string("unknown"))})
 
-# Tattach: fid names the root.
-def P9.attach(-R: Type, +share: U32, s: P9State, +tag: U32, +fid: U32) -> V.Op<R, P9Answer>:
+# k, when fid can be bound (P9.fid_room); else Rlerror EMFILE.
+def P9.with_room.go(-R: Type, room: Bool, s: P9State, +tag: U32, k: P9State -> V.Op<R, P9Answer>) -> V.Op<R, P9Answer>:
+  match room:
+    case True{}:
+      k(s)
+    case False{}:
+      P9.err(R, s, tag, P9.emfile())
+
+def P9.with_room(-R: Type, +s: P9State, +tag: U32, +fid: U32, k: P9State -> V.Op<R, P9Answer>) -> V.Op<R, P9Answer>:
+  P9.with_room.go(R, P9.fid_room(P9State.fids(s), fid), s, tag, k)
+
+def P9.attach.go(-R: Type, +share: U32, s: P9State, +tag: U32, +fid: U32) -> V.Op<R, P9Answer>:
   P9.reply_qid(R, share, P9.bind(s, Fid{fid, "", False{}}), tag, "", q => W.Rattach{q})
+
+# Tattach: fid names the root (EMFILE when the table is full).
+def P9.attach(-R: Type, +share: U32, +s: P9State, +tag: U32, +fid: U32) -> V.Op<R, P9Answer>:
+  P9.with_room(R, s, tag, fid, s2 => P9.attach.go(R, share, s2, tag, fid))
 
 # The outcome of a walk: an error, or the path reached, the qids found and
 # whether every name was walked.
@@ -383,9 +427,12 @@ def P9.walk.fin(-R: Type, w: P9Walk, s: P9State, +tag: U32, +newfid: U32) -> V.O
     case WalkOk{p, qids, False{}}:
       P9.answer(R, s, tag, W.Rwalk{qids})
 
-# Twalk.
-def P9.walk(-R: Type, +share: U32, +s: P9State, +tag: U32, +fid: U32, +newfid: U32, names: +List<+List<U32>>) -> V.Op<R, P9Answer>:
+def P9.walk.from(-R: Type, +share: U32, +s: P9State, +tag: U32, +fid: U32, +newfid: U32, names: +List<+List<U32>>) -> V.Op<R, P9Answer>:
   P9.with_fid(R, s, tag, fid, f => V.Op.bind(R, P9Walk, P9Answer, P9.walk.go(names, R, share, Fid.path(f), []), w => P9.walk.fin(R, w, s, tag, newfid)))
+
+# Twalk (EMFILE when newfid is new and the table is full).
+def P9.walk(-R: Type, +share: U32, +s: P9State, +tag: U32, +fid: U32, +newfid: U32, names: +List<+List<U32>>) -> V.Op<R, P9Answer>:
+  P9.with_room(R, s, tag, newfid, s2 => P9.walk.from(R, share, s2, tag, fid, newfid, names))
 
 def P9.getattr.go(-R: Type, +share: U32, +s: P9State, +tag: U32, path: String) -> V.Op<R, P9Answer>:
   do V.Op<R, P9Answer>:
@@ -408,7 +455,7 @@ def P9.maybe_op(-R: Type, go: Bool, +share: U32, op: V.FsOp) -> V.Op<R, U32>:
 
 def P9.setattr.go(-R: Type, +share: U32, +s: P9State, +tag: U32, +path: String, +valid: U32, mode: U32, size: U.U64) -> V.Op<R, P9Answer>:
   do V.Op<R, P9Answer>:
-    +e1 : U32 <- P9.maybe_op(R, U32.is_ne((valid .&. 1 : U32), 0), share, V.FsChmod{path, (mode .&. 4095 : U32)})
+    +e1 : U32 <- P9.maybe_op(R, U32.is_ne((valid .&. 1 : U32), 0), share, V.FsChmod{path, P9.mode(mode)})
     e2 : U32 <- P9.maybe_op(R, U32.is_zero(e1) && U32.is_ne((valid .&. 8 : U32), 0), share, V.FsTruncate{path, size})
     P9.done(R, s, tag, P9.first(e1, e2), W.Rsetattr{})
 
@@ -430,7 +477,7 @@ def P9.lopen(-R: Type, +share: U32, +s: P9State, +tag: U32, +fid: U32) -> V.Op<R
 
 def P9.lcreate.go(-R: Type, +share: U32, +s: P9State, +tag: U32, +fid: U32, +path: String, mode: U32) -> V.Op<R, P9Answer>:
   do V.Op<R, P9Answer>:
-    r : V.FsResult <- V.Op.fs(R, share, V.FsCreate{path, (mode .&. 4095 : U32)})
+    r : V.FsResult <- V.Op.fs(R, share, V.FsCreate{path, P9.mode(mode)})
     P9.on_ok(R, r, s, tag, u => P9.open_fid(R, share, s, tag, fid, path, q => n => W.Rlcreate{q, n}))
 
 # Tlcreate: creates name in the directory fid names; fid then names the new
@@ -440,7 +487,7 @@ def P9.lcreate(-R: Type, +share: U32, +s: P9State, +tag: U32, +fid: U32, +name: 
 
 def P9.mkdir.go(-R: Type, +share: U32, +s: P9State, +tag: U32, +path: String, mode: U32) -> V.Op<R, P9Answer>:
   do V.Op<R, P9Answer>:
-    r : V.FsResult <- V.Op.fs(R, share, V.FsMkdir{path, (mode .&. 4095 : U32)})
+    r : V.FsResult <- V.Op.fs(R, share, V.FsMkdir{path, P9.mode(mode)})
     P9.on_ok(R, r, s, tag, u => P9.reply_qid(R, share, s, tag, path, q => W.Rmkdir{q}))
 
 # Tmkdir.
@@ -519,13 +566,19 @@ def P9.index(o: U.U64) -> U32:
     case U.U64{h, l}:
       Bool.pick(U32, U32.is_zero(h), l, 4294967295)
 
-def P9.readdir.go(-R: Type, +share: U32, +s: P9State, +tag: U32, path: String, offset: U.U64, +count: U32) -> V.Op<R, P9Answer>:
+# A Treaddir count, at most msize - 24 (the reply must fit msize).
+def P9.readdir_count(+msize: U32, +count: U32) -> U32:
+  U32.min(count, P9.sub_sat(msize, 24))
+
+def P9.readdir.go(-R: Type, +share: U32, +s: P9State, +tag: U32, path: String, offset: U.U64, count0: U32) -> V.Op<R, P9Answer>:
   +from = P9.index(offset)
+  +count = P9.readdir_count(P9State.msize(s), count0)
   do V.Op<R, P9Answer>:
     r : V.FsResult <- V.Op.fs(R, share, V.FsList{path, from, U32.div(count, 24)})
     P9.on_entries(R, r, s, tag, from, count)
 
-# Treaddir: entries from index offset on, as many as fit in count bytes.
+# Treaddir: entries from index offset on, as many as fit in count bytes
+# (count at most msize - 24).
 def P9.readdir(-R: Type, +share: U32, +s: P9State, +tag: U32, +fid: U32, +offset: U.U64, +count: U32) -> V.Op<R, P9Answer>:
   P9.with_fid(R, s, tag, fid, f => P9.readdir.go(R, share, s, tag, Fid.path(f), offset, count))
 
@@ -632,13 +685,14 @@ def P9.handle(-R: Type, share: U32, s: P9State, m: Maybe<&2, W.P9Msg>) -> V.Op<R
     case Some{msg}:
       P9.serve(R, share, s, msg)
 
-# Writes the reply into the chain and pushes it used with the reply's length.
+# Writes the reply into the chain and pushes it used with the length that
+# fit the writable descriptors (the whole reply when they hold it).
 def P9.reply_chain(-R: Type, a: P9Answer, q: Q.Vq, +h: U32, w: +List<Q.Desc>) -> V.Op<R, P9Pass>:
   match a:
-    case P9Answer{st, +reply}:
+    case P9Answer{st, reply}:
       do V.Op<R, P9Pass>:
         n : U32 <- Q.Vq.scatter(R, Q.Chain{h, [], w}, reply)
-        q2 : Q.Vq <- Q.Vq.push(R, q, h, U32.from_nat(List.length(&2, U32, reply)))
+        q2 : Q.Vq <- Q.Vq.push(R, q, h, n)
         return P9Pass{st, q2, True{}}
 
 # Answers an error the generic way.
@@ -714,17 +768,29 @@ def P9.path(+hdr: +List<U32>) -> Nat:
   +t = Maybe.default(&2, U32, List.get(&2, U32, hdr, 4n), 0)
   Bool.pick(Nat, full && U32.is_eq(t, 116), 1n, Bool.pick(Nat, full && U32.is_eq(t, 118), 2n, 0n))
 
-def P9.serve_path(-R: Type, k: Nat, +share: U32, s: P9State, q: Q.Vq, +h: U32, +r: +List<Q.Desc>, +w: +List<Q.Desc>, +hdr: +List<U32>) -> V.Op<R, P9Pass>:
+# A request served whole: its readable bytes ss (at most msize + 1 of them)
+# are parsed, unless they pass msize (long): Rlerror EINVAL with the tag of
+# hdr, nothing more read.
+def P9.serve_whole(-R: Type, long: Bool, +share: U32, s: P9State, q: Q.Vq, +h: U32, ss: +List<V.Iov>, +w: +List<Q.Desc>, hdr: +List<U32>) -> V.Op<R, P9Pass>:
+  match long:
+    case True{}:
+      P9.reply_err(R, s, B.Bytes.read_le16(List.drop(&2, U32, hdr, 5n)), P9.einval(), q, h, w)
+    case False{}:
+      do V.Op<R, P9Pass>:
+        req : +List<U32> <- Q.Vq.read_segs(R, ss)
+        a : P9Answer <- P9.handle(R, share, s, W.P9.parse(req))
+        P9.reply_chain(R, a, q, h, w)
+
+def P9.serve_path(-R: Type, k: Nat, +share: U32, +s: P9State, q: Q.Vq, +h: U32, +r: +List<Q.Desc>, +w: +List<Q.Desc>, +hdr: +List<U32>) -> V.Op<R, P9Pass>:
   match k:
     case 1n:
       P9.read_fast(R, share, s, hdr, q, h, w)
     case 2n:
       P9.write_fast(R, share, s, hdr, r, q, h, w)
     case _:
-      do V.Op<R, P9Pass>:
-        req : +List<U32> <- Q.Vq.gather(R, Q.Chain{h, r, []})
-        a : P9Answer <- P9.handle(R, share, s, W.P9.parse(req))
-        P9.reply_chain(R, a, q, h, w)
+      +m = P9State.msize(s)
+      +ss = Q.Vq.segs(r, 0, (m + 1 : U32))
+      P9.serve_whole(R, U32.is_lt(m, V.Iov.total(ss)), share, s, q, h, ss, w, hdr)
 
 # Serves one chain. Reads and writes move their data between the file and
 # the chain's memory on the host; every other request is parsed whole.

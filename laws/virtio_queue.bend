@@ -30,3 +30,13 @@ law virtio_queue.segs_cut_at_max:
 
 law virtio_queue.segs_nothing_past_max:
   {Q.Vq.segs([Q.Desc{U.U64{0, 100}, 300, 2, 1}, Q.Desc{U.U64{0, 500}, 300, 2, 0}], 0, 300) == [V.Iov{U.U64{0, 100}, 300}] : +List<V.Iov>}
+
+# Proposed: Vq.from_cfg clamps num to num_max (a second line behind the
+# transport's check).
+law virtio_queue.from_cfg_clamps:
+  {Q.Vq.from_cfg(M.QueueCfg{256, 65535, True{}, U.U64{0, 4096}, U.U64{0, 8192}, U.U64{0, 12288}}) == Q.Vq{256, U.U64{0, 4096}, U.U64{0, 8192}, U.U64{0, 12288}, 0, 0} : Q.Vq}
+
+# Proposed: the memory a bounded read names (Vq.segs with a cap) never
+# totals more than the cap, however long the chain says it is.
+law virtio_queue.segs_total_capped:
+  {V.Iov.total(Q.Vq.segs([Q.Desc{U.U64{0, 100}, 4294967295, 1, 1}, Q.Desc{U.U64{0, 500}, 4294967295, 1, 0}], 0, 65536)) == 65536 : U32}

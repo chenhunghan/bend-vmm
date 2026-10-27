@@ -105,14 +105,16 @@ def Mmio.half(+off: U32, +lo: U32, +v: U32, a: U.U64) -> U.U64:
     case U.U64{h, l}:
       U.U64{Mmio.pick(U32.is_eq(off, (lo + 4 : U32)), v, h), Mmio.pick(U32.is_eq(off, lo), v, l)}
 
-# A queue register write (QueueNum, QueueReady, the six address halves).
+# A queue register write (QueueNum, QueueReady, the six address halves). A
+# QueueNum above QueueNumMax is dropped (the old value stays): the guest's
+# number sizes the device's loops.
 def Mmio.qwrite(c: QueueCfg, +off: U32, +v: U32) -> QueueCfg:
   match c:
-    case QueueCfg{nm, n, r, d, dr, dv}:
+    case QueueCfg{+nm, n, r, d, dr, dv}:
       ready = Mmio.pick_b(U32.is_eq(off, 68), U32.is_ne((v .&. 1 : U32), 0), r)
       QueueCfg{
         nm,
-        Mmio.pick(U32.is_eq(off, 56), v, n),
+        Mmio.pick(U32.is_eq(off, 56) && U32.is_le(v, nm), v, n),
         ready,
         Mmio.half(off, 128, v, d),
         Mmio.half(off, 144, v, dr),

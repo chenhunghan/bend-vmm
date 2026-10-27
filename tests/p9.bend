@@ -526,6 +526,95 @@ def process_rw() -> IO(Unit):
     check_q("p9 process write then read", run_q(S.Sim.write(machine(wr, 2, [0, 3], twrite(1, 0, 3), tread(1, 0, 100)), u64(16600), str("HEL")), opened),
       18432, cat([22, 0, 0, 0, 117, 3, 0, 11, 0, 0, 0], str("HELlo world")), cat([0, 0, 2, 0], le32s([0, 11, 3, 22])), True{}, 2)
 
+# The longest guest read a program asks for, running it on the simulator's
+# memory up to its first effect other than a read or a write; reads past
+# 4096 bytes answer nothing (too large for the simulator's lists).
+def longest(fuel: Nat, -A: Type, s: S.Sim, m: V.Vm<A>, +top: U32) -> U32:
+  match fuel:
+    case 0n:
+      top
+    case 1n+f:
+      match m:
+        case V.VmRead{+a, +n, k}:
+          +s = s
+          +big = U32.is_lt(4096, n)
+          longest(f, A, s, k(Bool.pick(+List<U32>, big, [], S.Sim.read(s, a, n))), U32.max(top, n))
+        case V.VmWrite{a, bs, next}:
+          longest(f, A, S.Sim.write(s, a, bs), next, top)
+        case _:
+          top
+
+# Chains past what the guest negotiated or posted: a request longer than
+# msize is not read but answered Rlerror EINVAL with its tag; a reply longer
+# than the writable buffer is pushed used with the length that fit.
+def process_bounds() -> IO(Unit):
+  +attached = {P.P9State{8192, [P.Fid{0, "", False{}}]} : P.P9State}
+  # a 19-byte Tgetattr in a readable descriptor of 8193 bytes (msize 8192)
+  +long = cat(desc(16384, 8193, 1, 1), desc(17408, 1024, 2, 0))
+  +huge = cat(desc(16384, 4294967295, 1, 1), desc(17408, 1024, 2, 0))
+  +small = cat(desc(16384, 19, 1, 1), desc(17408, 10, 2, 0))
+  do IO<Unit>:
+    check_q("p9 process request past msize", run_q(machine(long, 1, [0], tgetattr(0), []), attached),
+      17408, [11, 0, 0, 0, 7, 2, 0, 22, 0, 0, 0], cat([0, 0, 1, 0], le32s([0, 11])), True{}, 1)
+    T.eq_u32("p9 process reads at most msize of a request", longest(1000n, P.P9Pass, machine(huge, 1, [0], tgetattr(0), []), V.Op.finish(P.P9Pass, P.P9.process(P.P9Pass, 0, attached, vq())), 0), 23)
+    check_q("p9 process reply cut to the buffer", run_q(machine(small, 1, [0], tgetattr(0), []), attached),
+      17408, [160, 0, 0, 0, 25, 2, 0, 255, 7, 0], cat([0, 0, 1, 0], le32s([0, 10])), True{}, 1)
+
+# 15. Guest numbers are bounded: mode bits past 0777 (setuid, setgid,
+# sticky) never reach the host; Treaddir's count is clamped to msize - 24.
+def bounds() -> IO(Unit):
+  do IO<Unit>:
+    scenario("p9 mode bits", [
+      version(), attach(),
+      Step{walk(0, 1, [str("hello.txt")]), W.Rwalk{[qid(0, 3)]}},
+      # 0o104755: setuid dropped
+      Step{W.Tsetattr{1, 1, 35309, 0, 0, u64(0)}, W.Rsetattr{}},
+      Step{getattr(1), stat(0, 33261, 1, 11, 3)},
+      # 0o1777: sticky dropped
+      Step{W.Tmkdir{0, str("sub"), 1023, 0}, W.Rmkdir{qid(128, 7)}},
+      Step{walk(0, 2, [str("sub")]), W.Rwalk{[qid(128, 7)]}},
+      Step{getattr(2), stat(128, 16895, 2, 0, 7)},
+      # 0o6644: setuid and setgid dropped
+      Step{walk(0, 3, []), W.Rwalk{[]}},
+      Step{W.Tlcreate{3, str("new.txt"), 2, 3492, 0}, W.Rlcreate{qid(0, 8), iounit()}},
+      Step{getattr(3), stat(0, 33188, 1, 0, 8)}
+    ])
+    scenario("p9 readdir count clamped to msize - 24", [
+      Step{W.Tversion{100, str("9P2000.L")}, W.Rversion{100, str("9P2000.L")}},
+      attach(),
+      Step{walk(0, 1, []), W.Rwalk{[]}},
+      Step{W.Tlopen{1, 0}, W.Rlopen{root_qid(), 76}},
+      # 76 bytes: "hello.txt" (33) and "dir" (27) fit, "link" (28) does not.
+      Step{readdir(1, 0, 8192), W.Rreaddir{[dirent(0, 3, 1, 8, "hello.txt"), dirent(128, 4, 2, 4, "dir")]}}
+    ])
+
+# n fids, numbered from 100 + n - 1 down to 100, each naming the root.
+def fids(n: Nat) -> +List<P.Fid>:
+  match n:
+    case 0n:
+      []
+    case 1n+(+p):
+      P.Fid{(100 + U32.from_nat(p) : U32), "", False{}} <> fids(p)
+
+def run_st(fs: F.SimFs, st: P.P9State, rs: +List<W.P9Req>) -> Maybe<&1, S.Sim & Out>:
+  +s = S.Sim.with_fs(S.Sim.new(u64(4096), 0n), fs)
+  S.Sim.exec(Out, s, session(rs, Out, 1, st, []))
+
+# 16. The fid table holds at most 4096 fids: a new fid past that is EMFILE
+# (24); rebinding a fid in the table, or one freed by clunk, still works.
+def fid_cap_steps() -> +List<Step>:
+  [
+    Step{W.Tattach{7, nofid(), str("root"), str(""), 0}, err(24)},
+    Step{walk(100, 7, []), err(24)},
+    Step{walk(100, 101, [str("dir")]), W.Rwalk{[qid(128, 4)]}},
+    Step{W.Tclunk{102}, W.Rclunk{}},
+    Step{walk(100, 7, [str("hello.txt")]), W.Rwalk{[qid(0, 3)]}},
+    Step{walk(100, 8, []), err(24)}
+  ]
+
+def fid_cap() -> IO(Unit):
+  check_out("p9 fid cap", run_st(share(), P.P9State{65536, fids(4096n)}, reqs(fid_cap_steps())), wants(fid_cap_steps(), 1))
+
 def main() -> IO(Unit):
   do IO<Unit>:
     mount()
@@ -545,3 +634,6 @@ def main() -> IO(Unit):
     errnos()
     process()
     process_rw()
+    bounds()
+    fid_cap()
+    process_bounds()

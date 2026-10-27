@@ -68,8 +68,32 @@ def check_empty(r: Maybe<&1, S.Sim & (Q.Vq & Bool)>) -> IO(Unit):
         T.eq_str("rng empty used ring", show(S.Sim.read(s, u64(12288), 4)), "[0, 0, 0, 0]")
         T.ok("rng empty state", Q.Vq.is_eq(q, vq()))
 
+# Chain 0 as one WRITE descriptor of 4294967295 bytes at 16384: the device
+# asks the host for at most 65536 bytes (a short fill is legal). The program
+# runs on the simulator's memory up to its first VmRandom, whose length is
+# the answer (the fill itself is too large for the simulator's lists).
+def big() -> S.Sim:
+  +s = S.Sim.new(u64(4096), 12320n)
+  s = S.Sim.write(s, u64(4096), [0, 64, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 2, 0, 0, 0])
+  S.Sim.write(s, u64(8192), [0, 0, 1, 0, 0, 0])
+
+def asked(fuel: Nat, -A: Type, s: S.Sim, m: V.Vm<A>) -> U32:
+  match fuel:
+    case 0n:
+      0
+    case 1n+f:
+      match m:
+        case V.VmRead{+a, n, k}:
+          +s = s
+          asked(f, A, s, k(S.Sim.read(s, a, n)))
+        case V.VmRandom{n, k}:
+          n
+        case _:
+          0
+
 def main() -> IO(Unit):
   do IO<Unit>:
     check_one(run(mem([0, 0, 1, 0, 0, 0])))
     check_two(run(mem([0, 0, 2, 0, 0, 0, 1, 0])))
     check_empty(run(mem([0, 0, 0, 0])))
+    T.eq_u32("rng asks for at most 65536 bytes", asked(100n, Q.Vq & Bool, big(), V.Op.finish(Q.Vq & Bool, Rng.Rng.process(Q.Vq & Bool, vq()))), 65536)

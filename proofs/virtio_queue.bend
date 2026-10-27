@@ -22,3 +22,9 @@ def L.virtio_queue.segs_cut_at_max():
 
 def L.virtio_queue.segs_nothing_past_max():
   {==}
+
+def L.virtio_queue.from_cfg_clamps():
+  {==}
+
+def L.virtio_queue.segs_total_capped():
+  {==}

@@ -19,12 +19,13 @@ import ./input.bend as In
 # Every kind offers VIRTIO_F_VERSION_1 (feature bit 32); queues hold 256
 # entries:
 #   RngKind:     device id 4, one queue, empty config space, no other feature
-#   BlkKind:     device id 2, one queue, config space Blk.config(sectors),
-#                also VIRTIO_BLK_F_FLUSH (Blk.features(False))
+#   BlkKind:     device id 2, one queue, config space
+#                Blk.config_limits(sectors), also VIRTIO_BLK_F_FLUSH,
+#                SIZE_MAX and SEG_MAX (Blk.offered(False))
 #   BlkRoKind:   a read-only BlkKind, also VIRTIO_BLK_F_RO
 #   BlkStoreKind: a BlkKind (BlkRoKind when ro) over a store (qcow2:
 #                src/disk/store.bend)
-#                (Blk.features(True)); OUT requests answer IOERR
+#                (Blk.offered(True)); OUT requests answer IOERR
 #   ConsoleKind: virtio-console, device id 3, two queues (0 receiveq0,
 #                1 transmitq0), empty config space, no other feature
 #   InputKind:   virtio-input, device id 18, two queues (0 eventq, 1
@@ -104,11 +105,11 @@ def Dev.mmio(kind: DevKind) -> M.VirtioMmio:
     case RngKind{}:
       M.VirtioMmio.new(4, Dev.features(), 1n, 256, [])
     case BlkKind{disk, sectors}:
-      M.VirtioMmio.new(2, Blk.Blk.features(False{}), 1n, 256, Blk.Blk.config(sectors))
+      M.VirtioMmio.new(2, Blk.Blk.offered(False{}), 1n, 256, Blk.Blk.config_limits(sectors))
     case BlkRoKind{disk, sectors}:
-      M.VirtioMmio.new(2, Blk.Blk.features(True{}), 1n, 256, Blk.Blk.config(sectors))
+      M.VirtioMmio.new(2, Blk.Blk.offered(True{}), 1n, 256, Blk.Blk.config_limits(sectors))
     case BlkStoreKind{store, sectors, +ro}:
-      M.VirtioMmio.new(2, Blk.Blk.features(ro), 1n, 256, Blk.Blk.config(sectors))
+      M.VirtioMmio.new(2, Blk.Blk.offered(ro), 1n, 256, Blk.Blk.config_limits(sectors))
     case ConsoleKind{}:
       M.VirtioMmio.new(3, Dev.features(), 2n, 256, [])
     case NetKind{mac}:

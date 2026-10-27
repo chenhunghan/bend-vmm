@@ -131,6 +131,42 @@ def check_rx(
         T.ok(name ++ " state", Q.Vq.is_eq(q, vq(na, na)))
         T.eq_str(name ++ " buffers", regions(s, rs), bufs)
 
+# A TCP segment whose IPv4 total length (140) claims 100 payload bytes
+# after 54 bytes of headers, in one readable descriptor 5 at 4608 holding
+# the virtio_net_hdr, the headers and `pl` payload bytes.
+def tcp_head() -> +List<U32>:
+  [2, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 2, 8, 0, 69, 0, 0, 140, 0, 0, 0, 0, 64, 6, 0, 0, 10, 0, 2, 15, 10, 0, 2, 2, 0, 80, 0, 81, 0, 0, 0, 1, 0, 0, 0, 1, 80, 24, 1, 0, 0, 0, 0, 0]
+
+def tcp_mem(pl: U32) -> S.Sim:
+  s = S.Sim.new(u64(4096), 1024n)
+  s = desc(s, 5, 4608, (66 + pl : U32), 0, 0)
+  s = S.Sim.write(s, u64(4608), List.append(&2, U32, B.Bytes.zeros(12n), tcp_head()))
+  avail(s, [5])
+
+# The longest guest read a program asks for, running it on the simulator's
+# memory up to its first effect other than a read, a write or a stage;
+# reads past 4096 bytes answer nothing (too large for the simulator's lists).
+def longest(fuel: Nat, -A: Type, s: S.Sim, m: V.Vm<A>, +top: U32) -> U32:
+  match fuel:
+    case 0n:
+      top
+    case 1n+f:
+      match m:
+        case V.VmRead{+a, +n, k}:
+          +s = s
+          +big = U32.is_lt(4096, n)
+          longest(f, A, s, k(Bool.pick(+List<U32>, big, [], S.Sim.read(s, a, n))), U32.max(top, n))
+        case V.VmWrite{a, bs, next}:
+          longest(f, A, S.Sim.write(s, a, bs), next, top)
+        case _:
+          top
+
+# A transmit chain of one readable descriptor 4294967295 bytes long (no TCP
+# segment): the device reads at most a 64 KiB frame and its header of it.
+def tx_huge() -> U32:
+  s = desc(S.Sim.new(u64(4096), 1024n), 5, 4608, 4294967295, 0, 0)
+  longest(100n, N.NetTx, avail(s, [5]), V.Op.finish(N.NetTx, N.Net.tx(N.NetTx, vq(0, 0))), 0)
+
 def main() -> IO(Unit):
   do IO<Unit>:
     check_tx("tx one", run_tx(tx_mem([0])),
@@ -172,3 +208,8 @@ def main() -> IO(Unit):
       "[1, 2];", False{}, "[0, 0, 0, 0]", 0, 0, [(4608, 4)], "[0, 0, 0, 0];")
     check_rx("rx no frames", run_rx(rx_mem([0]), []),
       "", False{}, "[0, 0, 0, 0]", 0, 0, [(4608, 4)], "[0, 0, 0, 0];")
+    check_tx("tx tcp staged", run_tx(tcp_mem(100)),
+      "[257, 0, 100, 2, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 2, 8, 0, 69, 0, 0, 140, 0, 0, 0, 0, 64, 6, 0, 0, 10, 0, 2, 15, 10, 0, 2, 2, 0, 80, 0, 81, 0, 0, 0, 1, 0, 0, 0, 1, 80, 24, 1, 0, 0, 0, 0, 0];", True{}, "[0, 0, 1, 0, 5, 0, 0, 0, 0, 0, 0, 0]", 1, 1)
+    check_tx("tx tcp shorter than its header says dropped", run_tx(tcp_mem(10)),
+      "", True{}, "[0, 0, 1, 0, 5, 0, 0, 0, 0, 0, 0, 0]", 1, 1)
+    T.eq_u32("tx reads at most 65562 bytes of a chain", tx_huge(), 65562)

@@ -115,6 +115,30 @@ def check_rx(
         T.ok(name ++ " state", Q.Vq.is_eq(q, vq(na, na)))
         T.eq_str(name ++ " buffers", regions(s, rs), bufs)
 
+# The longest guest read a program asks for, running it on the simulator's
+# memory up to its first effect other than a read or a write; reads past
+# 4096 bytes answer nothing (too large for the simulator's lists).
+def longest(fuel: Nat, -A: Type, s: S.Sim, m: V.Vm<A>, +top: U32) -> U32:
+  match fuel:
+    case 0n:
+      top
+    case 1n+f:
+      match m:
+        case V.VmRead{+a, +n, k}:
+          +s = s
+          +big = U32.is_lt(4096, n)
+          longest(f, A, s, k(Bool.pick(+List<U32>, big, [], S.Sim.read(s, a, n))), U32.max(top, n))
+        case V.VmWrite{a, bs, next}:
+          longest(f, A, S.Sim.write(s, a, bs), next, top)
+        case _:
+          top
+
+# A transmit chain of one readable descriptor 4294967295 bytes long: the
+# device reads at most 65536 bytes of it.
+def tx_huge() -> U32:
+  s = desc(S.Sim.new(u64(4096), 1024n), 5, 4608, 4294967295, 0, 0)
+  longest(100n, C.ConTx, avail(s, [5]), V.Op.finish(C.ConTx, C.Con.tx(C.ConTx, vq(0, 0))), 0)
+
 def main() -> IO(Unit):
   do IO<Unit>:
     check_tx("tx one", run_tx(tx_mem([0])),
@@ -158,3 +182,4 @@ def main() -> IO(Unit):
       "[]", False{}, "[0, 0, 0, 0]", 0, 0, [(4608, 4)], "[0, 0, 0, 0];")
     check_rx("rx no buffers", run_rx(rx_mem([]), [1, 2]),
       "[1, 2]", False{}, "[0, 0, 0, 0]", 0, 0, [(4608, 4)], "[0, 0, 0, 0];")
+    T.eq_u32("tx reads at most 65536 bytes of a chain", tx_huge(), 65536)

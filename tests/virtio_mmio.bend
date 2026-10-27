@@ -1,6 +1,7 @@
 import Base
 import ../src/lib/u64.bend as U
 import ../src/virtio/mmio.bend as M
+import ../src/virtio/queue.bend as Q
 import ./t.bend as T
 
 # The virtio-mmio transport: behaviour past the laws (the probe sequence
@@ -154,3 +155,9 @@ def main() -> IO(Unit):
     T.eq_u32("unknown reads 0", rd(dev(), 200), 0)
     T.eq_u32("magic read-only", rd(wr(dev(), 0, 5), 0), 1953655158)
     eq_ev("unknown write no event", ev(dev(), 200, 1), M.NoEvent{})
+    # QueueNum past QueueNumMax: the write is dropped (a guest number must
+    # not size the device's loops); Vq.from_cfg clamps as a second line.
+    eq_cfg("queue num over max dropped", M.VirtioMmio.queue(wr(wr(dev(), 56, 16), 56, 257), 0), "256 16 False 0:0 0:0 0:0")
+    eq_cfg("queue num huge dropped", M.VirtioMmio.queue(wr(dev(), 56, 4294967295), 0), "256 0 False 0:0 0:0 0:0")
+    eq_cfg("queue num at max kept", M.VirtioMmio.queue(wr(dev(), 56, 256), 0), "256 256 False 0:0 0:0 0:0")
+    T.ok("from_cfg clamps num", Q.Vq.is_eq(Q.Vq.from_cfg(M.QueueCfg{256, 65535, True{}, U.U64{0, 1}, U.U64{0, 2}, U.U64{0, 3}}), Q.Vq{256, U.U64{0, 1}, U.U64{0, 2}, U.U64{0, 3}, 0, 0}))

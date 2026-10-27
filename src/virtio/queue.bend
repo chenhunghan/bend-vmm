@@ -67,10 +67,12 @@ def Vq.is_eq(a: Vq, b: Vq) -> Bool:
       (U32.is_eq(an, bn) && U.U64.is_eq(ad, bd) && U.U64.is_eq(adr, bdr)
         && U.U64.is_eq(adv, bdv) && U32.is_eq(aa, ba) && U32.is_eq(au, bu))
 
+# The queue of a transport's config; num is clamped to num_max (the
+# transport already drops a larger QueueNum).
 def Vq.from_cfg(cfg: M.QueueCfg) -> Vq:
   match cfg:
     case M.QueueCfg{num_max, num, ready, desc, driver, device}:
-      Vq{num, desc, driver, device, 0, 0}
+      Vq{U32.min(num, num_max), desc, driver, device, 0, 0}
 
 # Parses one 16-byte descriptor.
 def Desc.parse(bs: +List<U32>) -> Desc:

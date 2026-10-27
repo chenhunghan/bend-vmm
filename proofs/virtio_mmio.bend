@@ -66,3 +66,12 @@ def L.virtio_mmio.config_byte():
 
 def L.virtio_mmio.config_word():
   {==}
+
+def L.virtio_mmio.queue_num_over_max_dropped():
+  {==}
+
+def L.virtio_mmio.queue_num_huge_dropped():
+  {==}
+
+def L.virtio_mmio.queue_num_at_max_kept():
+  {==}

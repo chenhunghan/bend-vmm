@@ -97,3 +97,14 @@ law virtio_mmio.config_byte:
 
 law virtio_mmio.config_word:
   {val_of(M.VirtioMmio.read(dev(), 256, 4)) == 67305985 : U32}
+
+# Proposed: a QueueNum above QueueNumMax is dropped (the old value stays), so
+# a guest number never sizes the device's loops; QueueNumMax itself is kept.
+law virtio_mmio.queue_num_over_max_dropped:
+  {M.VirtioMmio.queue(wr(wr(dev(), 56, 16), 56, 257), 0) == Some{M.QueueCfg{256, 16, False{}, U.U64{0, 0}, U.U64{0, 0}, U.U64{0, 0}}} : Maybe<&2, M.QueueCfg>}
+
+law virtio_mmio.queue_num_huge_dropped:
+  {M.VirtioMmio.queue(wr(dev(), 56, 4294967295), 0) == Some{M.QueueCfg{256, 0, False{}, U.U64{0, 0}, U.U64{0, 0}, U.U64{0, 0}}} : Maybe<&2, M.QueueCfg>}
+
+law virtio_mmio.queue_num_at_max_kept:
+  {M.VirtioMmio.queue(wr(dev(), 56, 256), 0) == Some{M.QueueCfg{256, 256, False{}, U.U64{0, 0}, U.U64{0, 0}, U.U64{0, 0}}} : Maybe<&2, M.QueueCfg>}
