@@ -5,7 +5,8 @@
 # are not supported yet, so the lifecycle section checks pause and resume.
 # CHECK_SLOW=N stretches every timeout and pause N times (an emulated host,
 # such as scripts/lima/linux-host.sh on an M1/M2 Mac); SKIP_NATIVE=1 skips
-# the native test build.
+# the native test build; SKIP_BUILD=1 uses the binaries already in out/
+# (bend-vmm, smoke, the guest payloads), as scripts/ci/emulated-kvm.sh does.
 #   1. smoke: a bare-metal payload prints through UART traps and powers off
 #      through PSCI, driven by host/smoke.bend (host effects only).
 #   2. (when host/main.bend exists) the same payloads on the full machine.
@@ -47,8 +48,10 @@ if [ "${SKIP_NATIVE:-0}" != 1 ]; then
 fi
 
 echo "== build"
-for g in tests/guest/*.S; do scripts/guest.sh "$(basename "$g" .S)" >/dev/null || fail=1; done
-scripts/build.sh host/smoke.bend out/smoke >/dev/null || { red "smoke build failed"; exit 1; }
+if [ "${SKIP_BUILD:-0}" != 1 ]; then
+  for g in tests/guest/*.S; do scripts/guest.sh "$(basename "$g" .S)" >/dev/null || fail=1; done
+  scripts/build.sh host/smoke.bend out/smoke >/dev/null || { red "smoke build failed"; exit 1; }
+fi
 
 echo "== 1. host smoke"
 expect "smoke prints" 20 "hello from the guest" ./out/smoke out/guest/hello.bin
@@ -56,7 +59,7 @@ expect "smoke powers off" 20 "smoke: done 1" ./out/smoke out/guest/hello.bin
 
 if [ -f host/main.bend ]; then
   echo "== 2. machine"
-  scripts/build.sh host/main.bend out/bend-vmm >/dev/null || { red "bend-vmm build failed"; exit 1; }
+  [ "${SKIP_BUILD:-0}" = 1 ] || scripts/build.sh host/main.bend out/bend-vmm >/dev/null || { red "bend-vmm build failed"; exit 1; }
   expect "machine hello" 20 "hello from the guest" ./out/bend-vmm --payload out/guest/hello.bin
 fi
 
