@@ -305,9 +305,57 @@ def Store.write.rest(-R: Type, done: Bool, more: V.Op<R, Bool>) -> V.Op<R, Bool>
     case False{}:
       more
 
+# The bytes of the pieces of memory, read from the guest.
+def Store.bytes(-R: Type, xs: +List<V.Iov>) -> V.Op<R, +List<U32>>:
+  match xs:
+    case Nil{}:
+      V.Op.pure(R, +List<U32>, [])
+    case V.Iov{a, l} <> t:
+      do V.Op<R, +List<U32>>:
+        b : +List<U32> <- V.Op.read(R, a, l)
+        r : +List<U32> <- Store.bytes(R, t)
+        return List.append(&2, U32, b, r)
+
+def Store.same(a: +List<U32>, b: +List<U32>) -> Bool:
+  match a b:
+    case Nil{} Nil{}:
+      True{}
+    case Con{x, xs} Con{y, ys}:
+      U32.is_eq(x, y) && Store.same(xs, ys)
+    case _ _:
+      False{}
+
+# Whether bytes begin as a qcow2 image does (QFI\xfb).
+def Store.qcow_magic(bs: +List<U32>) -> Bool:
+  Store.same(List.take(&2, U32, bs, 4n), [81, 70, 73, 251])
+
+def Store.raw.write(-R: Type, refuse: Bool, +disk: U32, +off: U.U64, +iovs: +List<V.Iov>) -> V.Op<R, Bool>:
+  match refuse:
+    case True{}:
+      V.Op.pure(R, Bool, False{})
+    case False{}:
+      do V.Op<R, Bool>:
+        V.Op.ram_to_disk(R, disk, off, iovs)
+        return True{}
+
+# A raw image never takes a qcow2 header at its start: the host tells the
+# formats apart by that header, so a guest that wrote one would turn its own
+# disk into a qcow2 image at the next start, one whose backing file could
+# name any host file (QEMU refuses the same for a probed raw image). Guest
+# writes come in 512-byte sectors, so a write that reaches the first bytes
+# starts at 0.
+def Store.raw.at0(-R: Type, at0: Bool, +disk: U32, +off: U.U64, +iovs: +List<V.Iov>) -> V.Op<R, Bool>:
+  match at0:
+    case True{}:
+      do V.Op<R, Bool>:
+        head : +List<U32> <- Store.bytes(R, Iov.take(iovs, 4))
+        Store.raw.write(R, Store.qcow_magic(head), disk, off, iovs)
+    case False{}:
+      Store.raw.write(R, False{}, disk, off, iovs)
+
 # Writes the pieces of memory at guest offset off into the top image; false
 # when a qcow2 image cannot take them (no room for its counts, or past its
-# L1 table) or there is no image.
+# L1 table), a raw image would start as a qcow2 one, or there is no image.
 def Store.write(fuel: Nat, -R: Type, st: Store, +off: U.U64, +iovs: +List<V.Iov>) -> V.Op<R, Bool>:
   match fuel:
     case 0n:
@@ -317,9 +365,7 @@ def Store.write(fuel: Nat, -R: Type, st: Store, +off: U.U64, +iovs: +List<V.Iov>
         case NoStore{}:
           V.Op.pure(R, Bool, False{})
         case RawStore{disk}:
-          do V.Op<R, Bool>:
-            V.Op.ram_to_disk(R, disk, off, iovs)
-            return True{}
+          Store.raw.at0(R, U.U64.is_zero(off), disk, off, iovs)
         case QcowStore{+disk, +q, +below}:
           +inner = Q.Qcow.inner(q, off)
           +n = U32.min(V.Iov.total(iovs), (Q.Qcow.csize(q) - inner : U32))

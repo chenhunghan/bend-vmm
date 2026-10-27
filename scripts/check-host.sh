@@ -219,6 +219,12 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
     kill -0 $a 2>/dev/null && kill -0 $b 2>/dev/null && grep -q "in use by another process" <<<"$again" \
       && grn "ok: image locks (a second writer is refused; overlays share a backing file)" || { red "failed: image locks"; echo "$again" | tail -3; fail=1; }
     kill $a $b 2>/dev/null; wait $a $b 2>/dev/null
+    # a guest cannot turn its raw disk into a qcow2 image (whose backing file
+    # could name any host file): a qcow2 header at the start is refused
+    dd if=/dev/zero of="$t/plain.raw" bs=1048576 count=4 2>/dev/null
+    out=$(drive 60 "busybox shell" "printf 'QFI\\373\\0\\0\\0\\3' > /tmp/h; dd if=/tmp/h of=/dev/vda bs=512 count=1 conv=sync,fsync 2>&1 | tail -1; echo RAW-DONE\n" "RAW-DONE" 'poweroff -f\n' -- \
+      ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/plain.raw" --cmdline "console=ttyAMA0 quiet" 2>&1 | tr -d '\r')
+    [ "$(head -c 4 "$t/plain.raw" | od -An -tx1 | tr -d ' ')" = 00000000 ] && grn "ok: a raw disk refuses a qcow2 header" || { red "failed: raw disk took a qcow2 header"; tail -5 <<<"$out"; fail=1; }
     rm -rf "$t"
   fi
 fi

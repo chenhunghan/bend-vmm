@@ -2,6 +2,7 @@ import Base
 import ../src/lib/u64.bend as U
 import ../src/lib/bytes.bend as B
 import ../src/disk/qcow2.bend as Q
+import ../src/disk/store.bend as St
 
 # Spec for src/disk/qcow2.bend. The version 3 header qemu-img 11 writes for
 # a 1 GiB image: 64 KiB clusters, its L1 table at 196608 (2 entries), its
@@ -66,3 +67,14 @@ law qcow2.ref_rti:
 
 law qcow2.ref_slot:
   {Q.Qcow.ref_slot(q(), U.U64{1, 292552704}) == 4464 : U32}
+
+# Proposed: a raw image never takes a qcow2 header at its start
+# (Store.raw.at0): the check that refuses it.
+law qcow2.magic_seen:
+  {St.Store.qcow_magic(header()) == True{} : Bool}
+
+law qcow2.magic_other:
+  {St.Store.qcow_magic([81, 70, 73, 250, 0]) == False{} : Bool}
+
+law qcow2.magic_short:
+  {St.Store.qcow_magic([81, 70, 73]) == False{} : Bool}

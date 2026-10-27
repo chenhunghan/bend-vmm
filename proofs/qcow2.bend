@@ -48,3 +48,12 @@ def L.qcow2.ref_rti():
 
 def L.qcow2.ref_slot():
   {==}
+
+def L.qcow2.magic_seen():
+  {==}
+
+def L.qcow2.magic_other():
+  {==}
+
+def L.qcow2.magic_short():
+  {==}

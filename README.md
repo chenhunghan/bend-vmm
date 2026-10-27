@@ -204,7 +204,10 @@ elsewhere. What holds today:
   the ones opened. Snapshots, screendumps and the control and vsock sockets
   are this user's alone (mode 0600), and never written through a symlink.
 - Disk images: locked while in use; `:ro` disks and qcow2 backing files open
-  read-only, and a backing file must be a regular file. A qcow2 image's
+  read-only, and a backing file must be a regular file. A guest cannot
+  write a qcow2 header at the start of a raw disk (which would make it a
+  qcow2 image, with a backing file of its choosing, at the next start). A
+  qcow2 image's
   backing file name is trusted as `qemu-img` trusts it: do not attach
   images from untrusted sources.
 - Not yet: the VMM is not sandboxed (it runs with your user's rights), and

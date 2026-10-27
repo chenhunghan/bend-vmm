@@ -68,6 +68,11 @@ def written(+s: S.Sim, off: U32, +data: +List<U32>) -> Maybe<&1, S.Sim & Bool>:
   +s = S.Sim.write(s, u64(4096), data)
   S.Sim.exec(Bool, s, St.Store.write(1000n, Bool, store(), u64(off), [V.Iov{u64(4096), U32.from_nat(List.length(&2, U32, data))}]))
 
+# The same image's bytes taken as a raw disk.
+def written_raw(+s: S.Sim, off: U32, +data: +List<U32>) -> Maybe<&1, S.Sim & Bool>:
+  +s = S.Sim.write(s, u64(4096), data)
+  S.Sim.exec(Bool, s, St.Store.write(1000n, Bool, St.RawStore{0}, u64(off), [V.Iov{u64(4096), U32.from_nat(List.length(&2, U32, data))}]))
+
 def disk_after(r: Maybe<&1, S.Sim & Bool>) -> +List<U32>:
   match r:
     case None{}:
@@ -101,3 +106,9 @@ def main() -> IO(Unit):
     T.eq_u32("qcow2 in place keeps the size", U32.from_nat(List.length(&2, U32, d2)), 3584)
     T.eq_str("qcow2 in place data", show(B.Bytes.slice(d2, 2647n, 4n)), "[7, 4, 4, 7]")
     T.eq_str("qcow2 read after write", show(read(S.Sim.with_disk(sim(), d), 1100, 4)), "[5, 5, 5, 5]")
+    # a raw disk never starts as a qcow2 image (QFI\xfb): the write is refused
+    # and the disk keeps its first bytes; elsewhere, or other bytes, go in
+    T.ok("raw refuses a qcow2 header at 0", Bool.not(ok_after(written_raw(sim(), 0, [81, 70, 73, 251, 0, 0, 0, 3]))))
+    T.eq_str("raw keeps its start", show(List.take(&2, U32, disk_after(written_raw(S.Sim.with_disk(sim(), B.Bytes.zeros(1024n)), 0, [81, 70, 73, 251])), 4n)), "[0, 0, 0, 0]")
+    T.ok("raw takes the magic past 0", ok_after(written_raw(sim(), 512, [81, 70, 73, 251])))
+    T.ok("raw takes other bytes at 0", ok_after(written_raw(sim(), 0, [81, 70, 73, 250])))
