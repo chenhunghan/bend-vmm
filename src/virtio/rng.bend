@@ -15,12 +15,22 @@ def Rng.room(ds: +List<Q.Desc>) -> U32:
     case Q.Desc{a, l, f, n} <> t:
       (l + Rng.room(t) : U32)
 
+# The most entropy one chain gets: a guest's buffer lengths must not size a
+# host allocation (a short fill is legal; the used length reports it).
+def Rng.max() -> U32:
+  65536
+
+# The entropy to ask the host for: the chain's writable room, at most
+# Rng.max() (summed over the bounded pieces, so long lengths cannot wrap).
+def Rng.want(ds: +List<Q.Desc>) -> U32:
+  V.Iov.total(Q.Vq.segs(ds, 0, Rng.max()))
+
 # Fills one chain's writable descriptors with entropy and pushes it used.
 def Rng.serve(-R: Type, q: Q.Vq, c: Q.Chain) -> V.Op<R, Q.Vq>:
   match c:
     case Q.Chain{+h, r, +w}:
       do V.Op<R, Q.Vq>:
-        +bs : +List<U32> <- V.Op.random(R, Rng.room(w))
+        +bs : +List<U32> <- V.Op.random(R, Rng.want(w))
         n : U32 <- Q.Vq.scatter(R, Q.Chain{h, [], w}, bs)
         Q.Vq.push(R, q, h, n)
 
