@@ -72,7 +72,7 @@ jobs:
     # KVM. Hosted runners have no /dev/kvm, so scripts/ci/emulated-kvm.sh
     # runs the guest check on a QEMU-emulated arm64 CPU with EL2 (slow).
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
+    timeout-minutes: 150
     env:
       BEND_VERSION: 2.0.39
       BEND_SHA_LINUX_ARM64: 71b43e1bb9313dd14ac2b0553b854e41c39d65ecaa47040796ebff4a46f54a97

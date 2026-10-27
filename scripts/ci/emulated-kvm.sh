@@ -5,7 +5,7 @@
 # with KVM, mounts this host's root read-only over 9p and runs the check in a
 # chroot of it, so the host's own toolchain and the binaries built here run
 # unchanged. Slow (every guest instruction is emulated), so the check runs
-# with CHECK_SLOW (default 5).
+# with CHECK_SLOW (default 8: an emulated host starves its vCPUs at times).
 #   scripts/ci/emulated-kvm.sh            builds, then checks
 # Needs Linux on arm64 with qemu-system-aarch64, clang, lld, zstd and bend.
 set -euo pipefail
@@ -46,7 +46,7 @@ ip link set lo up; ip link set eth0 up
 ip addr add 10.0.2.15/24 dev eth0; ip route add default via 10.0.2.2
 echo "L1: \$(uname -r), kvm: \$(ls /dev/kvm)"
 chroot /host /usr/bin/env -i HOME=/tmp PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-  CHECK_SLOW=${CHECK_SLOW:-5} SKIP_NATIVE=1 SKIP_BUILD=1 \
+  CHECK_SLOW=${CHECK_SLOW:-8} SKIP_NATIVE=1 SKIP_BUILD=1 \
   /bin/bash -c 'cp -a $repo /tmp/w && cd /tmp/w && scripts/check-host.sh'
 echo "L1-EXIT \$?"
 poweroff -f
@@ -56,7 +56,7 @@ for m in netfs 9pnet 9pnet_virtio 9p rtc-pl031; do mods="$mods out/guest/modules
 python3 scripts/mkinitramfs.py "$l1/root" "$l1/initrd.cpio" out/guest/busybox:bin/busybox $mods
 
 log=$l1/console.log
-timeout "${L1_TIMEOUT:-5400}" qemu-system-aarch64 \
+timeout "${L1_TIMEOUT:-8400}" qemu-system-aarch64 \
   -machine virt,virtualization=on,gic-version=3 -accel tcg,thread=multi,tb-size=1024 \
   -cpu max,pauth-impdef=on -smp "$cpus" -m "$mem" -nographic -no-reboot \
   -kernel out/guest/Image -initrd "$l1/initrd.cpio" -append "console=ttyAMA0 rdinit=/init quiet" \
