@@ -1,0 +1,114 @@
+name: release
+
+# A tag v* builds bend-vmm for macOS (Apple Silicon; signed with a Developer
+# ID and notarized) and Linux (arm64), and publishes both on a GitHub
+# release with their SHA-256 sums. Run it by hand (workflow_dispatch) for a
+# dry run: the same builds, kept as workflow artifacts, and no release.
+#
+# Secrets for the macOS signature (a tag fails without them; a dry run signs
+# ad hoc instead):
+#   MACOS_SIGN_P12        base64 of the "Developer ID Application" certificate
+#                         and its key, exported as .p12
+#   MACOS_SIGN_PASSWORD   that .p12's password
+#   APPLE_API_KEY         base64 of an App Store Connect API key (.p8) for
+#                         notarytool
+#   APPLE_API_KEY_ID      its key id
+#   APPLE_API_ISSUER_ID   its issuer id
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BEND_VERSION: 2.0.39
+  BEND_NO_TELEMETRY: "1"
+
+jobs:
+  macos:
+    runs-on: macos-15
+    env:
+      BEND_SHA: d4aaef68de545727429ce83b9e88ff3273bf068df599e3542e446755b5f3d83a
+      MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+      MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bend
+        run: |
+          name="bend-$BEND_VERSION-darwin-arm64.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "/tmp/$name" "https://github.com/bendlang/bend/releases/download/v$BEND_VERSION/$name"
+          echo "$BEND_SHA  /tmp/$name" | shasum -a 256 -c -
+          tar -xzf "/tmp/$name" -C /tmp
+          mkdir -p "$HOME/.bend/bin"
+          mv /tmp/bend/bend2 /tmp/bend/guide "$HOME/.bend/"
+          mv /tmp/bend/bin/bend "$HOME/.bend/bin/bend"
+          echo "$HOME/.bend/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: |
+          scripts/release/version.sh "${GITHUB_REF_NAME}"
+          scripts/build.sh host/main.bend out/bend-vmm
+          out/bend-vmm --version
+      - name: Sign and notarize
+        run: scripts/release/sign-mac.sh out/bend-vmm
+      - name: Package
+        run: scripts/release/package.sh out/bend-vmm macos-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: out/release/*
+
+  linux:
+    runs-on: ubuntu-24.04-arm
+    env:
+      BEND_SHA: 71b43e1bb9313dd14ac2b0553b854e41c39d65ecaa47040796ebff4a46f54a97
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bend and the toolchain
+        run: |
+          sudo apt-get update && sudo apt-get install -y clang libx11-dev
+          name="bend-$BEND_VERSION-linux-arm64.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "/tmp/$name" "https://github.com/bendlang/bend/releases/download/v$BEND_VERSION/$name"
+          echo "$BEND_SHA  /tmp/$name" | sha256sum -c -
+          tar -xzf "/tmp/$name" -C /tmp
+          mkdir -p "$HOME/.bend/bin"
+          mv /tmp/bend/bend2 /tmp/bend/guide "$HOME/.bend/"
+          mv /tmp/bend/bin/bend "$HOME/.bend/bin/bend"
+          echo "$HOME/.bend/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: |
+          scripts/release/version.sh "${GITHUB_REF_NAME}"
+          scripts/build.sh host/main.bend out/bend-vmm
+          out/bend-vmm --version
+          ldd out/bend-vmm
+      - name: Package
+        run: scripts/release/package.sh out/bend-vmm linux-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64
+          path: out/release/*
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --title "bend-vmm $GITHUB_REF_NAME" --generate-notes *.tar.gz SHA256SUMS

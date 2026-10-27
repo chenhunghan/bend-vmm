@@ -31,7 +31,7 @@ fi
 if [ ! -f out/guest/modules/rtc-pl031.ko ]; then
   mkdir -p out/guest/extra
   curl -fsSL -o out/guest/extra.deb "http://ports.ubuntu.com/ubuntu-ports/pool/main/l/linux/linux-modules-extra-${kver%-generic}-generic_${kver%-generic}.147_arm64.deb"
-  (cd out/guest/extra && ar x ../extra.deb && tar -xf data.tar --include='*rtc-pl031*')
+  (cd out/guest/extra && ar x ../extra.deb && tar -xf data.tar "./lib/modules/$kver/kernel/drivers/rtc/rtc-pl031.ko.zst")
   zstd -dqf "out/guest/extra/lib/modules/$kver/kernel/drivers/rtc/rtc-pl031.ko.zst" -o out/guest/modules/rtc-pl031.ko
   rm -rf out/guest/extra out/guest/extra.deb
 fi

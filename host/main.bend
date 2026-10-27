@@ -15,6 +15,7 @@ import ../src/boot/image.bend as I
 import ../src/boot/dtb.bend as T
 import ./hvf.bend as H
 import ./fs.bend as Fs
+import ./version.bend as Ver
 
 # bend-vmm: boots an arm64 Linux kernel (or a bare-metal payload) on
 # Hypervisor.framework. All machine logic is the pure src/vmm/machine.bend;
@@ -1213,8 +1214,39 @@ def restore.flash_mode(m: Maybe<&2, M.Machine>) -> IO(U32):
     case False{}:
       restore(Opts.restore(o), o)
 
+def usage() -> String:
+  String.join([
+    "usage: bend-vmm --kernel Image [--initrd FILE] [--cmdline \"...\"] [--mem MiB] [--cpus N]",
+    "                [--disk IMG[:ro],...] [--share DIR] [--vsock PATH] [--control PATH]",
+    "                [--display WxH]",
+    "       bend-vmm --firmware CODE.fd --vars VARS.fd [--disk IMG] ...   (UEFI)",
+    "       bend-vmm --restore SNAPSHOT [--control PATH]",
+    "       bend-vmm --payload FILE.bin                                   (bare metal)",
+    "       bend-vmm --version"], "\n")
+
+def main.info.pick(+first: String) -> Maybe<&2, String>:
+  Bool.pick(Maybe<&2, String>, String.eq(first, "--version"), Some{"bend-vmm " ++ Ver.Version.name()},
+    Bool.pick(Maybe<&2, String>, String.eq(first, "--help") || String.eq(first, "-h"), Some{usage()}, None{}))
+
+# The first argument asks for the version or the usage (so does none).
+def main.info(args: List<String>) -> Maybe<&2, String>:
+  match args:
+    case Nil{}:
+      Some{usage()}
+    case first <> rest:
+      main.info.pick(first)
+
+@unsafe def main.go(info: Maybe<&2, String>, args: List<String>) -> IO(Unit):
+  match info:
+    case Some{text}:
+      IO.print(text)
+    case None{}:
+      do IO<Unit>:
+        +o : Opts = Opts.parse(args, Opts.default())
+        main.mode(String.is_empty(Opts.restore(o)), o)
+
 @unsafe def main() -> IO(Unit):
   do IO<Unit>:
     args : List<String> <- IO.args()
-    +o : Opts = Opts.parse(List.drop(&1, String, args, 1n), Opts.default())
-    main.mode(String.is_empty(Opts.restore(o)), o)
+    +rest : List<String> = List.drop(&1, String, args, 1n)
+    main.go(main.info(rest), rest)
