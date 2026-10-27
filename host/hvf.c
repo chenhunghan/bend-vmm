@@ -1552,6 +1552,7 @@ Term hvf_kick_run(Env e, Term* f, IoWork* w) {
 // millisecond, so a guest printing byte by byte costs no syscall per byte.
 static pthread_mutex_t hvf_out_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  hvf_out_cv = PTHREAD_COND_INITIALIZER;
+#define HVF_OUT_MAX ((size_t)16 << 20)
 static char*           hvf_obuf;
 static size_t          hvf_on, hvf_ocap;
 static int             hvf_out_started;
@@ -1613,16 +1614,46 @@ Term hvf_out_run(Env e, Term* f, IoWork* w) {
     pthread_create(&t, NULL, hvf_out_thread, NULL);
     atexit(hvf_out_flush);
   }
+  // nobody draining stdout (a stalled pipe) must not grow the VMM without
+  // bound: past 16 MiB waiting, console output is dropped
+  if (hvf_on + n > HVF_OUT_MAX) {
+    n = 0;
+  }
   if (hvf_on + n > hvf_ocap) {
     hvf_ocap = (hvf_on + n) * 2 + 4096;
     hvf_obuf = io_mem(realloc(hvf_obuf, hvf_ocap));
   }
-  memcpy(hvf_obuf + hvf_on, buf, n);
-  hvf_on += n;
+  if (n) {
+    memcpy(hvf_obuf + hvf_on, buf, n);
+    hvf_on += n;
+  }
   pthread_cond_signal(&hvf_out_cv);
   pthread_mutex_unlock(&hvf_out_mu);
   free(buf);
   return (Term)0;
+}
+
+// Hvf.log_gate() -> U32: whether a VMM message may go to stderr, so a guest
+// that traps in a loop (an unmapped access, an unknown register) cannot
+// flood it: up to 200 at once, then 20 a second. 0 drops the message;
+// otherwise 1 + the messages dropped since the last one printed.
+Term hvf_log_gate_run(Env e, Term* f, IoWork* w) {
+  static double   tokens = 200, last;
+  static uint64_t dropped;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  double now = (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+  tokens     = last == 0 ? tokens : tokens + (now - last) * 20;
+  tokens     = tokens > 200 ? 200 : tokens;
+  last       = now;
+  if (tokens < 1) {
+    dropped++;
+    return (Term)0;
+  }
+  tokens -= 1;
+  uint64_t d = dropped;
+  dropped    = 0;
+  return (Term)(u32)(d + 1 > 0xFFFFFFFFull ? 0xFFFFFFFFull : d + 1);
 }
 
 // Hvf.out_flush() -> U32: writes the queued console output now, so a
@@ -3960,6 +3991,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.signal_wait)
   io_eff(CID(Hvf.signal_wait), hvf_signal_wait_run);
+#endif
+#ifdef CID(Hvf.log_gate)
+  io_eff(CID(Hvf.log_gate), hvf_log_gate_run);
 #endif
 #ifdef CID(Hvf.disk_open_backing)
   io_eff(CID(Hvf.disk_open_backing), hvf_disk_open_backing_run);

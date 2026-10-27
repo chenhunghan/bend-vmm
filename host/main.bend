@@ -40,6 +40,15 @@ def log_err(msg: String) -> IO(Unit):
     _ : U32 <- H.Hvf.out_flush()
     IO.print_err(msg)
 
+# A VMM message, unless the gate (Hvf.log_gate) dropped it; with a count of
+# the ones dropped before it.
+def log_gated(drop: Bool, +g: U32, msg: String) -> IO(Unit):
+  match drop:
+    case True{}:
+      IO.pure(Unit, Unit{})
+    case False{}:
+      log_err(Bool.pick(String, U32.is_eq(g, 1), "", "[vmm] (" ++ U32.show((g - 1 : U32)) ++ " messages dropped)\n") ++ "[vmm] " ++ msg)
+
 type Opts is Data:
   Opts{kernel: String, initrd: String, payload: String, cmdline: String, mem: U32, cpus: U32, disk: String, share: String, restore: String, control: String, vsock: String, display: String, firmware: String, vars: String}
 
@@ -264,7 +273,8 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
         interp(cpu, mc, done, A, next)
     case V.VmLog{msg, next}:
       do IO<A>:
-        log_err("[vmm] " ++ msg)
+        +g : U32 <- H.Hvf.log_gate()
+        log_gated(U32.is_zero(g), g, msg)
         interp(cpu, mc, done, A, next)
     case V.VmDiskRead{d, off, n, k}:
       do IO<A>:

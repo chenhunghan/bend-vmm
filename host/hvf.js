@@ -77,3 +77,4 @@ io_eff(CID(Hvf.fb_present), (w) => io_tup(w, { $: CID(Nil) }));
 io_eff(CID(Hvf.fw_load), hvf_unavailable);
 io_eff(CID(Hvf.flash), () => 0);
 io_eff(CID(Hvf.out_flush), () => 0);
+io_eff(CID(Hvf.log_gate), () => 1);

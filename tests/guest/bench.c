@@ -7,6 +7,8 @@
 //                    register through /dev/mem (each one traps to the VMM)
 //   bench send IP PORT BYTES  TCP upload: BYTES in 1 MiB writes to IP:PORT
 //   bench recv IP PORT        TCP download: reads IP:PORT to its end
+//   bench peek ADDR N  N 32-bit reads of physical ADDR (decimal) through
+//                    /dev/mem: an unmapped one traps to the VMM each time
 //                    (no tool in between: the NAT's own rate)
 //   bench on CPU PROG ARGS...  runs PROG on vCPU CPU only (where the devices'
 //                    interrupts land, so no IPI wakes it: steadier numbers)
@@ -126,6 +128,16 @@ static int disk(const char* dev) {
   return 0;
 }
 
+static int peek(u64 addr, u64 n) {
+  i64 fd = sys(SYS_openat, AT_FDCWD, (i64)"/dev/mem", O_RDONLY | O_SYNC, 0, 0, 0);
+  if (fd < 0) { put("bench: cannot open /dev/mem"); flush(); return 1; }
+  volatile unsigned* p = (volatile unsigned*)sys(SYS_mmap, 0, 4096, 1, 1, fd, (i64)(addr & ~4095ul));
+  if ((i64)p < 0 && (i64)p > -4096) { put("bench: cannot map it"); flush(); return 1; }
+  u64 sum = 0;
+  for (u64 i = 0; i < n; i++) sum += p[(addr & 4095) / 4];
+  return (int)(sum & 0);
+}
+
 static int mmio(void) {
   i64 fd = sys(SYS_openat, AT_FDCWD, (i64)"/dev/mem", O_RDONLY | O_SYNC, 0, 0, 0);
   if (fd < 0) { put("bench: cannot open /dev/mem"); flush(); return 1; }
@@ -204,6 +216,7 @@ void _start_c(u64* sp) {
   else if (argc >= 2 && eq(argv[1], "mmio")) rc = mmio();
   else if (argc >= 5 && eq(argv[1], "send")) rc = net(1, argv[2], argv[3], num(argv[4]));
   else if (argc >= 4 && eq(argv[1], "recv")) rc = net(0, argv[2], argv[3], 0);
+  else if (argc >= 4 && eq(argv[1], "peek")) rc = peek(num(argv[2]), num(argv[3]));
   sys(SYS_exit, rc, 0, 0, 0, 0, 0);
 }
 

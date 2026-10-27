@@ -58,6 +58,10 @@ def Hvf.out_flush() -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.log_gate() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.stdin(max: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
