@@ -2,9 +2,10 @@
 
 ## Goal
 
-Boot an arm64 Linux guest on macOS (Apple Silicon) with a VMM written in
-Bend: serial console, virtio block/console/rng, PSCI SMP. macOS only; no
-Linux or Windows host support. openvmm is a reference, not a template.
+Run arm64 guests (Linux, through UEFI or a direct kernel boot) with a VMM
+written in Bend, on Hypervisor.framework (macOS, Apple Silicon) and KVM
+(Linux arm64), treating the guest as hostile. openvmm is a reference, not a
+template.
 
 ## Shape: a pure machine and a thin host
 
@@ -134,7 +135,12 @@ gathering and scattering independent virtio descriptors; processing
 independent virtqueues; checksums over large buffers (halving recursion);
 one `IO.fork` per vCPU at the host level.
 
-## Status (2026-10-27)
+A native parallel let costs about 2.6 µs to spawn. Keep them off paths that
+run on every exit with little work per side (`Trap.decode` was one: the
+exit got that much faster without it), and give recursive splits a size
+floor (`Csum.small`, `Tcp.small`).
+
+## Status (2026-10-28)
 
 - Every module in `src/` is implemented and proven (`bend PROOF.bend`: ALL
   PROOFS CHECK; `VERDICT=1 scripts/check.sh` re-checks the done modules with
@@ -155,14 +161,28 @@ one `IO.fork` per vCPU at the host level.
   (`scripts/ci/emulated-kvm.sh`): GitHub's arm64 runners have no /dev/kvm.
 - Data path: devices name guest memory (`V.Iov`) and the host moves bytes
   (disk, 9p, network); qcow2 images (src/disk) are walked in Bend.
-- `scripts/bench.sh` and `scripts/soak.sh` measure speed and long runs.
+- `scripts/bench.sh` and `scripts/soak.sh` measure speed and long runs; a
+  30-minute soak holds the VMM's memory flat (about 265 MB, +0.4%).
+- Hostile guests and files (2026-10-28, after a four-part audit): queue
+  sizes, chains, gathers, rng, vsock, 9p fids and readdir are bounded in the
+  pure models (laws under `# Proposed:`); the share never follows a guest
+  symlink and opens regular files only; `--restore` opens only the host
+  files the command line names; images are locked; a raw disk refuses a
+  qcow2 header; a failed host disk operation is IOERR (VmDiskStatus); VMM
+  logs are rate-limited; control and vsock clients have a 5 s deadline.
+- Lifecycle: SIGTERM presses a virtio power key (systemd guests shut down in
+  a few seconds); `scripts/ubuntu-check.sh` boots Ubuntu 24.04's cloud image.
 
 ## Next
 
 - UEFI: a fw_cfg device (boot order, kernel loading) and a graphics output
   (ramfb) for the firmware's own screens.
-- Per-request cost: a TCP segment from the guest still costs ~150 µs of Bend
-  work (header parse, NAT, ACK), the bound on upload speed.
+- The NAT's remaining hardening (non-blocking sends, connection and socket
+  caps, an outbound policy): PR #25. vsock's host-side send still blocks the
+  event loop when the host program stops reading.
+- A vCPU waiting on another's interrupt pays Hypervisor.framework's ~80 µs
+  WFI wake (a disk request from vCPU 1: ~100 µs against ~21 µs on vCPU 0).
+- No sandbox: the VMM runs with the user's rights.
 - Less C: the host layer's remaining decisions (the console's escape keys,
   the control protocol, address mapping, the snapshot file layout) can move
   into Bend, leaving C as system calls.
