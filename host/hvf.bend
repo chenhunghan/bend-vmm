@@ -38,6 +38,10 @@ def Hvf.kick(cpu: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.set_args(bytes: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.reexec() -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"

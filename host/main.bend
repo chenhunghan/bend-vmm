@@ -1463,8 +1463,17 @@ def main.info(args: List<String>) -> Maybe<&2, String>:
         +o : Opts = Opts.parse(args, Opts.default())
         main.mode(String.is_empty(Opts.restore(o)), o)
 
+# Arguments as the host keeps them: each one's bytes, then a 0.
+def args_bytes(args: List<String>) -> +List<U32>:
+  match args:
+    case Nil{}:
+      []
+    case Con{a, rest}:
+      List.append(&2, U32, B.Bytes.of_cstring(a), args_bytes(rest))
+
 @unsafe def main() -> IO(Unit):
   do IO<Unit>:
-    args : List<String> <- IO.args()
+    +args : List<String> <- IO.args()
+    _ : U32 <- H.Hvf.set_args(args_bytes(args))
     +rest : List<String> = List.drop(&1, String, args, 1n)
     main.go(main.info(rest), rest)

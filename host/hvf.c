@@ -1345,44 +1345,52 @@ Term hvf_load_run(Env e, Term* f, IoWork* w) {
   return (Term)(got >= 0 && got < HVF_ERR ? (u32)got : HVF_ERR);
 }
 
+// This program's arguments, NUL-separated, as the Bend side gave them
+// (Hvf.set_args): for snapshots and the restart after a reset, with no need
+// of /proc (absent in some chroots and containers).
+static char*    hvf_argbuf;
+static uint64_t hvf_arglen;
+
+// Hvf.set_args(bytes) -> U32: the arguments, each followed by a 0 byte.
+Term hvf_set_args_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* b = io_cbuf(e, f[0], &n, CID(Con));
+  free(hvf_argbuf);
+  hvf_argbuf = b;
+  hvf_arglen = b ? n : 0;
+  return (Term)0;
+}
+
 // Hvf.reexec() -> U32: restarts this program with its original arguments
 // (PSCI SYSTEM_RESET: a fresh VM is the simplest correct reset).
 Term hvf_reexec_run(Env e, Term* f, IoWork* w) {
-  char     path[4096];
-  uint32_t size = sizeof path;
+  char     path[4096] = "";
+  uint32_t size       = sizeof path;
   hvf_tty_restore();
   fflush(stdout);
+  char* argv[1024];
+  int   argc = 0;
+  for (uint64_t at = 0; at < hvf_arglen && argc < 1023; at += strlen(hvf_argbuf + at) + 1) {
+    argv[argc++] = hvf_argbuf + at;
+  }
+  argv[argc] = NULL;
 #ifdef __APPLE__
-  if (_NSGetExecutablePath(path, &size) == 0) {
-    execv(path, *_NSGetArgv());
+  if (_NSGetExecutablePath(path, &size) != 0) {
+    path[0] = 0;
   }
 #else
-  // argv from /proc/self/cmdline (NUL-separated)
   (void)size;
-  static char args[65536];
-  int         fd = open("/proc/self/cmdline", O_RDONLY);
-  ssize_t     n  = fd >= 0 ? read(fd, args, sizeof args - 1) : -1;
-  if (fd >= 0) {
-    close(fd);
-  }
   ssize_t pl = readlink("/proc/self/exe", path, sizeof path - 1);
   path[pl > 0 ? pl : 0] = 0; // readlink does not end the string
-  if (pl <= 0 && n > 0) {
-    // no /proc/self/exe (a chroot, a container): argv[0], from this cwd
-    snprintf(path, sizeof path, "%s", args);
-    pl = (ssize_t)strlen(path);
+#endif
+  if (!path[0] && argc > 0) {
+    // no executable path from the system: argv[0], from this cwd
+    snprintf(path, sizeof path, "%s", argv[0]);
   }
-  if (n > 0 && pl > 0) {
-    char* argv[1024];
-    int   argc = 0;
-    for (ssize_t at = 0; at < n && argc < 1023; at += (ssize_t)strlen(args + at) + 1) {
-      argv[argc++] = args + at;
-    }
-    argv[argc] = NULL;
+  if (argc > 0 && path[0]) {
     execv(path, argv);
   }
   fprintf(stderr, "bend-vmm: cannot re-execute %s: %s\n", path, strerror(errno));
-#endif
   return (Term)HVF_ERR;
 }
 
@@ -2854,32 +2862,12 @@ static int hvf_put_ram(int fd, off_t at) {
   return ftruncate(fd, at + (off_t)hvf_ram_size);
 }
 
-// This program's argv, NUL-separated, in a new buffer; its length.
+// This program's arguments, NUL-separated, in a new buffer; their length.
 static uint64_t hvf_args(char** out) {
-#ifdef __APPLE__
-  int      argc = *_NSGetArgc();
-  char**   argv = *_NSGetArgv();
-  uint64_t n    = 0;
-  for (int i = 0; i < argc; i++) {
-    n += strlen(argv[i]) + 1;
-  }
-  char* b = io_mem(malloc(n ? n : 1));
-  for (int i = 0, at = 0; i < argc; i++) {
-    memcpy(b + at, argv[i], strlen(argv[i]) + 1);
-    at += (int)strlen(argv[i]) + 1;
-  }
+  char* b = io_mem(malloc(hvf_arglen ? hvf_arglen : 1));
+  memcpy(b, hvf_argbuf, hvf_arglen);
   *out = b;
-  return n;
-#else
-  char*   b  = io_mem(malloc(65536));
-  int     fd = open("/proc/self/cmdline", O_RDONLY);
-  ssize_t n  = fd >= 0 ? read(fd, b, 65536) : -1;
-  if (fd >= 0) {
-    close(fd);
-  }
-  *out = b;
-  return n > 0 ? (uint64_t)n : 0;
-#endif
+  return hvf_arglen;
 }
 
 // Hvf.snap_write(path, words) -> U32: writes a snapshot of the paused VM:
@@ -3696,6 +3684,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.kick)
   io_eff(CID(Hvf.kick), hvf_kick_run);
+#endif
+#ifdef CID(Hvf.set_args)
+  io_eff(CID(Hvf.set_args), hvf_set_args_run);
 #endif
 #ifdef CID(Hvf.reexec)
   io_eff(CID(Hvf.reexec), hvf_reexec_run);
