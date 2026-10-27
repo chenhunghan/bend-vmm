@@ -193,6 +193,8 @@ def show_cmd(c: V.NetCmd) -> String:
       "shutdown " ++ U32.show(id)
     case V.TcpClose{id}:
       "close " ++ U32.show(id)
+    case V.TcpAbort{id}:
+      "abort " ++ U32.show(id)
     case V.UdpSend{sport, ip, port, bs}:
       "udp " ++ U32.show(sport) ++ " " ++ U32.show(ip) ++ ":" ++ U32.show(port) ++ " " ++ show(bs)
     case V.TcpSendStaged{id, slot}:

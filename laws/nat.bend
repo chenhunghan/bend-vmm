@@ -142,16 +142,21 @@ law nat.no_special_dst:
 
 # A connection whose queue toward the guest holds n bytes (una 2, dend
 # 2 + n): the counts come from the sequence numbers, so the kernel need not
-# build 256 KiB of queue.
+# build 1 MiB of queue.
 def queued(n: U32) -> N.Slirp:
   N.Slirp{[N.Conn{0, 40000, remote(), 80, 1, 1000, 2, N.Flow{2, 2, (2 + n : U32), 2, 0, [], False{}, 4294967295, 2, 0, 1}}], 1}
 
 # The host reads a connection on only while its queue toward the guest
-# holds less than N.Slirp.queue_cap (256 KiB) bytes.
+# holds less than N.Slirp.queue_cap (1 MiB) bytes.
 law nat.queue_bounded:
-  {(N.Slirp.may_read(queued(262143), 0), N.Slirp.may_read(queued(262144), 0)) == (True{}, False{}) : Bool & Bool}
+  {(N.Slirp.may_read(queued(1048575), 0), N.Slirp.may_read(queued(1048576), 0)) == (True{}, False{}) : Bool & Bool}
 
 # While the host's socket is over its pending cap (TcpBlocked), guest data
 # is not taken: no send, and an ACK of what came before with a zero window.
 law nat.blocked_holds_data:
   {(cmds(N.Slirp.guest_frame(net(N.Slirp.host_event(established(), V.TcpBlocked{0})), guest_tcp(24, 1000, 2, [104, 105]))), frames(N.Slirp.guest_frame(net(N.Slirp.host_event(established(), V.TcpBlocked{0})), guest_tcp(24, 1000, 2, [104, 105])))) == ([], [to_guest(remote(), 6, W.Tcp.build(remote(), g(), W.Tcp{80, 40000, 2, 1000, 16, 0, 0, []}))]) : +List<V.NetCmd> & +List<+List<U32>>}
+
+# A guest RST aborts the host's socket (V.TcpAbort: its pending data is
+# dropped) and the connection is forgotten.
+law nat.guest_rst_aborts:
+  {(cmds(N.Slirp.guest_frame(established(), guest_tcp(20, 1000, 2, []))), net(N.Slirp.guest_frame(established(), guest_tcp(20, 1000, 2, [])))) == ([V.TcpAbort{0}], N.Slirp{[], 1}) : +List<V.NetCmd> & N.Slirp}

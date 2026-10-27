@@ -34,6 +34,8 @@ def show_cmd(c: V.NetCmd) -> String:
       "shutdown " ++ U32.show(id)
     case V.TcpClose{id}:
       "close " ++ U32.show(id)
+    case V.TcpAbort{id}:
+      "abort " ++ U32.show(id)
     case V.UdpSend{sport, ip, port, bs}:
       "udp " ++ U32.show(sport) ++ " " ++ U32.show(ip) ++ ":" ++ U32.show(port) ++ " " ++ show(bs)
     case V.TcpSendStaged{id, slot}:
@@ -210,7 +212,7 @@ def two() -> IO(Unit):
     step("two host data 1", o5, [htcp(40001, 24, 2, 5000, 0, [5])], [])
     step("two guest data 0", o6, [htcp(40000, 16, 2, 1001, 0, [])], [V.TcpSend{0, [6]}])
     step("two guest data 1", o7, [htcp(40001, 16, 3, 5002, 0, [])], [V.TcpSend{1, [7, 7]}])
-    step("two rst 0", o8, [], [V.TcpClose{0}])
+    step("two rst 0", o8, [], [V.TcpAbort{0}])
     step("two 1 still open", o9, [htcp(40001, 24, 3, 5002, 0, [8])], [])
 
 def duplicate_syn() -> IO(Unit):
@@ -229,7 +231,7 @@ def guest_rst() -> IO(Unit):
   +o2 = he(net(o1), V.TcpData{0, [1]})
   +o3 = gf(net(o1), gtcp(40000, 16, 1000, 2, []))
   do IO<Unit>:
-    step("guest rst", o1, [], [V.TcpClose{0}])
+    step("guest rst", o1, [], [V.TcpAbort{0}])
     T.eq_u32("guest rst forgotten", conns(net(o1)), 0)
     step("guest rst then data ignored", o2, [], [])
     step("guest rst then ack gets rst", o3, [htcp(40000, 4, 2, 0, 0, [])], [])
@@ -454,7 +456,7 @@ def syn_sent() -> IO(Unit):
     step("synsent data dropped", o1, [], [])
     step("synsent fin dropped", o2, [], [])
     step("synsent ack dropped", o5, [], [])
-    step("synsent rst closes", o3, [], [V.TcpClose{0}])
+    step("synsent rst closes", o3, [], [V.TcpAbort{0}])
     T.eq_u32("synsent rst forgets", conns(net(o3)), 0)
     step("synsent then connected", o4, [htcp(40000, 18, 1, 1000, 1460, [])], [])
 
@@ -561,10 +563,10 @@ def queue_cap() -> IO(Unit):
     T.eq_str("queue under the cap reads", bool_str(N.Slirp.may_read(net(o2), 0)), "yes")
     T.eq_u32("queue unsent", N.Slirp.queued(net(o2)), 2000)
     T.eq_u32("queue unsent after an ack", N.Slirp.queued(net(o3)), 1000)
-    T.eq_str("queue one below the cap reads", bool_str(N.Slirp.may_read(queued_conn(2, 262145, 0), 0)), "yes")
-    T.eq_str("queue at the cap stops reading", bool_str(N.Slirp.may_read(queued_conn(2, 262146, 0), 0)), "no")
-    T.eq_str("queue across the wrap", bool_str(N.Slirp.may_read(queued_conn(4294967000, 262000, 0), 0)), "no")
-    T.eq_str("queue of a hold does not count", bool_str(N.Slirp.may_read(queued_conn(2, 300000, 299998), 0)), "yes")
+    T.eq_str("queue one below the cap reads", bool_str(N.Slirp.may_read(queued_conn(2, 1048577, 0), 0)), "yes")
+    T.eq_str("queue at the cap stops reading", bool_str(N.Slirp.may_read(queued_conn(2, 1048578, 0), 0)), "no")
+    T.eq_str("queue across the wrap", bool_str(N.Slirp.may_read(queued_conn(4294967000, 1048900, 0), 0)), "no")
+    T.eq_str("queue of a hold does not count", bool_str(N.Slirp.may_read(queued_conn(2, 1100000, 1099998), 0)), "yes")
     T.eq_str("queue after the FIN's ack", bool_str(N.Slirp.may_read(queued_conn(3, 2, 0), 0)), "yes")
     T.eq_u32("queue unsent of the queued connection", N.Slirp.queued(queued_conn(2, 262146, 0)), 262144)
     T.eq_str("queue unknown connection reads", bool_str(N.Slirp.may_read(queued_conn(2, 262146, 0), 7)), "yes")

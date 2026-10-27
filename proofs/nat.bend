@@ -66,3 +66,6 @@ def L.nat.queue_bounded():
 
 def L.nat.blocked_holds_data():
   {==}
+
+def L.nat.guest_rst_aborts():
+  {==}
