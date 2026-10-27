@@ -3,7 +3,8 @@ name: release
 # A tag v* builds bend-vmm for macOS (Apple Silicon; signed with a Developer
 # ID and notarized) and Linux (arm64), and publishes both on a GitHub
 # release with their SHA-256 sums. Run it by hand (workflow_dispatch) for a
-# dry run: the same builds, kept as workflow artifacts, and no release.
+# dry run (so does a push to a ci/ branch): the same builds, kept as
+# workflow artifacts, and no release.
 #
 # Secrets for the macOS signature (a tag fails without them; a dry run signs
 # ad hoc instead):
@@ -18,6 +19,7 @@ name: release
 on:
   push:
     tags: ['v*']
+    branches: ['ci/**']
   workflow_dispatch:
 
 permissions:
