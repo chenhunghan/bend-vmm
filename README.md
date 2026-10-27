@@ -112,13 +112,22 @@ in 0.2 s and Alpine its login prompt in about 5 s.
 Management: on the console, `Ctrl-A p` pauses or resumes, `Ctrl-A s` writes
 `./bend-vmm.snap`, `Ctrl-A x` quits, `Ctrl-A h` lists the keys. Over
 `--control`: `echo pause | nc -U SOCK` (also `resume`, `status`,
-`snapshot PATH`, `net` (the NAT's connections and flow state), `quit`;
+`snapshot PATH`, `net` (the NAT's connections and flow state),
+`powerdown` (presses the guest's power button), `quit`;
 with `--display`, `screendump PATH` writes the
 screen as a PPM, `type TEXT` types on the virtio keyboard (`\n` is Return),
 `pointer X Y` moves the tablet on its 0..32767 scale). A snapshot holds guest RAM (sparse), every vCPU's
 registers, the GIC, and the whole device state; `--restore` maps the RAM
 copy-on-write, so restoring is immediate. TCP connections through the NAT do
 not survive a restore.
+
+Stopping: `SIGTERM` (or `SIGHUP`) presses the guest's power button, the
+`KEY_POWER` key of a virtio keyboard every machine has, and gives the guest
+10 s to shut down and power off (systemd-logind and acpid do); a second
+signal, or `SIGINT`, stops the VMM at once. Disk images are locked while in
+use: a second bend-vmm cannot open an image another one writes, while
+several can share a read-only image or a qcow2 backing file. A guest's
+flush reaches stable storage (on macOS through `F_FULLFSYNC`).
 
 Debugging: `BEND_VMM_TRACE=1` prints every trapped exit, `=2` console input,
 interrupt line changes and TCP data held for the guest, `=4` staged

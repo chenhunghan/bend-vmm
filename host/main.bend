@@ -557,6 +557,12 @@ def reply_rc(+rc: U32, ok: String) -> String:
         display.hid(mc, done, ev)
         type_keys(mc, done, rest)
 
+# The guest's power button: KEY_POWER (116) pressed and released on the
+# virtio keyboard; a guest that handles it (systemd-logind, acpid) shuts
+# down and powers off.
+@unsafe def power_button(+mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+  type_keys(mc, done, [In.HidKey{116, True{}}, In.HidKey{116, False{}}])
+
 @unsafe def command.dump(is_dump: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +verb: String, arg: String) -> IO(String):
   match is_dump:
     case True{}:
@@ -589,7 +595,7 @@ def reply_rc(+rc: U32, ok: String) -> String:
         _ : Result<&1, &1, U32, Unit> <- Chan.send(U32, done, 0)
         return "bye"
     case False{} False{} False{} False{} False{}:
-      IO.pure(String, "unknown command (pause, resume, snapshot PATH, screendump PATH, type TEXT, pointer X Y, status, quit)")
+      IO.pure(String, "unknown command (pause, resume, snapshot PATH, screendump PATH, type TEXT, pointer X Y, powerdown, net, status, quit)")
 
 # The tablet report of "X Y" (0..32767 each): a move.
 def pointer_of.mk(x: Maybe<&2, U32>, y: Maybe<&2, U32>) -> Maybe<&2, In.Hid>:
@@ -649,12 +655,22 @@ def pointer_of(arg: String) -> Maybe<&2, In.Hid>:
     case False{}:
       command.type(String.eq(verb, "type"), mc, done, verb, arg)
 
+# powerdown: presses the guest's power button.
+@unsafe def command.powerdown(is_power: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +verb: String, arg: String) -> IO(String):
+  match is_power:
+    case True{}:
+      do IO<String>:
+        power_button(mc, done)
+        return "powering down"
+    case False{}:
+      command.net(String.eq(verb, "net"), mc, done, verb, arg)
+
 # One command line: a verb and an optional argument.
 @unsafe def command(+mc: Chan(M.Machine), +done: Chan(U32), +line: String) -> IO(String):
   +parts = String.split(String.trim(line), ' ')
   +verb = Maybe.default(&2, String, List.head(&2, String, parts), "")
   +arg = String.join(List.drop(&2, String, parts, 1n), " ")
-  command.net(String.eq(verb, "net"), mc, done, verb, arg)
+  command.powerdown(String.eq(verb, "powerdown"), mc, done, verb, arg)
 
 @unsafe def ctl_loop.got(stop: Bool, +mc: Chan(M.Machine), +done: Chan(U32), bs: +List<U32>) -> IO(Unit):
   match stop:
@@ -1139,11 +1155,12 @@ def devices.vsock(none: Bool, path: String) -> IO(+List<D.DevKind>):
         die_if(U32.is_ne(rc, 0), "cannot listen on the vsock socket (" ++ U32.show(rc) ++ ")")
         return [D.VsockKind{U.U64{0, 3}}]
 
-# --display: a virtio keyboard and tablet for the window.
+# A virtio keyboard, always (the power button), and with --display a tablet
+# for the window.
 def devices.input(none: Bool) -> +List<D.DevKind>:
   match none:
     case True{}:
-      []
+      [D.InputKind{False{}}]
     case False{}:
       [D.InputKind{False{}}, D.InputKind{True{}}]
 
@@ -1277,6 +1294,45 @@ def stopped(+code: U32) -> IO(Unit):
         die_if(U32.is_ne(rc, 0), "cannot listen on the control socket (" ++ U32.show(rc) ++ ")")
         IO.spawn(Unit, ctl_loop(mc, done))
 
+# SIGTERM and SIGHUP press the guest's power button and give it
+# shutdown_ms to power off; SIGINT, a second signal, or the time running
+# out stop the VMM at once (exit status 128 + the signal).
+def shutdown_ms() -> U32:
+  10000
+
+@unsafe def signals.late(+sig: U32, +done: Chan(U32)) -> IO(Unit):
+  do IO<Unit>:
+    IO.sleep(shutdown_ms())
+    log_err("bend-vmm: the guest did not power off in time")
+    _ : Result<&1, &1, U32, Unit> <- Chan.send(U32, done, (128 + sig : U32))
+    return Unit{}
+
+@unsafe def signals.got(soft: Bool, +sig: U32, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+  match soft:
+    case True{}:
+      do IO<Unit>:
+        log_err("bend-vmm: signal " ++ U32.show(sig) ++ ": pressing the power button")
+        power_button(mc, done)
+        IO.spawn(Unit, signals.late(sig, done))
+        signals(False{}, mc, done)
+    case False{}:
+      do IO<Unit>:
+        _ : Result<&1, &1, U32, Unit> <- Chan.send(U32, done, (128 + sig : U32))
+        return Unit{}
+
+@unsafe def signals.on(fail: Bool, first: Bool, +sig: U32, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+  match fail:
+    case True{}:
+      IO.pure(Unit, Unit{})
+    case False{}:
+      # SIGINT is 2
+      signals.got(Bool.and(first, U32.is_ne(sig, 2)), sig, mc, done)
+
+@unsafe def signals(first: Bool, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+  do IO<Unit>:
+    +sig : U32 <- H.Hvf.signal_wait()
+    signals.on(U32.is_eq(sig, err()), first, sig, mc, done)
+
 # Runs a machine: the vCPU loops of the given CPUs, console input and the
 # control socket; ends when a vCPU stops the VM.
 def resolver.got(r: File & Result<&1, &1, U32 & String, String>) -> IO(String):
@@ -1309,6 +1365,7 @@ def resolver() -> IO(Unit):
     spawn_cpus(mc, done, cpus)
     display.start(display_window(disp), mc, done)
     IO.spawn(Unit, input_start(mc, done))
+    IO.spawn(Unit, signals(True{}, mc, done))
     IO.spawn(Unit, vs_accept_loop(mc, done))
     control(String.is_empty(ctl), ctl, mc, done)
     got : Maybe<&1, U32> <- Chan.recv(U32, done)

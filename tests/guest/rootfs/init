@@ -14,6 +14,15 @@ for m in virtio-rng rtc-pl031 netfs 9pnet 9pnet_virtio 9p vsock vmw_vsock_virtio
   [ $m = rtc-pl031 ] && grep -q bendbench /proc/cmdline && continue
   [ -f /lib/modules/$m.ko ] && insmod /lib/modules/$m.ko 2>/dev/null
 done
+# The power button (the virtio keyboard's KEY_POWER, which bend-vmm presses
+# on SIGTERM and the control socket's powerdown): sync and power off. An
+# event is 24 bytes; type 1 (EV_KEY), code 116, value 1 (pressed) end it.
+for e in /dev/input/event*; do
+  [ -e "$e" ] || continue
+  (while k=$(dd if=$e bs=24 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n') && [ -n "$k" ]; do
+    case $k in *0100740001000000) echo "GUEST: power button"; sync; poweroff -f ;; esac
+  done) &
+done
 echo "GUEST: up, kernel $(uname -r), $(nproc) cpus"
 if grep -q bendsoak /proc/cmdline; then
   sh /soak.sh

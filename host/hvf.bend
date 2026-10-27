@@ -82,6 +82,10 @@ def Hvf.disk_open_ro(path: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.signal_wait() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.disk_size(disk: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"

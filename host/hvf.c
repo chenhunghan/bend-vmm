@@ -1679,6 +1679,76 @@ static void hvf_tty_raw(void) {
   }
 }
 
+// Signals. SIGTERM, SIGINT and SIGHUP go to one thread of their own (every
+// other thread blocks them from the start, so no vCPU run and no poll sees
+// them), which hands their number to Hvf.signal_wait through a pipe. Until
+// Bend waits on them they end the VMM as before, with the terminal restored.
+static int        hvf_sig_pipe[2] = {-1, -1};
+static atomic_int hvf_sig_armed;
+static sigset_t   hvf_sig_set;
+
+static void* hvf_sig_thread(void* arg) {
+  (void)arg;
+  for (;;) {
+    int sig;
+    if (sigwait(&hvf_sig_set, &sig) != 0) {
+      continue;
+    }
+    if (!atomic_load(&hvf_sig_armed)) {
+      hvf_tty_restore();
+      signal(sig, SIG_DFL);
+      sigset_t one;
+      sigemptyset(&one);
+      sigaddset(&one, sig);
+      pthread_sigmask(SIG_UNBLOCK, &one, NULL);
+      raise(sig);
+    }
+    char c = (char)sig;
+    (void)!write(hvf_sig_pipe[1], &c, 1);
+  }
+  return NULL;
+}
+
+__attribute__((constructor)) static void hvf_sig_init(void) {
+  sigemptyset(&hvf_sig_set);
+  sigaddset(&hvf_sig_set, SIGTERM);
+  sigaddset(&hvf_sig_set, SIGINT);
+  sigaddset(&hvf_sig_set, SIGHUP);
+  if (pipe(hvf_sig_pipe) != 0) {
+    return;
+  }
+  for (int i = 0; i < 2; i++) {
+    fcntl(hvf_sig_pipe[i], F_SETFD, FD_CLOEXEC);
+    fcntl(hvf_sig_pipe[i], F_SETFL, fcntl(hvf_sig_pipe[i], F_GETFL) | O_NONBLOCK);
+  }
+  pthread_t t;
+  pthread_sigmask(SIG_BLOCK, &hvf_sig_set, NULL);
+  if (pthread_create(&t, NULL, hvf_sig_thread, NULL) == 0) {
+    pthread_detach(t);
+  } else {
+    pthread_sigmask(SIG_UNBLOCK, &hvf_sig_set, NULL);
+  }
+}
+
+static Term hvf_signal_more(Env e, IoWork* w) {
+  char c;
+  if (read(hvf_sig_pipe[0], &c, 1) != 1) {
+    return io_wait_on(w, hvf_sig_pipe[0], POLLIN, 0, hvf_signal_more);
+  }
+  return (Term)(u32)(unsigned char)c;
+}
+
+// Hvf.signal_wait() -> U32: from the first call on, SIGTERM, SIGINT and
+// SIGHUP no longer end the VMM; parks until one comes and answers its
+// number (0xFFFFFFFF when signals could not be set up).
+Term hvf_signal_wait_run(Env e, Term* f, IoWork* w) {
+  if (hvf_sig_pipe[0] < 0) {
+    return (Term)HVF_ERR;
+  }
+  atomic_store(&hvf_sig_armed, 1);
+  return io_wait_on(w, hvf_sig_pipe[0], POLLIN, 0, hvf_signal_more);
+}
+
 static Term hvf_stdin_more(Env e, IoWork* w) {
   char    buf[256];
   ssize_t k = read(0, buf, (size_t)w->made);
@@ -3794,6 +3864,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.disk_open)
   io_eff(CID(Hvf.disk_open), hvf_disk_open_run);
+#endif
+#ifdef CID(Hvf.signal_wait)
+  io_eff(CID(Hvf.signal_wait), hvf_signal_wait_run);
 #endif
 #ifdef CID(Hvf.disk_open_ro)
   io_eff(CID(Hvf.disk_open_ro), hvf_disk_open_ro_run);

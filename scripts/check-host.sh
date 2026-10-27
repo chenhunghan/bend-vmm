@@ -11,7 +11,8 @@
 #   2. (when host/main.bend exists) the same payloads on the full machine.
 #   3. Linux (scripts/linux-assets.sh) boots to its init marker and powers off.
 #   4. the guest suite (tests/guest/rootfs/tests.sh), net, 9p, vsock, console.
-#   5. lifecycle: pause, resume, snapshot, restore.
+#   5. lifecycle: pause, resume, snapshot, restore; SIGTERM and powerdown
+#      press the guest's power button.
 #   6. display: screendump, and the virtio keyboard and tablet driven through
 #      the control socket's type and pointer commands.
 #   7. UEFI: edk2 firmware boots Alpine's ISO (GRUB, Linux); an EFI variable
@@ -128,6 +129,16 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo quit | nc -U "$sock" >/dev/null; slp 1
   out=$(drive 40 "restored" 'cat /tmp/m\n' "MARK-42" 'poweroff -f\n' -- ./out/bend-vmm --restore "$t/vm.snap" 2>&1)
   grep -q "^MARK-42" <<<"$(tr -d '\r' <<<"$out")" && grep -q "stopped (0)" <<<"$out" && grn "ok: restore (guest RAM and CPUs continue)" || { red "failed: restore"; grep -a -v sysreg <<<"$out" | tail -15; fail=1; }
+  # SIGTERM, and the control socket's powerdown, press the guest's power
+  # button (the virtio keyboard's KEY_POWER): the guest powers off
+  for how in sigterm powerdown; do
+    ./out/bend-vmm --mem 256 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --control "$t/p.sock" --cmdline "console=ttyAMA0 quiet" < /dev/null > "$t/p.log" 2>&1 & p=$!
+    slp 6
+    if [ $how = sigterm ]; then kill -TERM $p; else [ "$(echo powerdown | nc -U "$t/p.sock")" = "powering down" ] || echo "no reply" >> "$t/p.log"; fi
+    for i in $(seq $((16 * SLOW))); do kill -0 $p 2>/dev/null || break; sleep 0.5; done
+    kill -9 $p 2>/dev/null; wait $p; code=$?
+    [ $code = 0 ] && grep -q "GUEST: power button" "$t/p.log" && grn "ok: $how powers the guest off (its power button)" || { red "failed: $how (exit $code)"; tail -5 "$t/p.log"; fail=1; }
+  done
   rm -rf "$t"
 fi
 
@@ -196,7 +207,7 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
     # locks: a second bend-vmm cannot open an image one writes, while two
     # overlays share their backing file
     qemu-img create -q -f qcow2 -b base.raw -F raw "$t/two.qcow2" 32M
-    vm() { ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$1" --cmdline "console=ttyAMA0 quiet" < /dev/null 2>&1; }
+    vm() { exec ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$1" --cmdline "console=ttyAMA0 quiet" < /dev/null 2>&1; }
     vm "$t/over.qcow2" > /dev/null & a=$!
     vm "$t/two.qcow2" > /dev/null & b=$!
     sleep $((3 * SLOW))
