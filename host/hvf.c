@@ -18,6 +18,7 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <stdatomic.h>
@@ -1714,15 +1715,27 @@ Term hvf_stdin_wait_run(Env e, Term* f, IoWork* w) {
 static int hvf_disks[HVF_MAX_DISKS];
 static int hvf_ndisks;
 
-// Hvf.disk_open(path) -> U32: opens a disk image read-write (read-only when
-// the file allows no more); its index, or
-// 0xFFFFFFFF.
-Term hvf_disk_open_run(Env e, Term* f, IoWork* w) {
+// Opens a disk image for the guest, read-write (read-only when ro, or when
+// the file allows no more), and locks it the way its use needs: a writer
+// alone, readers together, so a second bend-vmm cannot write an image this
+// one reads or writes (two writers corrupt a qcow2 image at once). Its index,
+// or 0xFFFFFFFF.
+static Term hvf_disk_open_as(Env e, Term path_t, int ro) {
   u64   n;
-  char* path = io_cstr(e, f[0], &n);
-  int   fd   = hvf_ndisks < HVF_MAX_DISKS ? open(path, O_RDWR) : -1;
-  if (fd < 0 && hvf_ndisks < HVF_MAX_DISKS && (errno == EACCES || errno == EROFS || errno == EPERM)) {
-    fd = open(path, O_RDONLY); // a read-only file (a qcow2 backing image)
+  char* path = io_cstr(e, path_t, &n);
+  int   fd   = -1;
+  if (hvf_ndisks < HVF_MAX_DISKS) {
+    fd = ro ? -1 : open(path, O_RDWR | O_CLOEXEC);
+    if (fd < 0 && (ro || errno == EACCES || errno == EROFS || errno == EPERM)) {
+      fd = open(path, O_RDONLY | O_CLOEXEC); // a read-only file (a qcow2 backing image)
+      ro = 1;
+    }
+  }
+  // a file system without locks (some network ones) answers ENOTSUP: go on
+  if (fd >= 0 && flock(fd, (ro ? LOCK_SH : LOCK_EX) | LOCK_NB) != 0 && errno == EWOULDBLOCK) {
+    fprintf(stderr, "bend-vmm: %s is in use by another process\n", path);
+    close(fd);
+    fd = -1;
   }
   free(path);
   if (fd < 0) {
@@ -1730,6 +1743,17 @@ Term hvf_disk_open_run(Env e, Term* f, IoWork* w) {
   }
   hvf_disks[hvf_ndisks] = fd;
   return (Term)(u32)hvf_ndisks++;
+}
+
+// Hvf.disk_open(path) -> U32: a disk image the guest may write.
+Term hvf_disk_open_run(Env e, Term* f, IoWork* w) {
+  return hvf_disk_open_as(e, f[0], 0);
+}
+
+// Hvf.disk_open_ro(path) -> U32: a disk image only read (a :ro disk, a
+// qcow2 backing file).
+Term hvf_disk_open_ro_run(Env e, Term* f, IoWork* w) {
+  return hvf_disk_open_as(e, f[0], 1);
 }
 
 static int hvf_disk(Term id) {
@@ -1746,9 +1770,17 @@ Term hvf_disk_size_run(Env e, Term* f, IoWork* w) {
   return hvf_words(e, ws, 2);
 }
 
-// Hvf.disk_flush(disk) -> U32: fsync; 0, or 0xFFFFFFFF.
+// Hvf.disk_flush(disk) -> U32: the image's writes on stable storage; 0, or
+// 0xFFFFFFFF. macOS's fsync only hands them to the drive, which may keep
+// them in its cache across a power loss: F_FULLFSYNC empties that too (and
+// fsync stays for file systems that refuse it).
 Term hvf_disk_flush_run(Env e, Term* f, IoWork* w) {
   int fd = hvf_disk(f[0]);
+#ifdef F_FULLFSYNC
+  if (fd >= 0 && fcntl(fd, F_FULLFSYNC) == 0) {
+    return (Term)0;
+  }
+#endif
   return (Term)(fd >= 0 && fsync(fd) == 0 ? 0 : HVF_ERR);
 }
 
@@ -3762,6 +3794,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.disk_open)
   io_eff(CID(Hvf.disk_open), hvf_disk_open_run);
+#endif
+#ifdef CID(Hvf.disk_open_ro)
+  io_eff(CID(Hvf.disk_open_ro), hvf_disk_open_ro_run);
 #endif
 #ifdef CID(Hvf.disk_size)
   io_eff(CID(Hvf.disk_size), hvf_disk_size_run);

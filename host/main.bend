@@ -1062,7 +1062,7 @@ def path_under(+dir: String, +name: String) -> String:
       do IO<St.Store>:
         name : +List<U32> <- H.Host.disk_read(id, off, len)
         +bpath : String = path_under(path_dir(path), bytes_str(name))
-        bid : U32 <- H.Hvf.disk_open(bpath)
+        bid : U32 <- H.Hvf.disk_open_ro(bpath)
         devices.chain(fuel, bpath, bid)
 
 # A disk image: qcow2 (its header says so) as a store over its backing
@@ -1084,11 +1084,19 @@ def path_under(+dir: String, +name: String) -> String:
     +head : +List<U32> <- H.Host.disk_read(id, U.U64.zero(), 512)
     devices.format(Qc.Qcow.parse(head), ro, path, id, head)
 
+# A :ro image is opened (and locked) only for reading.
+@unsafe def devices.open_as(ro: Bool, path: String) -> IO(U32):
+  match ro:
+    case True{}:
+      H.Hvf.disk_open_ro(path)
+    case False{}:
+      H.Hvf.disk_open(path)
+
 @unsafe def devices.one(+spec: String) -> IO(D.DevKind):
   +ro = String.ends_with(spec, ":ro")
   +path : String = Bool.pick(String, ro, String.take(spec, Nat.sub(String.length(spec), 3n)), spec)
   do IO<D.DevKind>:
-    id : U32 <- H.Hvf.disk_open(path)
+    id : U32 <- devices.open_as(ro, path)
     devices.open(ro, path, id)
 
 # --disk a.img,b.img:ro gives one virtio-blk per image, in order.

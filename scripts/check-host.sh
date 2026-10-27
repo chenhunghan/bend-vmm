@@ -18,7 +18,8 @@
 #      written by Linux survives a reboot in the --vars file.
 #   8. qcow2 (with qemu-img): a qcow2 over a raw backing file, a compressed
 #      image and a fresh one read and written by the guest; qemu-img checks
-#      them and reads back what the guest wrote.
+#      them and reads back what the guest wrote; a second bend-vmm cannot
+#      open an image one writes, two overlays share a backing file.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 host=$(uname -s)-$(uname -m)
@@ -192,6 +193,17 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
     done
     [ "$(python3 -c 'import hashlib, sys; print(hashlib.md5(open(sys.argv[1], "rb").read()).hexdigest())' "$t/base.raw")" = "$want" ] || ok=0
     [ $ok = 1 ] && grn "ok: qcow2 writes (qemu-img check passes, qemu-img reads what the guest wrote, the backing file is unchanged)" || { red "failed: qcow2 writes"; echo "$after"; fail=1; }
+    # locks: a second bend-vmm cannot open an image one writes, while two
+    # overlays share their backing file
+    qemu-img create -q -f qcow2 -b base.raw -F raw "$t/two.qcow2" 32M
+    vm() { ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$1" --cmdline "console=ttyAMA0 quiet" < /dev/null 2>&1; }
+    vm "$t/over.qcow2" > /dev/null & a=$!
+    vm "$t/two.qcow2" > /dev/null & b=$!
+    sleep $((3 * SLOW))
+    again=$(vm "$t/over.qcow2")
+    kill -0 $a 2>/dev/null && kill -0 $b 2>/dev/null && grep -q "in use by another process" <<<"$again" \
+      && grn "ok: image locks (a second writer is refused; overlays share a backing file)" || { red "failed: image locks"; echo "$again" | tail -3; fail=1; }
+    kill $a $b 2>/dev/null; wait $a $b 2>/dev/null
     rm -rf "$t"
   fi
 fi
