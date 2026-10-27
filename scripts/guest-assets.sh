@@ -40,7 +40,11 @@ lld=$(command -v ld.lld || ls /opt/homebrew/opt/lld*/bin/ld.lld 2>/dev/null | ta
 clang -target aarch64-linux-gnu -c tests/guest/vsock.S -o out/guest/vsock.o
 "$lld" -static -e _start out/guest/vsock.o -o out/guest/vsock
 rm -f out/guest/vsock.o
-mods="out/guest/vsock:bin/vsock"
+# the guest's benchmark program
+clang -target aarch64-linux-gnu -O2 -ffreestanding -fno-stack-protector -fno-builtin -c tests/guest/bench.c -o out/guest/bench.o
+"$lld" -static -e _start out/guest/bench.o -o out/guest/bench
+rm -f out/guest/bench.o
+mods="out/guest/vsock:bin/vsock out/guest/bench:bin/bench"
 for k in out/guest/modules/*.ko; do mods="$mods $k:lib/modules/$(basename "$k")"; done
 python3 scripts/mkinitramfs.py tests/guest/rootfs out/guest/guest.cpio out/guest/busybox:bin/busybox $mods
 echo out/guest/Image out/guest/guest.cpio

@@ -1,6 +1,7 @@
 #!/bin/busybox sh
 # bend-vmm guest userspace (busybox). With `bendtest` on the kernel command
-# line it runs the in-guest test suite and powers off; otherwise it starts an
+# line it runs the in-guest test suite and powers off (`bendbench`: the
+# benchmarks of scripts/bench.sh); otherwise it starts an
 # interactive shell on the console.
 /bin/busybox --install -s /bin
 mount -t proc proc /proc
@@ -9,9 +10,16 @@ mount -t devtmpfs dev /dev
 mkdir -p /etc /mnt
 # Drivers this kernel builds as modules (shipped by scripts/guest-assets.sh).
 for m in virtio-rng rtc-pl031 netfs 9pnet 9pnet_virtio 9p vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport virtio_input; do
+  # the benchmarks read the RTC's registers through /dev/mem: no driver there
+  [ $m = rtc-pl031 ] && grep -q bendbench /proc/cmdline && continue
   [ -f /lib/modules/$m.ko ] && insmod /lib/modules/$m.ko 2>/dev/null
 done
 echo "GUEST: up, kernel $(uname -r), $(nproc) cpus"
+if grep -q bendbench /proc/cmdline; then
+  sh /bench.sh
+  sleep 0.3
+  poweroff -f
+fi
 if grep -q bendtest /proc/cmdline; then
   sh /tests.sh
   echo "GUEST-TESTS-DONE"
