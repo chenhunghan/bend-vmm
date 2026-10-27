@@ -19,6 +19,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#include <sys/uio.h>
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <stdatomic.h>
@@ -1969,10 +1970,35 @@ static int hvf_iovs(const char* b, u64 nb, uint8_t** hva, u64* len, int max) {
 // fd, else reads fd into them, stopping at the end of the file (fill: zeros
 // the rest). The count moved; -1 (errno set) when nothing could be.
 static int64_t hvf_iov_io(int fd, int out, off_t off, uint8_t** hva, u64* len, int n, int fill) {
-  int64_t done = 0;
+  int64_t done = 0, skip = 0;
   int     eof  = 0;
+  // several pieces (a request of many segments) go in one call; what it
+  // leaves (a short read at the end of the file, a short write) goes piece
+  // by piece below
+  if (n > 1) {
+    struct iovec v[HVF_MAX_IOVS];
+    u64          total = 0;
+    for (int i = 0; i < n; i++) {
+      v[i].iov_base = hva[i];
+      v[i].iov_len  = len[i];
+      total += len[i];
+    }
+    ssize_t k;
+    do {
+      k = out ? pwritev(fd, v, n, off) : preadv(fd, v, n, off);
+    } while (k < 0 && errno == EINTR);
+    if (k >= 0 && (u64)k == total) {
+      return k;
+    }
+    skip = k > 0 ? k : 0;
+  }
   for (int i = 0; i < n; i++) {
     u64 got = 0;
+    if (skip > 0) {
+      got = (u64)skip < len[i] ? (u64)skip : len[i];
+      skip -= (int64_t)got;
+      done += (int64_t)got;
+    }
     while (!eof && got < len[i]) {
       ssize_t k = out ? pwrite(fd, hva[i] + got, len[i] - got, off + (off_t)done)
                       : pread(fd, hva[i] + got, len[i] - got, off + (off_t)done);
