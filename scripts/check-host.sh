@@ -240,6 +240,20 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
     kill -0 $a 2>/dev/null && kill -0 $b 2>/dev/null && grep -q "in use by another process" <<<"$again" \
       && grn "ok: image locks (a second writer is refused; overlays share a backing file)" || { red "failed: image locks"; echo "$again" | tail -3; fail=1; }
     kill $a $b 2>/dev/null; wait $a $b 2>/dev/null
+    # crash consistency: the VMM killed (SIGKILL) while the guest writes all
+    # over a fresh qcow2 image leaves one qemu-img checks clean (leaks
+    # would be allowed, corruption not)
+    qemu-img create -q -f qcow2 "$t/crash.qcow2" 64M
+    ok=1
+    for i in 1 2 3; do
+      ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/crash.qcow2" --cmdline "console=ttyAMA0 quiet" \
+        < <(sleep $((2 * SLOW)); echo 'while :; do dd if=/dev/urandom of=/dev/vda bs=64k seek=$((RANDOM % 1000)) count=4 oflag=direct 2>/dev/null; done'; sleep $((30 * SLOW))) > /dev/null 2>&1 & p=$!
+      sleep $(((3 + i) * SLOW)); kill -9 $p; wait $p 2>/dev/null
+      qemu-img check -q "$t/crash.qcow2"; rc=$?
+      [ $rc = 0 ] || [ $rc = 3 ] || ok=0
+    done
+    [ $ok = 1 ] && [ "$(qemu-img info "$t/crash.qcow2" | sed -n 's/^disk size: \([0-9]*\).*/\1/p')" -gt 1 ] \
+      && grn "ok: qcow2 survives SIGKILL mid-write (3 rounds, qemu-img check clean)" || { red "failed: qcow2 after SIGKILL"; qemu-img check "$t/crash.qcow2" | tail -3; fail=1; }
     # a guest cannot turn its raw disk into a qcow2 image (whose backing file
     # could name any host file): a qcow2 header at the start is refused
     dd if=/dev/zero of="$t/plain.raw" bs=1048576 count=4 2>/dev/null

@@ -3132,7 +3132,8 @@ static int hvf_resolve(u32 sh, const char* rel, char* out) {
   if (!realpath(parent, real)) {
     return errno;
   }
-  size_t rl = strlen(root);
+  // a share of "/" holds every path (its prefix is the empty string)
+  size_t rl = strcmp(root, "/") == 0 ? 0 : strlen(root);
   if (strncmp(real, root, rl) != 0 || (real[rl] != 0 && real[rl] != '/')) {
     return EACCES;
   }
