@@ -28,7 +28,7 @@ cat > "$t/seed/user-data" <<'EOF'
 #cloud-config
 runcmd:
   - [ sh, -c, 'echo "UBUNTU-UP $(uname -r) $(nproc) cpus" > /dev/ttyAMA0' ]
-  - [ sh, -c, 'echo "UBUNTU-HTTPS $(curl -s -o /dev/null -w %{http_code} https://cloud-images.ubuntu.com/)" > /dev/ttyAMA0' ]
+  - [ sh, -c, 'echo "UBUNTU-HTTPS $(curl -s --retry 5 --retry-all-errors --max-time 20 -o /dev/null -w %{http_code} https://cloud-images.ubuntu.com/)" > /dev/ttyAMA0' ]
   - [ sh, -c, 'echo "UBUNTU-FAILED $(systemctl --failed --no-legend | wc -l)" > /dev/ttyAMA0' ]
 EOF
 case "$(uname -s)" in
