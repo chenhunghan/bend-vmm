@@ -2340,6 +2340,24 @@ Term hvf_tcp_send_staged_run(Env e, Term* f, IoWork* w) {
   return (Term)r;
 }
 
+// Hvf.net_holds() -> List<U32>: for each TCP connection holding data for the
+// guest, [conn, bytes held, bytes already moved, parked] (the control
+// socket's net command).
+Term hvf_net_holds_run(Env e, Term* f, IoWork* w) {
+  uint32_t ws[4 * 64];
+  int      n = 0;
+  for (int i = 0; i < HVF_MAX_SOCKS && n < 64 * 4; i++) {
+    HvfSock* k = &hvf_socks[i];
+    if (k->used && !k->udp && k->rbuf) {
+      ws[n++] = k->key;
+      ws[n++] = k->rlen;
+      ws[n++] = k->roff;
+      ws[n++] = (uint32_t)k->parked;
+    }
+  }
+  return hvf_words(e, ws, (u64)n);
+}
+
 // Hvf.tcp_send(conn, bytes) -> U32: writes all bytes (waiting for room);
 // 0, or an errno.
 Term hvf_tcp_send_run(Env e, Term* f, IoWork* w) {
@@ -3594,6 +3612,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.tcp_recv)
   io_eff(CID(Hvf.tcp_recv), hvf_tcp_recv_run);
+#endif
+#ifdef CID(Hvf.net_holds)
+  io_eff(CID(Hvf.net_holds), hvf_net_holds_run);
 #endif
 #ifdef CID(Hvf.tcp_fill)
   io_eff(CID(Hvf.tcp_fill), hvf_tcp_fill_run);

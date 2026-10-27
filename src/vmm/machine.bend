@@ -700,6 +700,13 @@ def Machine.net_big(m: Machine) -> Bool:
 # The frames pending for the guest in the NetKind device (0 when there is
 # none), plus the NAT's queued bytes in 1460-byte segments: what the host's
 # readers wait on.
+# The NAT's connections as text (the control socket's net command), with the
+# frames pending for the guest.
+def Machine.net_show(+m: Machine) -> String:
+  match m:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      Nt.Slirp.show(nt) ++ "\npending " ++ U32.show(Machine.backlog(devs))
+
 def Machine.net_backlog(m: Machine) -> U32:
   match m:
     case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:

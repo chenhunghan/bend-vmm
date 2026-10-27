@@ -633,12 +633,24 @@ def pointer_of(arg: String) -> Maybe<&2, In.Hid>:
     case False{}:
       command.pointer(String.eq(verb, "pointer"), mc, done, verb, arg)
 
+# net: the NAT's connections and flow state, and the frames pending.
+@unsafe def command.net(is_net: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +verb: String, arg: String) -> IO(String):
+  match is_net:
+    case True{}:
+      do IO<String>:
+        +m : M.Machine <- take(mc)
+        put(mc, m)
+        holds : +List<U32> <- H.Hvf.net_holds()
+        return M.Machine.net_show(m) ++ "\nheld on the host [conn, bytes, moved, parked]...: " ++ List.show(~&2, ~U32, ~U32.show, holds)
+    case False{}:
+      command.type(String.eq(verb, "type"), mc, done, verb, arg)
+
 # One command line: a verb and an optional argument.
 @unsafe def command(+mc: Chan(M.Machine), +done: Chan(U32), +line: String) -> IO(String):
   +parts = String.split(String.trim(line), ' ')
   +verb = Maybe.default(&2, String, List.head(&2, String, parts), "")
   +arg = String.join(List.drop(&2, String, parts, 1n), " ")
-  command.type(String.eq(verb, "type"), mc, done, verb, arg)
+  command.net(String.eq(verb, "net"), mc, done, verb, arg)
 
 @unsafe def ctl_loop.got(stop: Bool, +mc: Chan(M.Machine), +done: Chan(U32), bs: +List<U32>) -> IO(Unit):
   match stop:

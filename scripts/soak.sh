@@ -9,7 +9,8 @@
 # resident memory at the end is within 20% of its size after the first
 # quarter (a leak grows it round after round). The samples go to
 # out/soak/<host>-<time>.tsv (seconds, RSS KiB, rounds), the guest's console
-# next to them (.log).
+# next to them (.log), and when rounds stop for a minute, the NAT's state
+# (.net, the control socket's net command).
 # SKIP_BUILD=1 uses out/bend-vmm as it is; VMM=path runs that binary instead.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -40,6 +41,10 @@ while kill -0 $vm 2>/dev/null && [ "$(date +%s)" -lt $deadline ]; do
   rss=$(ps -o rss= -p $vm 2>/dev/null | tr -d ' ')
   rounds=$(grep -c '^SOAK-ITER' "$t/run.log")
   [ -n "$rss" ] && printf '%s\t%s\t%s\n' $((now - start)) "$rss" "$rounds" >> "$res"
+  # no round for a minute: keep the NAT's state for the post-mortem
+  if [ "$rounds" = "${last_rounds:-}" ]; then stuck=$((stuck + 10)); else stuck=0; fi
+  last_rounds=$rounds
+  [ "${stuck:-0}" = 60 ] && [ -S "$sock" ] && { echo "== stuck at round $rounds, $((now - start)) s"; echo net | nc -U "$sock"; } >> "${res%.tsv}.net"
   if [ $((now - last_pause)) -ge "${SOAK_PAUSE:-60}" ] && [ -S "$sock" ]; then
     [ "$(echo pause | nc -U "$sock")" = paused ] && sleep 1 && [ "$(echo resume | nc -U "$sock")" = running ] && pauses=$((pauses + 1))
     last_pause=$now

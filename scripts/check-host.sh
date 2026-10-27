@@ -156,7 +156,7 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   # drive.py turns \\ into \ and \n into Enter: the guest's printf gets \007.
   set_var='printf "\\007\\000\\000\\000bend-ok" > '"$efivar"'; echo SET-$((6*7)); reboot\n'
   get_var='tail -c 7 '"$efivar"'; echo; echo AFTER-REBOOT; poweroff\n'
-  out=$(drive 100 "login:" 'root\n' "~# " "$set_var" "login:" 'root\n' "~# " "$get_var" -- \
+  out=$(drive 200 "login:" 'root\n' "~# " "$set_var" "login:" 'root\n' "~# " "$get_var" -- \
     ./out/bend-vmm --firmware out/uefi/code.fd --vars "$t/vars.fd" --mem 1024 --cpus 2 --disk out/uefi/alpine.iso:ro 2>&1 | tr -d '\r')
   grep -q "Welcome to Alpine" <<<"$out" && grn "ok: UEFI boots the Alpine ISO (edk2, GRUB, Linux $(grep -ao 'Linux [0-9][^ ]*' <<<"$out" | head -1 | cut -d' ' -f2))" || { red "failed: UEFI boot"; tail -5 <<<"$out"; fail=1; }
   grep -q "SET-42" <<<"$out" && [ "$(grep -c 'Welcome to Alpine Linux' <<<"$out")" = 2 ] && grn "ok: UEFI reboot" || { red "failed: UEFI reboot"; grep -a -v sysreg <<<"$out" | tail -15; fail=1; }

@@ -143,6 +143,10 @@ def Hvf.tcp_recv(conn: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.net_holds() -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.tcp_fill(conn: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"

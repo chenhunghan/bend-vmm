@@ -760,3 +760,22 @@ def Slirp.queued(n: Slirp) -> U32:
   match n:
     case Slirp{conns, next_id}:
       Conns.queued(conns)
+
+# A connection, for the control socket's net command: its addresses, state,
+# sequence numbers and flow toward the guest.
+def Conn.show(c: Conn) -> String:
+  match c:
+    case Conn{id, gport, rip, rport, state, gseq, +hseq, Flow{+wnd, held, queue, eof, sc}}:
+      "tcp " ++ U32.show(id) ++ " " ++ U32.show(gport) ++ " -> " ++ U32.show(rip) ++ ":" ++ U32.show(rport) ++ " state " ++ U32.show(state) ++ " gseq " ++ U32.show(gseq) ++ " hseq " ++ U32.show(hseq) ++ " wnd " ++ U32.show(wnd) ++ " room " ++ U32.show(Flow.room(wnd, hseq)) ++ " held " ++ U32.show(held) ++ " queued " ++ U32.show(U32.from_nat(List.length(&2, U32, queue))) ++ " eof " ++ U32.show(Bool.to_u32(eof)) ++ " scale " ++ U32.show(sc)
+
+def Conns.show(cs: +List<Conn>) -> String:
+  match cs:
+    case Nil{}:
+      ""
+    case c <> t:
+      Conn.show(c) ++ "\n" ++ Conns.show(t)
+
+def Slirp.show(n: Slirp) -> String:
+  match n:
+    case Slirp{conns, next_id}:
+      Conns.show(conns) ++ "next " ++ U32.show(next_id)
