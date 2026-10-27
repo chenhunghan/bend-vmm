@@ -123,11 +123,30 @@ def Sim.disk_read(s: Sim, disk: U32, offset: U.U64, len: U32) -> +List<U32>:
     case Sim{b, m, +d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs, vs}:
       Bool.pick(+List<U32>, U32.is_zero(disk), B.Bytes.slice(d, U32.to_nat(U.U64.lo(offset)), U32.to_nat(len)), [])
 
-# VmDiskToRam: the disk's bytes, zero-padded to len, written to memory.
-def Sim.disk_to_ram(+s: Sim, disk: U32, offset: U.U64, addr: U.U64, +len: U32) -> Sim:
+# The bytes bs laid over the pieces of memory, in order.
+def Sim.scatter(ss: +List<V.Iov>, s: Sim, +bs: +List<U32>) -> Sim:
+  match ss:
+    case Nil{}:
+      s
+    case V.Iov{a, +l} <> t:
+      +n = U32.to_nat(l)
+      Sim.scatter(t, Sim.write(s, a, List.take(&2, U32, bs, n)), List.drop(&2, U32, bs, n))
+
+# The bytes of the pieces of memory, in order.
+def Sim.gather(ss: +List<V.Iov>, +s: Sim) -> +List<U32>:
+  match ss:
+    case Nil{}:
+      []
+    case V.Iov{a, l} <> t:
+      List.append(&2, U32, Sim.read(s, a, l), Sim.gather(t, s))
+
+# VmDiskToRam: the disk's bytes, zero-padded to the pieces' length, laid
+# over them.
+def Sim.disk_to_ram(+s: Sim, disk: U32, offset: U.U64, +iovs: +List<V.Iov>) -> Sim:
+  +len = V.Iov.total(iovs)
   +n = U32.to_nat(len)
   bs = List.take(&2, U32, List.append(&2, U32, Sim.disk_read(s, disk, offset, len), B.Bytes.zeros(n)), n)
-  Sim.write(s, addr, bs)
+  Sim.scatter(iovs, s, bs)
 
 def Sim.disk_write.go(zero: Bool, s: Sim, offset: U.U64, bytes: +List<U32>) -> Sim:
   match zero:
@@ -218,6 +237,28 @@ def Sim.fs_op.fin(s: Sim, r: F.SimFs & V.FsResult) -> Sim & V.FsResult:
     case (fs, res):
       (Sim.with_fs(s, fs), res)
 
+# FsReadRam: the bytes FsRead answered go over the pieces of memory,
+# answered as their count.
+def Sim.fs_read_ram(s: Sim, iovs: +List<V.Iov>, r: F.SimFs & V.FsResult) -> Sim & V.FsResult:
+  match r:
+    case (fs, res):
+      match res:
+        case V.FsBytes{+bs}:
+          (Sim.with_fs(Sim.scatter(iovs, s, bs), fs), V.FsCount{U32.from_nat(List.length(&2, U32, bs))})
+        case res:
+          (Sim.with_fs(s, fs), res)
+
+# Applies op to the filesystem fs; s holds an empty one meanwhile. The
+# guest-memory operations go through memory and FsRead or FsWrite.
+def Sim.fs_apply(+s: Sim, fs: F.SimFs, op: V.FsOp) -> Sim & V.FsResult:
+  match op:
+    case V.FsReadRam{p, off, +iovs}:
+      Sim.fs_read_ram(s, iovs, F.SimFs.apply(fs, V.FsRead{p, off, V.Iov.total(iovs)}))
+    case V.FsWriteRam{p, off, iovs}:
+      Sim.fs_op.fin(s, F.SimFs.apply(fs, V.FsWrite{p, off, Sim.gather(iovs, s)}))
+    case op:
+      Sim.fs_op.fin(s, F.SimFs.apply(fs, op))
+
 def Sim.fs_op.go(zero: Bool, s: Sim, op: V.FsOp) -> Sim & V.FsResult:
   match zero:
     case False{}:
@@ -226,7 +267,7 @@ def Sim.fs_op.go(zero: Bool, s: Sim, op: V.FsOp) -> Sim & V.FsResult:
     case True{}:
       match s:
         case Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs, vs}:
-          Sim.fs_op.fin(Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, F.SimFs.new(), vs}, F.SimFs.apply(fs, op))
+          Sim.fs_apply(Sim{b, m, d, sd, c, r, p, i, pw, co, l, fl, nt, nw, F.SimFs.new(), vs}, fs, op)
 
 # Applies a filesystem operation of share sh: the new state and the answer.
 def Sim.fs_op(s: Sim, sh: U32, op: V.FsOp) -> Sim & V.FsResult:
@@ -300,12 +341,11 @@ def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
         case V.VmFs{+sh, +op, k}:
           +s = s
           Sim.run(f, A, Sim.fs_next(s, sh, op), k(Sim.fs_answer(s, sh, op)))
-        case V.VmDiskToRam{+dk, +off, a, +n, next}:
+        case V.VmDiskToRam{dk, off, iovs, next}:
+          Sim.run(f, A, Sim.disk_to_ram(s, dk, off, iovs), next)
+        case V.VmRamToDisk{dk, off, iovs, next}:
           +s = s
-          Sim.run(f, A, Sim.disk_to_ram(s, dk, off, a, n), next)
-        case V.VmRamToDisk{dk, off, +a, +n, next}:
-          +s = s
-          Sim.run(f, A, Sim.disk_write(s, dk, off, Sim.read(s, a, n)), next)
+          Sim.run(f, A, Sim.disk_write(s, dk, off, Sim.gather(iovs, s)), next)
 
 # Runs an Op to completion with a generous step budget.
 def Sim.exec(-A: Type, s: Sim, m: V.Op<A, A>) -> Maybe<&1, Sim & A>:

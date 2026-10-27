@@ -84,27 +84,6 @@ def Blk.kind(+t: U32) -> Nat:
       Bool.pick(Nat, U32.is_eq(t, 8), 2n,
         Bool.pick(Nat, U32.is_eq(t, 4), 3n, 4n))))
 
-# Copies the disk from byte offset off into the segments, in order: the
-# host moves the bytes (Op.disk_to_ram), none pass through Bend.
-def Blk.copy_in(ss: +List<Q.Seg>, -R: Type, +disk: U32, +off: U.U64) -> V.Op<R, Unit>:
-  match ss:
-    case Nil{}:
-      V.Op.pure(R, Unit, Unit{})
-    case Q.Seg{a, +l} <> t:
-      do V.Op<R, Unit>:
-        V.Op.disk_to_ram(R, disk, off, a, l)
-        Blk.copy_in(t, R, disk, U.U64.add_u32(off, l))
-
-# Copies the segments, in order, to the disk from byte offset off.
-def Blk.copy_out(ss: +List<Q.Seg>, -R: Type, +disk: U32, +off: U.U64) -> V.Op<R, Unit>:
-  match ss:
-    case Nil{}:
-      V.Op.pure(R, Unit, Unit{})
-    case Q.Seg{a, +l} <> t:
-      do V.Op<R, Unit>:
-        V.Op.ram_to_disk(R, disk, off, a, l)
-        Blk.copy_out(t, R, disk, U.U64.add_u32(off, l))
-
 # Writes byte b at offset off of the writable area ds.
 def Blk.put(-R: Type, ds: +List<Q.Desc>, +off: U32, +b: U32) -> V.Op<R, Unit>:
   match ds:
@@ -134,18 +113,18 @@ def Blk.in(-R: Type, ok: Bool, disk: U32, sector: U.U64, +w: +List<Q.Desc>, +roo
     case True{}:
       +last = (room - 1 : U32)
       do V.Op<R, U32>:
-        Blk.copy_in(Q.Vq.segs(w, 0, last), R, disk, Blk.offset(sector))
+        V.Op.disk_to_ram(R, disk, Blk.offset(sector), Q.Vq.segs(w, 0, last))
         Blk.put(R, w, last, Blk.s_ok())
         return room
 
 # OUT: the readable data after the header (ss) written at sector.
-def Blk.out(-R: Type, ok: Bool, disk: U32, sector: U.U64, ss: +List<Q.Seg>, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
+def Blk.out(-R: Type, ok: Bool, disk: U32, sector: U.U64, ss: +List<V.Iov>, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
   match ok:
     case False{}:
       Blk.reply(R, w, room, (Blk.s_ioerr(), []))
     case True{}:
       do V.Op<R, U32>:
-        Blk.copy_out(ss, R, disk, Blk.offset(sector))
+        V.Op.ram_to_disk(R, disk, Blk.offset(sector), ss)
         Blk.reply(R, w, room, (Blk.s_ok(), []))
 
 # OUT on a disk that may be read-only: IOERR without writing when ro.
@@ -155,7 +134,7 @@ def Blk.out_ro(-R: Type, ro: Bool, disk: U32, +sectors: U.U64, +sector: U.U64, +
       Blk.reply(R, w, room, (Blk.s_ioerr(), []))
     case False{}:
       +ss = Q.Vq.segs(r, 16, 4294967295)
-      Blk.out(R, Blk.fits(sectors, sector, Q.Seg.total(ss)), disk, sector, ss, w, room)
+      Blk.out(R, Blk.fits(sectors, sector, V.Iov.total(ss)), disk, sector, ss, w, room)
 
 # FLUSH: makes earlier writes durable.
 def Blk.flush(-R: Type, disk: U32, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
@@ -210,7 +189,7 @@ def Blk.answer_chain(
 # Serves one request chain and pushes it used. A chain without a writable
 # byte has no status to answer in: it is returned untouched, used length 0.
 # The header is read through Bend; the data moves between the disk and the
-# chain's memory on the host (Blk.copy_in, Blk.copy_out).
+# chain's memory on the host (Op.disk_to_ram, Op.ram_to_disk).
 def Blk.serve_chain(-R: Type, ro: Bool, disk: U32, sectors: U.U64, q: Q.Vq, c: Q.Chain) -> V.Op<R, Q.Vq>:
   match c:
     case Q.Chain{+h, r, +w}:

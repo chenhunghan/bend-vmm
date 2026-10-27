@@ -1,6 +1,7 @@
 import Base
 import ../src/lib/u64.bend as U
 import ../src/virtio/mmio.bend as M
+import ../src/vmm/abi.bend as V
 import ../src/virtio/queue.bend as Q
 
 # Frozen spec for the pure parts of src/virtio/queue.bend. Its guest-memory
@@ -19,13 +20,13 @@ law virtio_queue.from_cfg:
 # Proposed: the memory a device moves on the host (Vq.segs) is the chain's
 # own, after the header, cut at the room it may use.
 law virtio_queue.segs_skip_header_desc:
-  {Q.Vq.segs([Q.Desc{U.U64{0, 100}, 16, 1, 1}, Q.Desc{U.U64{0, 200}, 512, 1, 0}], 16, 4294967295) == [Q.Seg{U.U64{0, 200}, 512}] : +List<Q.Seg>}
+  {Q.Vq.segs([Q.Desc{U.U64{0, 100}, 16, 1, 1}, Q.Desc{U.U64{0, 200}, 512, 1, 0}], 16, 4294967295) == [V.Iov{U.U64{0, 200}, 512}] : +List<V.Iov>}
 
 law virtio_queue.segs_skip_inside_desc:
-  {Q.Vq.segs([Q.Desc{U.U64{0, 100}, 528, 1, 0}], 16, 4294967295) == [Q.Seg{U.U64{0, 116}, 512}] : +List<Q.Seg>}
+  {Q.Vq.segs([Q.Desc{U.U64{0, 100}, 528, 1, 0}], 16, 4294967295) == [V.Iov{U.U64{0, 116}, 512}] : +List<V.Iov>}
 
 law virtio_queue.segs_cut_at_max:
-  {Q.Vq.segs([Q.Desc{U.U64{0, 100}, 300, 2, 1}, Q.Desc{U.U64{0, 500}, 300, 2, 0}], 0, 400) == [Q.Seg{U.U64{0, 100}, 300}, Q.Seg{U.U64{0, 500}, 100}] : +List<Q.Seg>}
+  {Q.Vq.segs([Q.Desc{U.U64{0, 100}, 300, 2, 1}, Q.Desc{U.U64{0, 500}, 300, 2, 0}], 0, 400) == [V.Iov{U.U64{0, 100}, 300}, V.Iov{U.U64{0, 500}, 100}] : +List<V.Iov>}
 
 law virtio_queue.segs_nothing_past_max:
-  {Q.Vq.segs([Q.Desc{U.U64{0, 100}, 300, 2, 1}, Q.Desc{U.U64{0, 500}, 300, 2, 0}], 0, 300) == [Q.Seg{U.U64{0, 100}, 300}] : +List<Q.Seg>}
+  {Q.Vq.segs([Q.Desc{U.U64{0, 100}, 300, 2, 1}, Q.Desc{U.U64{0, 500}, 300, 2, 0}], 0, 300) == [V.Iov{U.U64{0, 100}, 300}] : +List<V.Iov>}

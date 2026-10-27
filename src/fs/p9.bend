@@ -13,7 +13,7 @@ import ./p9wire.bend as W
 # State: msize and the fid table, each fid naming a path relative to the
 # share ("" is its root) and whether it was opened.
 # Behaviour:
-#   Tversion: msize = min(requested, 65536); version "9P2000.L" if requested
+#   Tversion: msize = min(requested, 524288); version "9P2000.L" if requested
 #     exactly, else "unknown". Resets the fid table.
 #   Tattach: fid -> "" (root), Rattach with the root's qid (from FsStat).
 #   Twalk: newfid -> fid's path extended by each name, stopping at the first
@@ -81,9 +81,10 @@ def P9.einval() -> U32:
 def P9.eopnotsupp() -> U32:
   95
 
-# The largest msize this server accepts.
+# The largest msize this server accepts: reads and writes move their data on
+# the host, so a large one costs Bend nothing per byte and saves requests.
 def P9.max_msize() -> U32:
-  65536
+  524288
 
 # a - b, or 0 when b is larger.
 def P9.sub_sat(+a: U32, +b: U32) -> U32:
@@ -640,14 +641,99 @@ def P9.reply_chain(-R: Type, a: P9Answer, q: Q.Vq, +h: U32, w: +List<Q.Desc>) ->
         q2 : Q.Vq <- Q.Vq.push(R, q, h, U32.from_nat(List.length(&2, U32, reply)))
         return P9Pass{st, q2, True{}}
 
-# Serves one chain.
-def P9.serve_chain(-R: Type, +share: U32, s: P9State, q: Q.Vq, c: Q.Chain) -> V.Op<R, P9Pass>:
-  match c:
-    case Q.Chain{+h, r, w}:
+# Answers an error the generic way.
+def P9.reply_err(-R: Type, s: P9State, +tag: U32, e: U32, q: Q.Vq, +h: U32, w: +List<Q.Desc>) -> V.Op<R, P9Pass>:
+  do V.Op<R, P9Pass>:
+    a : P9Answer <- P9.err(R, s, tag, e)
+    P9.reply_chain(R, a, q, h, w)
+
+def P9.read_done.ok(-R: Type, s: P9State, +tag: U32, +n: U32, q: Q.Vq, +h: U32, +w: +List<Q.Desc>) -> V.Op<R, P9Pass>:
+  +hdr = List.append(&2, U32, B.Bytes.le32((n + 11 : U32)), List.append(&2, U32, [117], List.append(&2, U32, B.Bytes.le16(tag), B.Bytes.le32(n))))
+  do V.Op<R, P9Pass>:
+    k : U32 <- Q.Vq.scatter(R, Q.Chain{h, [], w}, hdr)
+    q2 : Q.Vq <- Q.Vq.push(R, q, h, (n + 11 : U32))
+    return P9Pass{s, q2, True{}}
+
+# Rread of the n bytes FsReadRam put in the chain's memory: its 11-byte
+# header {size, 117, tag, count} goes in front of them. An error the generic
+# way.
+def P9.read_done(-R: Type, s: P9State, +tag: U32, r: V.FsResult, q: Q.Vq, +h: U32, +w: +List<Q.Desc>) -> V.Op<R, P9Pass>:
+  match r:
+    case V.FsCount{n}:
+      P9.read_done.ok(R, s, tag, n, q, h, w)
+    case r:
+      P9.reply_err(R, s, tag, P9.fail(r), q, h, w)
+
+def P9.read_fast.go(
+  -R: Type, m: Maybe<&2, Fid>, +share: U32, +s: P9State, +tag: U32, offset: U.U64, +count: U32, q: Q.Vq, +h: U32, +w: +List<Q.Desc>
+) -> V.Op<R, P9Pass>:
+  match m:
+    case None{}:
+      P9.reply_err(R, s, tag, P9.ebadf(), q, h, w)
+    case Some{f}:
+      +room = V.Iov.total(Q.Vq.segs(w, 0, 4294967295))
+      +cap = U32.min(count, U32.min(P9.sub_sat(P9State.msize(s), 11), P9.sub_sat(room, 11)))
+      do V.Op<R, P9Pass>:
+        r : V.FsResult <- V.Op.fs(R, share, V.FsReadRam{Fid.path(f), offset, Q.Vq.segs(w, 11, cap)})
+        P9.read_done(R, s, tag, r, q, h, w)
+
+# Tread: the data goes from the file straight into the chain's memory after
+# the Rread header (count capped to msize - 11 and to the room).
+def P9.read_fast(-R: Type, +share: U32, +s: P9State, +hdr: +List<U32>, q: Q.Vq, +h: U32, +w: +List<Q.Desc>) -> V.Op<R, P9Pass>:
+  +tag = B.Bytes.read_le16(List.drop(&2, U32, hdr, 5n))
+  +fid = B.Bytes.read_le32(List.drop(&2, U32, hdr, 7n))
+  offset = B.Bytes.read_le64(List.drop(&2, U32, hdr, 11n))
+  count = B.Bytes.read_le32(List.drop(&2, U32, hdr, 19n))
+  P9.read_fast.go(R, P9.fid_find(P9State.fids(s), fid), share, s, tag, offset, count, q, h, w)
+
+def P9.write_fast.go(
+  -R: Type, m: Maybe<&2, Fid>, +share: U32, +s: P9State, +tag: U32, offset: U.U64, ss: +List<V.Iov>, q: Q.Vq, +h: U32, +w: +List<Q.Desc>
+) -> V.Op<R, P9Pass>:
+  match m:
+    case None{}:
+      P9.reply_err(R, s, tag, P9.ebadf(), q, h, w)
+    case Some{f}:
+      do V.Op<R, P9Pass>:
+        r : V.FsResult <- V.Op.fs(R, share, V.FsWriteRam{Fid.path(f), offset, ss})
+        a : P9Answer <- P9.on_count(R, r, s, tag)
+        P9.reply_chain(R, a, q, h, w)
+
+# Twrite: the data goes from the chain's memory after the 23-byte header
+# straight to the file (at most count bytes).
+def P9.write_fast(-R: Type, +share: U32, +s: P9State, +hdr: +List<U32>, r: +List<Q.Desc>, q: Q.Vq, +h: U32, +w: +List<Q.Desc>) -> V.Op<R, P9Pass>:
+  +tag = B.Bytes.read_le16(List.drop(&2, U32, hdr, 5n))
+  +fid = B.Bytes.read_le32(List.drop(&2, U32, hdr, 7n))
+  offset = B.Bytes.read_le64(List.drop(&2, U32, hdr, 11n))
+  count = B.Bytes.read_le32(List.drop(&2, U32, hdr, 19n))
+  P9.write_fast.go(R, P9.fid_find(P9State.fids(s), fid), share, s, tag, offset, Q.Vq.segs(r, 23, count), q, h, w)
+
+# Which way a request is served, from its first 23 bytes: 1 Tread, 2 Twrite
+# (both exactly 23-byte headers), else 0 (the whole message through Bend).
+def P9.path(+hdr: +List<U32>) -> Nat:
+  +full = Nat.is_eq(List.length(&2, U32, hdr), 23n)
+  +t = Maybe.default(&2, U32, List.get(&2, U32, hdr, 4n), 0)
+  Bool.pick(Nat, full && U32.is_eq(t, 116), 1n, Bool.pick(Nat, full && U32.is_eq(t, 118), 2n, 0n))
+
+def P9.serve_path(-R: Type, k: Nat, +share: U32, s: P9State, q: Q.Vq, +h: U32, +r: +List<Q.Desc>, +w: +List<Q.Desc>, +hdr: +List<U32>) -> V.Op<R, P9Pass>:
+  match k:
+    case 1n:
+      P9.read_fast(R, share, s, hdr, q, h, w)
+    case 2n:
+      P9.write_fast(R, share, s, hdr, r, q, h, w)
+    case _:
       do V.Op<R, P9Pass>:
         req : +List<U32> <- Q.Vq.gather(R, Q.Chain{h, r, []})
         a : P9Answer <- P9.handle(R, share, s, W.P9.parse(req))
         P9.reply_chain(R, a, q, h, w)
+
+# Serves one chain. Reads and writes move their data between the file and
+# the chain's memory on the host; every other request is parsed whole.
+def P9.serve_chain(-R: Type, +share: U32, s: P9State, q: Q.Vq, c: Q.Chain) -> V.Op<R, P9Pass>:
+  match c:
+    case Q.Chain{+h, +r, w}:
+      do V.Op<R, P9Pass>:
+        +hdr : +List<U32> <- Q.Vq.read_segs(R, Q.Vq.segs(r, 0, 23))
+        P9.serve_path(R, P9.path(hdr), share, s, q, h, r, w, hdr)
 
 # After a pop: stops on an empty queue, else serves the chain and continues
 # with k.

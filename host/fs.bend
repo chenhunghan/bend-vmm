@@ -91,3 +91,7 @@ def Host.fs(sh: U32, op: V.FsOp) -> IO(V.FsResult):
       Fs.call(sh, 11, p, "", U.U64.zero(), 0, [])
     case V.FsStatfs{}:
       Fs.call(sh, 12, "", "", U.U64.zero(), 0, [])
+    case V.FsReadRam{p, off, iovs}:
+      Fs.call(sh, 13, p, "", off, 0, H.Host.iovs(iovs))
+    case V.FsWriteRam{p, off, iovs}:
+      Fs.call(sh, 14, p, "", off, 0, H.Host.iovs(iovs))

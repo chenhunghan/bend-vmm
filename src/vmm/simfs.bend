@@ -467,6 +467,12 @@ def SimFs.apply(fs: SimFs, op: V.FsOp) -> SimFs & V.FsResult:
       SimFs.readlink(fs, p)
     case V.FsStatfs{}:
       SimFs.statfs(fs)
+    # Guest memory is the simulator's (Sim.fs_apply turns these into
+    # FsRead and FsWrite); here they are not supported: ENOSYS.
+    case V.FsReadRam{p, off, iovs}:
+      SimFs.ret(fs, V.FsErr{78})
+    case V.FsWriteRam{p, off, iovs}:
+      SimFs.ret(fs, V.FsErr{78})
 
 def SimFs.fst(r: SimFs & V.FsResult) -> SimFs:
   match r:

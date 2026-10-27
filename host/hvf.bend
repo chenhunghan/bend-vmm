@@ -1,5 +1,6 @@
 import Base
 import ../src/lib/u64.bend as U
+import ../src/lib/bytes.bend as B
 import ../src/vmm/abi.bend as V
 
 # Hypervisor.framework effects (host/hvf.c) and their typed wrappers.
@@ -89,7 +90,7 @@ def Hvf.disk_write(disk: U32, off_hi: U32, off_lo: U32, bytes: +List<U32>) -> IO
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.disk_copy(disk: U32, dir: U32, off_hi: U32, off_lo: U32, gpa_hi: U32, gpa_lo: U32, len: U32) -> IO(U32):
+def Hvf.disk_copy(disk: U32, dir: U32, off_hi: U32, off_lo: U32, iovs: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -335,12 +336,21 @@ def Host.disk_write(disk: U32, off: U.U64, bytes: +List<U32>) -> IO(U32):
     case U.U64{h, l}:
       Hvf.disk_write(disk, h, l, bytes)
 
-# Moves len bytes between a disk and guest RAM on the host: dir 0 disk to
-# RAM, 1 RAM to disk.
-def Host.disk_copy(disk: U32, dir: U32, off: U.U64, gpa: U.U64, len: U32) -> IO(U32):
-  match off gpa:
-    case U.U64{oh, ol} U.U64{gh, gl}:
-      Hvf.disk_copy(disk, dir, oh, ol, gh, gl, len)
+# Pieces of guest memory as the host takes them: each addr (8 bytes) then
+# len (4), little-endian.
+def Host.iovs(xs: +List<V.Iov>) -> +List<U32>:
+  match xs:
+    case Nil{}:
+      []
+    case V.Iov{a, l} <> t:
+      List.append(&2, U32, B.Bytes.le64(a), List.append(&2, U32, B.Bytes.le32(l), Host.iovs(t)))
+
+# Moves bytes between a disk and pieces of guest RAM on the host: dir 0 disk
+# to RAM, 1 RAM to disk.
+def Host.disk_copy(disk: U32, dir: U32, off: U.U64, iovs: +List<V.Iov>) -> IO(U32):
+  match off:
+    case U.U64{oh, ol}:
+      Hvf.disk_copy(disk, dir, oh, ol, Host.iovs(iovs))
 
 def Host.disk_size(disk: U32) -> IO(U.U64):
   do IO<U.U64>:

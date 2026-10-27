@@ -135,7 +135,7 @@ def nofid() -> U32:
   4294967295
 
 def version() -> Step:
-  Step{W.Tversion{131072, str("9P2000.L")}, W.Rversion{65536, str("9P2000.L")}}
+  Step{W.Tversion{65536, str("9P2000.L")}, W.Rversion{65536, str("9P2000.L")}}
 
 def attach() -> Step:
   Step{W.Tattach{0, nofid(), str("root"), str(""), 0}, W.Rattach{root_qid()}}
@@ -168,6 +168,7 @@ def mount() -> IO(Unit):
     scenario("p9 version small", [Step{W.Tversion{8192, str("9P2000.L")}, W.Rversion{8192, str("9P2000.L")}}])
     scenario("p9 version unknown", [Step{W.Tversion{8192, str("9P2000.u")}, W.Rversion{8192, str("unknown")}}])
     # Tversion resets the fid table.
+    scenario("p9 version caps msize", [Step{W.Tversion{1048576, str("9P2000.L")}, W.Rversion{524288, str("9P2000.L")}}])
     scenario("p9 version resets fids", [version(), attach(), version(), Step{getattr(0), err(9)}])
 
 # 2. Walk to a file, getattr, lopen, read.
@@ -492,6 +493,39 @@ def process() -> IO(Unit):
     check_q("p9 process empty", run_q(machine(one_chain(21), 0, [], [], []), P.P9State.new()),
       17408, [0, 0, 0, 0], [0, 0, 0, 0], False{}, 0)
 
+# Tread tag 3, fid, offset, count; 23 bytes.
+def tread(fid: U32, off: U32, count: U32) -> +List<U32>:
+  cat([23, 0, 0, 0, 116, 3, 0], cat(B.Bytes.le32(fid), cat(B.Bytes.le64(u64(off)), B.Bytes.le32(count))))
+
+# Twrite tag 4, fid, offset, count; a 23-byte header (the data follows it).
+def twrite(fid: U32, off: U32, +count: U32) -> +List<U32>:
+  cat(B.Bytes.le32((23 + count : U32)), cat([118, 4, 0], cat(B.Bytes.le32(fid), cat(B.Bytes.le64(u64(off)), B.Bytes.le32(count)))))
+
+# Reads and writes over chains: the data moves between the file and the
+# chain's memory (FsReadRam, FsWriteRam), the header through Bend.
+def process_rw() -> IO(Unit):
+  +opened = {P.P9State{65536, [P.Fid{1, "hello.txt", True{}}, P.Fid{0, "", False{}}]} : P.P9State}
+  # the reply split over two writable descriptors: 5 bytes at 17408, then 18432
+  +split = cat(desc(16384, 23, 1, 1), cat(desc(17408, 5, 3, 2), desc(18432, 1024, 2, 0)))
+  # Twrite "HEL" at offset 0 (header and data in two readable descriptors),
+  # then Tread of the whole file
+  +wr = cat(desc(16384, 23, 1, 1), cat(desc(16600, 3, 1, 2), cat(desc(17408, 1024, 2, 0), cat(desc(16512, 23, 1, 4), desc(18432, 1024, 2, 0)))))
+  do IO<Unit>:
+    check_q("p9 process read", run_q(machine(one_chain(23), 1, [0], tread(1, 0, 100), []), opened),
+      17408, cat([22, 0, 0, 0, 117, 3, 0, 11, 0, 0, 0], str("hello world")), cat([0, 0, 1, 0], le32s([0, 22])), True{}, 1)
+    check_q("p9 process read offset", run_q(machine(one_chain(23), 1, [0], tread(1, 6, 3), []), opened),
+      17408, cat([14, 0, 0, 0, 117, 3, 0, 3, 0, 0, 0], str("wor")), cat([0, 0, 1, 0], le32s([0, 14])), True{}, 1)
+    check_q("p9 process read split head", run_q(machine(split, 1, [0], tread(1, 0, 100), []), opened),
+      17408, [22, 0, 0, 0, 117], cat([0, 0, 1, 0], le32s([0, 22])), True{}, 1)
+    check_q("p9 process read split rest", run_q(machine(split, 1, [0], tread(1, 0, 100), []), opened),
+      18432, cat([3, 0, 11, 0, 0, 0], str("hello world")), cat([0, 0, 1, 0], le32s([0, 22])), True{}, 1)
+    check_q("p9 process read bad fid", run_q(machine(one_chain(23), 1, [0], tread(7, 0, 100), []), opened),
+      17408, [11, 0, 0, 0, 7, 3, 0, 9, 0, 0, 0], cat([0, 0, 1, 0], le32s([0, 11])), True{}, 1)
+    check_q("p9 process write", run_q(S.Sim.write(machine(wr, 2, [0, 3], twrite(1, 0, 3), tread(1, 0, 100)), u64(16600), str("HEL")), opened),
+      17408, [11, 0, 0, 0, 119, 4, 0, 3, 0, 0, 0], cat([0, 0, 2, 0], le32s([0, 11, 3, 22])), True{}, 2)
+    check_q("p9 process write then read", run_q(S.Sim.write(machine(wr, 2, [0, 3], twrite(1, 0, 3), tread(1, 0, 100)), u64(16600), str("HEL")), opened),
+      18432, cat([22, 0, 0, 0, 117, 3, 0, 11, 0, 0, 0], str("HELlo world")), cat([0, 0, 2, 0], le32s([0, 11, 3, 22])), True{}, 2)
+
 def main() -> IO(Unit):
   do IO<Unit>:
     mount()
@@ -510,3 +544,4 @@ def main() -> IO(Unit):
     misc()
     errnos()
     process()
+    process_rw()

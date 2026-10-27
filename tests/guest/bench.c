@@ -1,7 +1,8 @@
 // The guest's benchmark program (scripts/bench.sh, in-guest /bench.sh):
 // freestanding arm64 Linux, raw syscalls, no libc.
-//   bench disk DEV   sequential read and write (1 MiB, O_DIRECT) over the
-//                    whole device, and random 4 KiB reads (O_DIRECT, QD1)
+//   bench disk DEV [CPU]  sequential read and write (1 MiB, O_DIRECT) over
+//                    the whole device, and random 4 KiB reads (O_DIRECT,
+//                    QD1); on vCPU CPU when given
 //   bench mmio       guest exits: 100000 reads of the PL031 RTC's data
 //                    register through /dev/mem (each one traps to the VMM)
 // Prints `BENCH <name> <value> <unit>` lines.
@@ -31,6 +32,7 @@ static i64 sys(i64 n, i64 a, i64 b, i64 c, i64 d, i64 e, i64 f) {
 #define SYS_mmap 222
 #define SYS_clock_gettime 113
 #define SYS_ioctl 29
+#define SYS_sched_setaffinity 122
 #define AT_FDCWD -100
 #define O_RDONLY 0
 #define O_RDWR 2
@@ -132,6 +134,10 @@ void _start_c(u64* sp) {
   int argc = (int)sp[0];
   char** argv = (char**)(sp + 1);
   int rc = 2;
+  if (argc >= 4) {
+    u64 mask = 1ul << (argv[3][0] - '0');
+    sys(SYS_sched_setaffinity, 0, sizeof mask, (i64)&mask, 0, 0, 0);
+  }
   if (argc >= 3 && eq(argv[1], "disk")) rc = disk(argv[2]);
   else if (argc >= 2 && eq(argv[1], "mmio")) rc = mmio();
   sys(SYS_exit, rc, 0, 0, 0, 0, 0);

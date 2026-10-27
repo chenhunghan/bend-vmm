@@ -35,6 +35,10 @@ trap 'scripts/clean.sh' EXIT
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
 grn() { printf '\033[32m%s\033[0m\n' "$*"; }
 
+# drive <timeout-s> [<pattern> <text>]... -- <cmd...>: types each text once
+# its pattern shows (scripts/drive.py), the timeout stretched by CHECK_SLOW.
+drive() { local t=$1; shift; python3 scripts/drive.py $(( t * SLOW )) "$@"; }
+
 # expect <name> <timeout-s> <pattern> <cmd...>: runs cmd, requires pattern in its output.
 expect() {
   name=$1 secs=$2 pat=$3; shift 3
@@ -104,9 +108,9 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   rm -rf "$(dirname "$vs")"
   out=$( (alarm 120 ./out/bend-vmm --mem 4096 --cpus 8 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --disk out/guest/disk.img --cmdline "console=ttyAMA0 bendtest bendcpus=8 quiet") 2>&1 )
   if grep -q GUEST-TESTS-DONE <<<"$out" && ! grep -q "GUEST-TEST FAIL" <<<"$out"; then grn "ok: 8 cpus, 4 GiB (RAM past 4 GiB)"; else red "failed: 8 cpus, 4 GiB"; grep -a GUEST <<<"$out" | tail; fail=1; fi
-  out=$( ( (slp 20; printf 'echo hi-$((40+2))\n'; slp 2; printf 'poweroff -f\n'; slp 5) | alarm 60 ./out/bend-vmm --mem 1024 --kernel out/guest/Image --initrd out/guest/guest.cpio) 2>&1 )
+  out=$(drive 60 "busybox shell" 'echo hi-$((40+2))\n' "hi-42" 'poweroff -f\n' -- ./out/bend-vmm --mem 1024 --kernel out/guest/Image --initrd out/guest/guest.cpio 2>&1)
   if grep -q "^hi-42" <<<"$out"; then grn "ok: console input"; else red "failed: console input"; tail -5 <<<"$out"; fail=1; fi
-  out=$( ( (slp 20; printf 'reboot -f\n'; slp 25; printf 'poweroff -f\n'; slp 5) | alarm 90 ./out/bend-vmm --mem 1024 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio) 2>&1 )
+  out=$(drive 90 "busybox shell" 'reboot -f\n' "busybox shell" 'poweroff -f\n' -- ./out/bend-vmm --mem 1024 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio 2>&1)
   if [ "$(grep -c 'GUEST: up' <<<"$out")" = 2 ] && grep -q "stopped (0)" <<<"$out"; then grn "ok: reboot (gzip kernel)"; else red "failed: reboot"; grep -a -E "GUEST|reset|stopped" <<<"$out"; fail=1; fi
 fi
 
@@ -151,7 +155,11 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   scripts/uefi-assets.sh >/dev/null
   t=$(mktemp -d); cp out/uefi/vars.fd "$t/vars.fd"
   efivar=/sys/firmware/efi/efivars/BendTest-12345678-1234-1234-1234-123456789abc
-  out=$( ( (slp 22; printf 'root\n'; slp 3; printf 'printf "\\007\\000\\000\\000bend-ok" > %s; echo SET-$((6*7)); reboot\n' "$efivar"; slp 30; printf 'root\n'; slp 3; printf 'tail -c 7 %s; echo; echo AFTER-REBOOT; poweroff\n' "$efivar"; slp 10) | alarm 100 ./out/bend-vmm --firmware out/uefi/code.fd --vars "$t/vars.fd" --mem 1024 --cpus 2 --disk out/uefi/alpine.iso:ro) 2>&1 | tr -d '\r' )
+  # drive.py turns \\ into \ and \n into Enter: the guest's printf gets \007.
+  set_var='printf "\\007\\000\\000\\000bend-ok" > '"$efivar"'; echo SET-$((6*7)); reboot\n'
+  get_var='tail -c 7 '"$efivar"'; echo; echo AFTER-REBOOT; poweroff\n'
+  out=$(drive 100 "login:" 'root\n' "~# " "$set_var" "login:" 'root\n' "~# " "$get_var" -- \
+    ./out/bend-vmm --firmware out/uefi/code.fd --vars "$t/vars.fd" --mem 1024 --cpus 2 --disk out/uefi/alpine.iso:ro 2>&1 | tr -d '\r')
   grep -q "Welcome to Alpine" <<<"$out" && grn "ok: UEFI boots the Alpine ISO (edk2, GRUB, Linux $(grep -ao 'Linux [0-9][^ ]*' <<<"$out" | head -1 | cut -d' ' -f2))" || { red "failed: UEFI boot"; tail -5 <<<"$out"; fail=1; }
   grep -q "SET-42" <<<"$out" && [ "$(grep -c 'Welcome to Alpine Linux' <<<"$out")" = 2 ] && grn "ok: UEFI reboot" || { red "failed: UEFI reboot"; fail=1; }
   grep -B1 "AFTER-REBOOT" <<<"$out" | grep -q "^bend-ok" && grep -q "bend-ok" "$t/vars.fd" && grn "ok: EFI variable persists (flash, --vars)" || { red "failed: EFI variable"; grep -a -B2 AFTER-REBOOT <<<"$out"; fail=1; }

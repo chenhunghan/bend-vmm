@@ -220,6 +220,7 @@ static void hvf_put64(HvfCpu* c, uint64_t v) {
 enum { VMB_R = 1, VMB_W = 2, VMB_X = 4 };
 
 static uint64_t hvf_ns(void);
+static inline void hvf_relax(void);
 
 #ifdef __APPLE__
 
@@ -1556,36 +1557,89 @@ Term hvf_disk_write_run(Env e, Term* f, IoWork* w) {
   return (Term)(k == (ssize_t)n ? 0 : HVF_ERR);
 }
 
-// Hvf.disk_copy(disk, dir, off_hi, off_lo, gpa_hi, gpa_lo, len) -> U32: moves
-// len bytes between disk image `disk` at the offset and guest RAM at gpa,
-// none of them through Bend: dir 0 reads the disk into RAM (zeros past the
-// image's end), 1 writes RAM to the disk. 0, or 0xFFFFFFFF (the range leaves
+// Pieces of guest memory as the effects below take them: each an address
+// (8 bytes) and a length (4), little-endian. Fills hva/len with at most max
+// of them; the count, or -1 when one leaves RAM or the list is malformed.
+static int hvf_iovs(const char* b, u64 nb, uint8_t** hva, u64* len, int max) {
+  if (b == NULL || nb % 12 != 0 || nb / 12 > (u64)max) {
+    return -1;
+  }
+  int n = (int)(nb / 12);
+  for (int i = 0; i < n; i++) {
+    const uint8_t* p   = (const uint8_t*)b + 12 * i;
+    uint64_t       gpa = 0;
+    uint32_t       l   = 0;
+    for (int j = 0; j < 8; j++) {
+      gpa |= (uint64_t)p[j] << (8 * j);
+    }
+    for (int j = 0; j < 4; j++) {
+      l |= (uint32_t)p[8 + j] << (8 * j);
+    }
+    len[i] = l;
+    hva[i] = hvf_ptr(gpa, l);
+    if (hva[i] == NULL) {
+      return -1;
+    }
+  }
+  return n;
+}
+#define HVF_MAX_IOVS 1024
+
+// Moves bytes between fd at off and the pieces, in order: out writes them to
+// fd, else reads fd into them, stopping at the end of the file (fill: zeros
+// the rest). The count moved; -1 (errno set) when nothing could be.
+static int64_t hvf_iov_io(int fd, int out, off_t off, uint8_t** hva, u64* len, int n, int fill) {
+  int64_t done = 0;
+  int     eof  = 0;
+  for (int i = 0; i < n; i++) {
+    u64 got = 0;
+    while (!eof && got < len[i]) {
+      ssize_t k = out ? pwrite(fd, hva[i] + got, len[i] - got, off + (off_t)done)
+                      : pread(fd, hva[i] + got, len[i] - got, off + (off_t)done);
+      if (k < 0 && errno == EINTR) {
+        continue;
+      }
+      if (k < 0 && done == 0) {
+        return -1;
+      }
+      if (k <= 0) {
+        eof = 1;
+        break;
+      }
+      got += (u64)k;
+      done += k;
+    }
+    if (fill && got < len[i]) {
+      memset(hva[i] + got, 0, len[i] - got);
+    }
+  }
+  return done;
+}
+
+// Hvf.disk_copy(disk, dir, off_hi, off_lo, iovs) -> U32: moves bytes between
+// disk image `disk` from the offset and the pieces of guest memory iovs, none
+// of them through Bend: dir 0 reads the disk into RAM (zeros past the
+// image's end), 1 writes RAM to the disk. 0, or 0xFFFFFFFF (a piece leaves
 // RAM, or an IO error).
 Term hvf_disk_copy_run(Env e, Term* f, IoWork* w) {
-  int      fd  = hvf_disk(f[0]);
-  int      out = (u32)f[1] != 0;
-  off_t    off = (off_t)hvf_u64(f[2], f[3]);
-  u64      n   = (u32)f[6];
-  uint8_t* p   = hvf_ptr(hvf_u64(f[4], f[5]), n);
-  if (fd < 0 || p == NULL) {
+  static uint8_t* hva[HVF_MAX_IOVS];
+  static u64      len[HVF_MAX_IOVS];
+  int             fd  = hvf_disk(f[0]);
+  int             out = (u32)f[1] != 0;
+  off_t           off = (off_t)hvf_u64(f[2], f[3]);
+  u64             nb;
+  char*           b = io_cbuf(e, f[4], &nb, CID(Con));
+  int             n = hvf_iovs(b, nb, hva, len, HVF_MAX_IOVS);
+  free(b);
+  if (fd < 0 || n < 0) {
     return (Term)HVF_ERR;
   }
-  u64 done = 0;
-  while (done < n) {
-    ssize_t k = out ? pwrite(fd, p + done, n - done, off + (off_t)done)
-                    : pread(fd, p + done, n - done, off + (off_t)done);
-    if (k < 0 && errno == EINTR) {
-      continue;
-    }
-    if (k <= 0) {
-      break;
-    }
-    done += (u64)k;
+  u64 want = 0;
+  for (int i = 0; i < n; i++) {
+    want += len[i];
   }
-  if (!out && done < n) {
-    memset(p + done, 0, n - done);
-  }
-  return (Term)(out && done < n ? HVF_ERR : 0);
+  int64_t k = hvf_iov_io(fd, out, off, hva, len, n, !out);
+  return (Term)(k < 0 || (out && (u64)k < want) ? HVF_ERR : 0);
 }
 
 // Network (the host end of src/net/nat.bend)
@@ -1967,6 +2021,58 @@ static int hvf_resolve(u32 sh, const char* rel, char* out) {
   return 0;
 }
 
+// Open files for reads and writes, by share, relative path and direction:
+// resolving and opening a path costs more than moving a 512 KiB block, and a
+// guest reads a file in many requests. An entry stays bound to the file it
+// opened, so every operation that can change what a path names (create,
+// mkdir, remove, rename, symlink) empties the share's entries first.
+#define HVF_FDC 16
+typedef struct {
+  int      fd, wr;
+  u32      sh;
+  uint64_t used;
+  char     rel[PATH_MAX];
+} HvfFdc;
+static HvfFdc   hvf_fdc[HVF_FDC];
+static uint64_t hvf_fdc_tick;
+
+static int hvf_fdc_find(u32 sh, const char* rel, int wr) {
+  for (int i = 0; i < HVF_FDC; i++) {
+    HvfFdc* c = &hvf_fdc[i];
+    if (c->used && c->sh == sh && c->wr == wr && !strcmp(c->rel, rel)) {
+      c->used = ++hvf_fdc_tick;
+      return c->fd;
+    }
+  }
+  return -1;
+}
+
+static void hvf_fdc_put(u32 sh, const char* rel, int wr, int fd) {
+  HvfFdc* lru = &hvf_fdc[0];
+  for (int i = 0; i < HVF_FDC; i++) {
+    if (hvf_fdc[i].used < lru->used) {
+      lru = &hvf_fdc[i];
+    }
+  }
+  if (lru->used) {
+    close(lru->fd);
+  }
+  lru->fd   = fd;
+  lru->wr   = wr;
+  lru->sh   = sh;
+  lru->used = ++hvf_fdc_tick;
+  snprintf(lru->rel, PATH_MAX, "%s", rel);
+}
+
+static void hvf_fdc_flush(u32 sh) {
+  for (int i = 0; i < HVF_FDC; i++) {
+    if (hvf_fdc[i].used && hvf_fdc[i].sh == sh) {
+      close(hvf_fdc[i].fd);
+      hvf_fdc[i].used = 0;
+    }
+  }
+}
+
 typedef struct {
   uint32_t* w;
   u64       n, cap;
@@ -2009,7 +2115,10 @@ static int hvf_dir_cmp(const void* a, const void* b) {
 // op: 0 stat, 1 list(from = a_lo, max = b), 2 read(offset a, len b),
 // 3 write(offset a, bytes), 4 create(mode b), 5 mkdir(mode b),
 // 6 remove(dir = b), 7 rename(to path2), 8 truncate(size a), 9 chmod(mode b),
-// 10 symlink(target path2), 11 readlink, 12 statfs.
+// 10 symlink(target path2), 11 readlink, 12 statfs, 13 read from offset a
+// into the pieces of guest memory bytes lists (as Hvf.disk_copy takes them),
+// 14 write them at offset a: both answer the count moved, and no byte passes
+// through Bend.
 Term hvf_fs_run(Env e, Term* f, IoWork* w) {
   u32      sh = (u32)f[0], op = (u32)f[1];
   u64      n1, n2, nb;
@@ -2021,7 +2130,22 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
   char     path[PATH_MAX], path2[PATH_MAX];
   HvfWords out   = {0};
   Term     res;
-  int      err   = hvf_resolve(sh, rel, path);
+  // reads and writes reuse an open file (hvf_fdc) and skip resolving
+  int      io    = op == 2 || op == 3 || op == 13 || op == 14;
+  int      wr    = op == 3 || op == 14;
+  int      fd    = io ? hvf_fdc_find(sh, rel, wr) : -1;
+  int      err   = fd >= 0 ? 0 : hvf_resolve(sh, rel, path);
+  if (!err && (op == 4 || op == 5 || op == 6 || op == 7 || op == 10)) {
+    hvf_fdc_flush(sh);
+  }
+  if (!err && io && fd < 0) {
+    fd = open(path, (wr ? O_WRONLY : O_RDONLY) | O_NOFOLLOW);
+    if (fd < 0) {
+      err = errno;
+    } else {
+      hvf_fdc_put(sh, rel, wr, fd);
+    }
+  }
   if (!err && (op == 7)) {
     err = hvf_resolve(sh, rel2, path2);
   }
@@ -2086,10 +2210,7 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
       res = hvf_fs_done(e, &out);
     }
   } else if (op == 2 || op == 3) {
-    int fd = open(path, (op == 2 ? O_RDONLY : O_WRONLY) | O_NOFOLLOW);
-    if (fd < 0) {
-      res = hvf_fs_err(e, errno);
-    } else if (op == 2) {
+    if (op == 2) {
       char*   buf = io_mem(malloc(b ? b : 1));
       ssize_t k   = pread(fd, buf, b, (off_t)a);
       if (k < 0) {
@@ -2111,8 +2232,20 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
         res = hvf_words(e, ws, 2);
       }
     }
-    if (fd >= 0) {
-      close(fd);
+  } else if (op == 13 || op == 14) {
+    static uint8_t* hva[HVF_MAX_IOVS];
+    static u64      len[HVF_MAX_IOVS];
+    int             n = hvf_iovs(bytes, nb, hva, len, HVF_MAX_IOVS);
+    if (n < 0) {
+      res = hvf_fs_err(e, EFAULT);
+    } else {
+      int64_t k = hvf_iov_io(fd, op == 14, (off_t)a, hva, len, n, 0);
+      if (k < 0) {
+        res = hvf_fs_err(e, errno);
+      } else {
+        uint32_t ws[2] = {4, (uint32_t)k};
+        res = hvf_words(e, ws, 2);
+      }
     }
   } else if (op == 4) {
     int fd = open(path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, b & 07777);

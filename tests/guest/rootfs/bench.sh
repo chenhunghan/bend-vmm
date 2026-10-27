@@ -9,7 +9,9 @@ rate() {
 }
 echo "BENCH guest-init $(up) s"
 /bin/bench mmio
-[ -b /dev/vda ] && /bin/bench disk /dev/vda
+# on vCPU 0, where the device interrupt lands: from another vCPU each
+# request also waits for an IPI to wake it (about 80us on Hypervisor.framework)
+[ -b /dev/vda ] && /bin/bench disk /dev/vda 0
 port=$(sed -n 's/.*benchttp=\([0-9]*\).*/\1/p' /proc/cmdline)
 if [ -n "$port" ] && [ -e /sys/class/net/eth0 ]; then
   ip link set lo up; ip link set eth0 up
@@ -21,9 +23,10 @@ if [ -n "$port" ] && [ -e /sys/class/net/eth0 ]; then
   awk -v s=$s -v e=$e 'BEGIN { printf "BENCH net-http-request %.1f ms\n", (e - s) * 1000 / 50 }'
 fi
 if grep -qs share /sys/bus/virtio/drivers/9pnet_virtio/*/mount_tag; then
-  mkdir -p /mnt/share && mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 share /mnt/share
+  msize=$(sed -n 's/.*benchmsize=\([0-9]*\).*/\1/p' /proc/cmdline)
+  mkdir -p /mnt/share && mount -t 9p -o trans=virtio,version=9p2000.L,msize=${msize:-524288} share /mnt/share
   bytes=$(cat /mnt/share/size)
-  s=$(up); cat /mnt/share/big > /dev/null; e=$(up)
+  s=$(up); dd if=/mnt/share/big of=/dev/null bs=1M 2>/dev/null; e=$(up)
   rate 9p-read $bytes $s $e
   s=$(up); dd if=/dev/zero of=/mnt/share/out bs=1M count=$((bytes / 1048576)) 2>/dev/null; e=$(up)
   rate 9p-write $bytes $s $e

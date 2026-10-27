@@ -252,13 +252,13 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
       do IO<A>:
         _ : U32 <- H.Host.disk_write(d, off, bs)
         interp(cpu, mc, done, A, next)
-    case V.VmDiskToRam{d, off, a, n, next}:
+    case V.VmDiskToRam{d, off, iovs, next}:
       do IO<A>:
-        _ : U32 <- H.Host.disk_copy(d, 0, off, a, n)
+        _ : U32 <- H.Host.disk_copy(d, 0, off, iovs)
         interp(cpu, mc, done, A, next)
-    case V.VmRamToDisk{d, off, a, n, next}:
+    case V.VmRamToDisk{d, off, iovs, next}:
       do IO<A>:
-        _ : U32 <- H.Host.disk_copy(d, 1, off, a, n)
+        _ : U32 <- H.Host.disk_copy(d, 1, off, iovs)
         interp(cpu, mc, done, A, next)
     case V.VmRandom{n, k}:
       do IO<A>:

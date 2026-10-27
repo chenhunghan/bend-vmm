@@ -30,7 +30,9 @@ cat > "$l1/root/init" <<EOF
 #!/bin/busybox sh
 /bin/busybox --install -s /bin
 mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev
-for m in netfs 9pnet 9pnet_virtio 9p; do insmod /lib/modules/\$m.ko; done
+for m in netfs 9pnet 9pnet_virtio 9p rtc-pl031; do insmod /lib/modules/\$m.ko; done
+# the wall clock, from QEMU's PL031 (the guests' RTC test reads the host's)
+hwclock -s
 mkdir -p /host
 mount -t 9p -o trans=virtio,version=9p2000.L,ro,msize=1048576,cache=loose host /host
 mount -t tmpfs -o size=$((mem * 3 / 4))m tmp /host/tmp
@@ -50,7 +52,7 @@ echo "L1-EXIT \$?"
 poweroff -f
 EOF
 mods=""
-for m in netfs 9pnet 9pnet_virtio 9p; do mods="$mods out/guest/modules/$m.ko:lib/modules/$m.ko"; done
+for m in netfs 9pnet 9pnet_virtio 9p rtc-pl031; do mods="$mods out/guest/modules/$m.ko:lib/modules/$m.ko"; done
 python3 scripts/mkinitramfs.py "$l1/root" "$l1/initrd.cpio" out/guest/busybox:bin/busybox $mods
 
 log=$l1/console.log
