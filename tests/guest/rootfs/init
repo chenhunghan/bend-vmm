@@ -1,8 +1,8 @@
 #!/bin/busybox sh
 # bend-vmm guest userspace (busybox). With `bendtest` on the kernel command
 # line it runs the in-guest test suite and powers off (`bendbench`: the
-# benchmarks of scripts/bench.sh); otherwise it starts an
-# interactive shell on the console.
+# benchmarks of scripts/bench.sh; `bendsoak`: scripts/soak.sh); otherwise it
+# starts an interactive shell on the console.
 /bin/busybox --install -s /bin
 mount -t proc proc /proc
 mount -t sysfs sys /sys
@@ -15,6 +15,11 @@ for m in virtio-rng rtc-pl031 netfs 9pnet 9pnet_virtio 9p vsock vmw_vsock_virtio
   [ -f /lib/modules/$m.ko ] && insmod /lib/modules/$m.ko 2>/dev/null
 done
 echo "GUEST: up, kernel $(uname -r), $(nproc) cpus"
+if grep -q bendsoak /proc/cmdline; then
+  sh /soak.sh
+  sleep 0.3
+  poweroff -f
+fi
 if grep -q bendbench /proc/cmdline; then
   sh /bench.sh
   sleep 0.3

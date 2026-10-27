@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Level 4 of the verification ladder (docs/DESIGN.md): builds the host layer
 # and runs real guests on this host's hypervisor: Hypervisor.framework on
-# macOS (Apple Silicon), KVM on Linux (arm64, /dev/kvm). On Linux, snapshots
-# are not supported yet, so the lifecycle section checks pause and resume.
+# macOS (Apple Silicon), KVM on Linux (arm64, /dev/kvm).
 # CHECK_SLOW=N stretches every timeout and pause N times (an emulated host,
 # such as scripts/lima/linux-host.sh on an M1/M2 Mac); SKIP_NATIVE=1 skips
 # the native test build; SKIP_BUILD=1 uses the binaries already in out/
@@ -121,14 +120,10 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   slp 12
   [ "$(echo pause | nc -U "$sock")" = paused ] && [ "$(echo status | nc -U "$sock")" = paused ] && grn "ok: pause" || { red "failed: pause"; fail=1; }
   [ "$(echo resume | nc -U "$sock")" = running ] && grn "ok: resume" || { red "failed: resume"; fail=1; }
-  if [ "$host" = Darwin-arm64 ]; then
-    [ "$(echo "snapshot $t/vm.snap" | nc -U "$sock")" = saved ] && grn "ok: snapshot ($(du -h "$t/vm.snap" | cut -f1) on disk)" || { red "failed: snapshot"; fail=1; }
-    echo quit | nc -U "$sock" >/dev/null; slp 1
-    out=$( ( (slp 3; printf 'cat /tmp/m\n'; slp 2; printf 'poweroff -f\n'; slp 3) | alarm 40 ./out/bend-vmm --restore "$t/vm.snap") 2>&1 )
-    grep -q "^MARK-42" <<<"$(tr -d '\r' <<<"$out")" && grep -q "stopped (0)" <<<"$out" && grn "ok: restore (guest RAM and CPUs continue)" || { red "failed: restore"; tail -5 <<<"$out"; fail=1; }
-  else
-    echo quit | nc -U "$sock" >/dev/null; slp 1
-  fi
+  [ "$(echo "snapshot $t/vm.snap" | nc -U "$sock")" = saved ] && grn "ok: snapshot ($(du -h "$t/vm.snap" | cut -f1) on disk)" || { red "failed: snapshot"; fail=1; }
+  echo quit | nc -U "$sock" >/dev/null; slp 1
+  out=$(drive 40 "restored" 'cat /tmp/m\n' "MARK-42" 'poweroff -f\n' -- ./out/bend-vmm --restore "$t/vm.snap" 2>&1)
+  grep -q "^MARK-42" <<<"$(tr -d '\r' <<<"$out")" && grep -q "stopped (0)" <<<"$out" && grn "ok: restore (guest RAM and CPUs continue)" || { red "failed: restore"; tail -5 <<<"$out"; fail=1; }
   rm -rf "$t"
 fi
 

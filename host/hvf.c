@@ -612,20 +612,234 @@ static void hvf_load_regs(HvfCpu* c, const uint8_t* blob, size_t size) {
   }
 }
 
+// The in-kernel GIC's state, as Hypervisor.framework serializes it.
+static void vmb_gic_save(uint8_t** out, size_t* nout) {
+  void*          gic  = NULL;
+  size_t         ngic = 0;
+  hv_gic_state_t st   = hv.gic_state_create ? hv.gic_state_create() : NULL;
+  if (st && hv.gic_state_size(st, &ngic) == HV_SUCCESS) {
+    gic = io_mem(malloc(ngic ? ngic : 1));
+    if (hv.gic_state_data(st, gic) != HV_SUCCESS) {
+      ngic = 0;
+    }
+  }
+#if !defined(__OBJC__) || !__has_feature(objc_arc)
+  if (st) {
+    os_release(st);
+  }
+#else
+  st = nil; // ARC releases it
+#endif
+  *out  = gic;
+  *nout = ngic;
+}
+
+static int vmb_gic_restore(const uint8_t* blob, size_t size) {
+  return hv.gic_set_state && hv.gic_set_state(blob, size) == HV_SUCCESS ? 0 : -1;
+}
+
+#define HVF_SNAP_VER 1
+
 #else
 
-// Snapshots of KVM guests are not supported yet: no registers are kept.
+// A vCPU's registers as KVM lists them (KVM_GET_REG_LIST): entries
+// {u64 id, value}, each value as wide as its id says (KVM_REG_SIZE). A load
+// trapped as MMIO completes first (KVM_RUN with immediate_exit writes the
+// answer into its register), so the snapshot holds the finished exit.
+static size_t kvm_reg_size(uint64_t id) {
+  return (size_t)1 << ((id & KVM_REG_SIZE_MASK) >> KVM_REG_SIZE_SHIFT);
+}
+
 static void hvf_save_regs(HvfCpu* c) {
   free(c->saved);
   c->saved  = NULL;
   c->nsaved = 0;
+  if (c->in_mmio) {
+    c->run->immediate_exit = 1;
+    ioctl(c->fd, KVM_RUN, 0);
+    c->run->immediate_exit = 0;
+    c->in_mmio             = 0;
+  }
+  struct kvm_reg_list probe = {0};
+  ioctl(c->fd, KVM_GET_REG_LIST, &probe); // E2BIG, with the count
+  struct kvm_reg_list* list = io_mem(malloc(sizeof *list + probe.n * sizeof(uint64_t)));
+  list->n                   = probe.n;
+  if (ioctl(c->fd, KVM_GET_REG_LIST, list) != 0) {
+    free(list);
+    return;
+  }
+  size_t   cap = 0, n = 0;
+  for (uint64_t i = 0; i < list->n; i++) {
+    cap += 8 + kvm_reg_size(list->reg[i]);
+  }
+  uint8_t* b = io_mem(malloc(cap ? cap : 1));
+  for (uint64_t i = 0; i < list->n; i++) {
+    uint64_t           id  = list->reg[i];
+    size_t             sz  = kvm_reg_size(id);
+    struct kvm_one_reg one = {id, (uint64_t)(uintptr_t)(b + n + 8)};
+    if (sz <= 256 && ioctl(c->fd, KVM_GET_ONE_REG, &one) == 0) {
+      memcpy(b + n, &id, 8);
+      n += 8 + sz;
+    }
+  }
+  free(list);
+  c->saved  = b;
+  c->nsaved = n;
 }
 
+// Sets every saved register; KVM refuses the few it keeps fixed (some ID
+// registers), which already hold the saved values on the same host.
 static void hvf_load_regs(HvfCpu* c, const uint8_t* blob, size_t size) {
-  (void)c;
-  (void)blob;
-  (void)size;
+  for (size_t at = 0; at + 8 <= size;) {
+    uint64_t id;
+    memcpy(&id, blob + at, 8);
+    size_t sz = kvm_reg_size(id);
+    if (at + 8 + sz > size) {
+      break;
+    }
+    uint8_t            v[256];
+    memcpy(v, blob + at + 8, sz);
+    struct kvm_one_reg one = {id, (uint64_t)(uintptr_t)v};
+    ioctl(c->fd, KVM_SET_ONE_REG, &one);
+    at += 8 + sz;
+  }
 }
+
+// The vGIC's state as a replay: entries {u32 group, u32 width, u64 attr,
+// u64 value}, written back in order with KVM_SET_DEVICE_ATTR. Each set of
+// enable, pending or active bits comes after a write of all ones to its
+// clear register, so the restored bits are exactly the saved ones. The order
+// follows the architecture's dependencies: distributor control,
+// redistributors (SGIs, PPIs), SPIs (configuration, routing, line levels,
+// then pending, active, enabled), the CPU interfaces.
+typedef struct {
+  uint32_t group, width;
+  uint64_t attr, val;
+} __attribute__((packed)) KvmGicEntry;
+
+typedef struct {
+  KvmGicEntry* e;
+  size_t       n, cap;
+} KvmGicSave;
+
+static void kvm_gic_put(KvmGicSave* g, uint32_t group, uint32_t width, uint64_t attr, uint64_t val) {
+  if (g->n == g->cap) {
+    g->cap = g->cap ? g->cap * 2 : 512;
+    g->e   = io_mem(realloc(g->e, g->cap * sizeof *g->e));
+  }
+  g->e[g->n++] = (KvmGicEntry){group, width, attr, val};
+}
+
+// Reads one register into the replay; one KVM does not have is left out.
+static void kvm_gic_keep(KvmGicSave* g, uint32_t group, uint32_t width, uint64_t attr) {
+  uint64_t               v = 0;
+  struct kvm_device_attr a = {0, group, attr, (uint64_t)(uintptr_t)&v};
+  if (ioctl(kvm_gic, KVM_GET_DEVICE_ATTR, &a) == 0) {
+    kvm_gic_put(g, group, width, attr, width == 4 ? (uint32_t)v : v);
+  }
+}
+
+// clear-all at off_clear, then the saved bits of off_set
+static void kvm_gic_bits(KvmGicSave* g, uint32_t group, uint64_t base, uint64_t off_set, uint64_t off_clear) {
+  kvm_gic_put(g, group, 4, base | off_clear, 0xffffffffu);
+  kvm_gic_keep(g, group, 4, base | off_set);
+}
+
+#define KVM_GIC_SYSREG(op0, op1, crn, crm, op2)                                                         \
+  (((uint64_t)(op0) << KVM_REG_ARM64_SYSREG_OP0_SHIFT) | ((uint64_t)(op1) << KVM_REG_ARM64_SYSREG_OP1_SHIFT) \
+   | ((uint64_t)(crn) << KVM_REG_ARM64_SYSREG_CRN_SHIFT) | ((uint64_t)(crm) << KVM_REG_ARM64_SYSREG_CRM_SHIFT) \
+   | ((uint64_t)(op2) << KVM_REG_ARM64_SYSREG_OP2_SHIFT))
+
+static void vmb_gic_save(uint8_t** out, size_t* nout) {
+  KvmGicSave g     = {0};
+  uint32_t   nirqs = 0;
+  struct kvm_device_attr a = {0, KVM_DEV_ARM_VGIC_GRP_NR_IRQS, 0, (uint64_t)(uintptr_t)&nirqs};
+  if (ioctl(kvm_gic, KVM_GET_DEVICE_ATTR, &a) != 0 || nirqs > 1024) {
+    nirqs = 256;
+  }
+  const uint32_t D = KVM_DEV_ARM_VGIC_GRP_DIST_REGS, R = KVM_DEV_ARM_VGIC_GRP_REDIST_REGS;
+  kvm_gic_keep(&g, D, 4, 0x0000); // GICD_CTLR
+  for (uint32_t cpu = 0; cpu < kvm_ncpus; cpu++) {
+    uint64_t m = (uint64_t)cpu << KVM_DEV_ARM_VGIC_V3_MPIDR_SHIFT;
+    kvm_gic_keep(&g, R, 4, m | 0x10080); // IGROUPR0
+    kvm_gic_keep(&g, R, 4, m | 0x10c00); // ICFGR0
+    kvm_gic_keep(&g, R, 4, m | 0x10c04); // ICFGR1
+    for (uint64_t i = 0; i < 8; i++) {
+      kvm_gic_keep(&g, R, 4, m | (0x10400 + 4 * i)); // IPRIORITYR
+    }
+    kvm_gic_bits(&g, R, m, 0x10200, 0x10280); // ISPENDR0 / ICPENDR0
+    kvm_gic_bits(&g, R, m, 0x10300, 0x10380); // ISACTIVER0 / ICACTIVER0
+    kvm_gic_bits(&g, R, m, 0x10100, 0x10180); // ISENABLER0 / ICENABLER0
+  }
+  for (uint32_t irq = 32; irq < nirqs; irq += 32) {
+    kvm_gic_keep(&g, D, 4, 0x0080 + irq / 8); // IGROUPR
+  }
+  for (uint32_t irq = 32; irq < nirqs; irq += 4) {
+    kvm_gic_keep(&g, D, 4, 0x0400 + irq); // IPRIORITYR
+  }
+  for (uint32_t irq = 32; irq < nirqs; irq += 16) {
+    kvm_gic_keep(&g, D, 4, 0x0c00 + irq / 4); // ICFGR
+  }
+  for (uint32_t irq = 32; irq < nirqs; irq++) {
+    kvm_gic_keep(&g, D, 4, 0x6000 + 8 * (uint64_t)irq);     // IROUTER, low half
+    kvm_gic_keep(&g, D, 4, 0x6000 + 8 * (uint64_t)irq + 4); // and high
+  }
+  for (uint32_t irq = 32; irq < nirqs; irq += 32) {
+    kvm_gic_keep(&g, KVM_DEV_ARM_VGIC_GRP_LEVEL_INFO, 4,
+                 ((uint64_t)VGIC_LEVEL_INFO_LINE_LEVEL << KVM_DEV_ARM_VGIC_LINE_LEVEL_INFO_SHIFT) | irq);
+  }
+  for (uint32_t irq = 32; irq < nirqs; irq += 32) {
+    kvm_gic_bits(&g, D, 0, 0x0200 + irq / 8, 0x0280 + irq / 8); // ISPENDR / ICPENDR
+    kvm_gic_bits(&g, D, 0, 0x0300 + irq / 8, 0x0380 + irq / 8); // ISACTIVER / ICACTIVER
+  }
+  for (uint32_t irq = 32; irq < nirqs; irq += 32) {
+    kvm_gic_bits(&g, D, 0, 0x0100 + irq / 8, 0x0180 + irq / 8); // ISENABLER / ICENABLER
+  }
+  const uint32_t C = KVM_DEV_ARM_VGIC_GRP_CPU_SYSREGS;
+  const uint64_t icc[] = {
+    KVM_GIC_SYSREG(3, 0, 12, 12, 5), // ICC_SRE_EL1
+    KVM_GIC_SYSREG(3, 0, 12, 12, 4), // ICC_CTLR_EL1
+    KVM_GIC_SYSREG(3, 0, 4, 6, 0),   // ICC_PMR_EL1
+    KVM_GIC_SYSREG(3, 0, 12, 8, 3),  // ICC_BPR0_EL1
+    KVM_GIC_SYSREG(3, 0, 12, 12, 3), // ICC_BPR1_EL1
+    KVM_GIC_SYSREG(3, 0, 12, 8, 4),  // ICC_AP0R0_EL1 .. 3
+    KVM_GIC_SYSREG(3, 0, 12, 8, 5),
+    KVM_GIC_SYSREG(3, 0, 12, 8, 6),
+    KVM_GIC_SYSREG(3, 0, 12, 8, 7),
+    KVM_GIC_SYSREG(3, 0, 12, 9, 0),  // ICC_AP1R0_EL1 .. 3
+    KVM_GIC_SYSREG(3, 0, 12, 9, 1),
+    KVM_GIC_SYSREG(3, 0, 12, 9, 2),
+    KVM_GIC_SYSREG(3, 0, 12, 9, 3),
+    KVM_GIC_SYSREG(3, 0, 12, 12, 6), // ICC_IGRPEN0_EL1
+    KVM_GIC_SYSREG(3, 0, 12, 12, 7), // ICC_IGRPEN1_EL1
+  };
+  for (uint32_t cpu = 0; cpu < kvm_ncpus; cpu++) {
+    for (size_t i = 0; i < sizeof icc / sizeof *icc; i++) {
+      kvm_gic_keep(&g, C, 8, ((uint64_t)cpu << KVM_DEV_ARM_VGIC_V3_MPIDR_SHIFT) | icc[i]);
+    }
+  }
+  *out  = (uint8_t*)g.e;
+  *nout = g.n * sizeof *g.e;
+}
+
+static int vmb_gic_restore(const uint8_t* blob, size_t size) {
+  const KvmGicEntry* e   = (const KvmGicEntry*)blob;
+  int                bad = 0;
+  for (size_t i = 0; i < size / sizeof *e; i++) {
+    uint64_t               v32 = (uint32_t)e[i].val, v64 = e[i].val;
+    struct kvm_device_attr a   = {0, e[i].group, e[i].attr, (uint64_t)(uintptr_t)(e[i].width == 4 ? &v32 : &v64)};
+    if (ioctl(kvm_gic, KVM_SET_DEVICE_ATTR, &a) != 0) {
+      bad++;
+      if (hvf_trace & 1) {
+        fprintf(stderr, "[trace] vGIC restore: group %u attr %#llx: %s\n", e[i].group, (unsigned long long)e[i].attr,
+                strerror(errno));
+      }
+    }
+  }
+  return bad;
+}
+
+#define HVF_SNAP_VER 2
 
 #endif
 
@@ -2378,12 +2592,41 @@ static int hvf_put_ram(int fd, off_t at) {
   return ftruncate(fd, at + (off_t)hvf_ram_size);
 }
 
-// Hvf.snap_write(path, words) -> U32: writes a snapshot of the paused VM:
-//   "BVMSNAP1", version u32 = 1, ncpus u32, ram base u64, ram size u64,
-//   args (u64 length, NUL-separated argv), machine (u64 count, u32 words),
-//   GIC state (u64 size, bytes), per vCPU (u64 size, register entries; 0 when
-//   absent), then RAM at the next 16 KiB boundary. 0, or an errno.
+// This program's argv, NUL-separated, in a new buffer; its length.
+static uint64_t hvf_args(char** out) {
 #ifdef __APPLE__
+  int      argc = *_NSGetArgc();
+  char**   argv = *_NSGetArgv();
+  uint64_t n    = 0;
+  for (int i = 0; i < argc; i++) {
+    n += strlen(argv[i]) + 1;
+  }
+  char* b = io_mem(malloc(n ? n : 1));
+  for (int i = 0, at = 0; i < argc; i++) {
+    memcpy(b + at, argv[i], strlen(argv[i]) + 1);
+    at += (int)strlen(argv[i]) + 1;
+  }
+  *out = b;
+  return n;
+#else
+  char*   b  = io_mem(malloc(65536));
+  int     fd = open("/proc/self/cmdline", O_RDONLY);
+  ssize_t n  = fd >= 0 ? read(fd, b, 65536) : -1;
+  if (fd >= 0) {
+    close(fd);
+  }
+  *out = b;
+  return n > 0 ? (uint64_t)n : 0;
+#endif
+}
+
+// Hvf.snap_write(path, words) -> U32: writes a snapshot of the paused VM:
+//   "BVMSNAP1", version u32 (HVF_SNAP_VER: 1 Hypervisor.framework, 2 KVM;
+//   a snapshot restores only on its own hypervisor), ncpus u32, ram base
+//   u64, ram size u64, args (u64 length, NUL-separated argv), machine (u64
+//   count, u32 words), GIC state (u64 size, bytes), per vCPU (u64 size,
+//   register entries; 0 when absent), then RAM at the next 16 KiB boundary.
+//   0, or an errno.
 Term hvf_snap_write_run(Env e, Term* f, IoWork* w) {
   u64   n;
   char* path = io_cstr(e, f[0], &n);
@@ -2423,26 +2666,13 @@ Term hvf_snap_write_run(Env e, Term* f, IoWork* w) {
   }
   pthread_mutex_unlock(&hvf_gate_mu);
   // the GIC
-  void*          gic  = NULL;
-  size_t         ngic = 0;
-  hv_gic_state_t st   = hv.gic_state_create ? hv.gic_state_create() : NULL;
-  if (st && hv.gic_state_size(st, &ngic) == HV_SUCCESS) {
-    gic = io_mem(malloc(ngic ? ngic : 1));
-    if (hv.gic_state_data(st, gic) != HV_SUCCESS) {
-      ngic = 0;
-    }
-  }
-#if !defined(__OBJC__) || !__has_feature(objc_arc)
-  if (st) {
-    os_release(st);
-  }
-#else
-  st = nil; // ARC releases it
-#endif
+  uint8_t* gic  = NULL;
+  size_t   ngic = 0;
+  vmb_gic_save(&gic, &ngic);
   // argv
-  int    argc = *_NSGetArgc();
-  char** argv = *_NSGetArgv();
-  int    err  = 0;
+  char*    args = NULL;
+  uint64_t alen = hvf_args(&args);
+  int      err  = 0;
   int    fd   = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
   free(path);
   if (fd < 0) {
@@ -2454,16 +2684,10 @@ Term hvf_snap_write_run(Env e, Term* f, IoWork* w) {
         ncpus = (uint32_t)i + 1;
       }
     }
-    uint64_t alen = 0;
-    for (int i = 0; i < argc; i++) {
-      alen += strlen(argv[i]) + 1;
-    }
-    uint32_t ver = 1;
+    uint32_t ver = HVF_SNAP_VER;
     int      bad = hvf_put(fd, "BVMSNAP1", 8) || hvf_put(fd, &ver, 4) || hvf_put(fd, &ncpus, 4)
-      || hvf_fput64(fd, hvf_ram_base) || hvf_fput64(fd, hvf_ram_size) || hvf_fput64(fd, alen);
-    for (int i = 0; !bad && i < argc; i++) {
-      bad = hvf_put(fd, argv[i], strlen(argv[i]) + 1);
-    }
+      || hvf_fput64(fd, hvf_ram_base) || hvf_fput64(fd, hvf_ram_size) || hvf_fput64(fd, alen)
+      || hvf_put(fd, args, alen);
     bad = bad || hvf_fput64(fd, nw) || hvf_put(fd, ws, nw * 4) || hvf_fput64(fd, ngic) || hvf_put(fd, gic, ngic);
     for (uint32_t i = 0; !bad && i < ncpus; i++) {
       HvfCpu* c  = &hvf_cpus[i];
@@ -2481,16 +2705,9 @@ Term hvf_snap_write_run(Env e, Term* f, IoWork* w) {
   }
   free(ws);
   free(gic);
+  free(args);
   return (Term)(u32)err;
 }
-#else
-Term hvf_snap_write_run(Env e, Term* f, IoWork* w) {
-  (void)e;
-  (void)f;
-  (void)w;
-  return (Term)(u32)ENOTSUP; // snapshots of KVM guests: not yet
-}
-#endif
 
 static int hvf_get(int fd, void* p, size_t n) {
   return read(fd, p, n) == (ssize_t)n ? 0 : -1;
@@ -2508,7 +2725,7 @@ Term hvf_snap_open_run(Env e, Term* f, IoWork* w) {
   }
   char     magic[8];
   uint32_t ver;
-  if (hvf_get(fd, magic, 8) || memcmp(magic, "BVMSNAP1", 8) || hvf_get(fd, &ver, 4) || ver != 1
+  if (hvf_get(fd, magic, 8) || memcmp(magic, "BVMSNAP1", 8) || hvf_get(fd, &ver, 4) || ver != HVF_SNAP_VER
       || hvf_get(fd, &hvf_snap.ncpus, 4) || hvf_snap.ncpus > 64 || hvf_get(fd, &hvf_snap.ram_base, 8)
       || hvf_get(fd, &hvf_snap.ram_size, 8) || hvf_get(fd, &hvf_snap.nargs, 8) || hvf_snap.nargs > 1u << 20) {
     close(fd);
@@ -2579,11 +2796,7 @@ Term hvf_snap_gic_run(Env e, Term* f, IoWork* w) {
   if (!hvf_snap.ngic) {
     return (Term)0;
   }
-#ifdef __APPLE__
-  return (Term)(hv.gic_set_state && hv.gic_set_state(hvf_snap.gic, hvf_snap.ngic) == HV_SUCCESS ? 0 : HVF_ERR);
-#else
-  return (Term)HVF_ERR;
-#endif
+  return (Term)(vmb_gic_restore(hvf_snap.gic, hvf_snap.ngic) == 0 ? 0 : HVF_ERR);
 }
 
 // The control socket
