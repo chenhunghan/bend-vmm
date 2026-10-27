@@ -92,3 +92,19 @@ jobs:
           echo "$HOME/.bend/bin" >> "$GITHUB_PATH"
       - name: Guests on KVM (emulated EL2)
         run: scripts/ci/emulated-kvm.sh
+
+  host-macos:
+    # Guests on Hypervisor.framework. GitHub's macOS runners cannot nest, so
+    # this needs a self-hosted Apple Silicon runner (labels self-hosted,
+    # macOS, ARM64) with Bend 2.0.39, Xcode Command Line Tools and qemu-img;
+    # it runs when the repository variable MACOS_RUNNER is "true". Pushes to
+    # main only: a self-hosted runner must not run pull requests' code.
+    if: vars.MACOS_RUNNER == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 60
+    env:
+      BEND_NO_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guests on Hypervisor.framework
+        run: SKIP_NATIVE=1 scripts/check-host.sh
