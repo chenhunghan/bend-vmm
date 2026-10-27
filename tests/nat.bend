@@ -334,6 +334,69 @@ def junk() -> IO(Unit):
     step("other protocol dropped", gf(N.Slirp.new(), to_host(remote(), 47, [1, 2, 3, 4])), [], [])
     step("short tcp dropped", gf(N.Slirp.new(), to_host(remote(), 6, [1, 2, 3, 4])), [], [])
 
+# A guest segment with its own window.
+def gtcpw(gport: U32, flags: U32, seq: U32, ack: U32, win: U32, data: +List<U32>) -> +List<U32>:
+  to_host(remote(), 6, W.Tcp.build(g(), remote(), W.Tcp{gport, 80, seq, ack, flags, win, 0, data}))
+
+def first(fs: +List<+List<U32>>) -> +List<U32>:
+  match fs:
+    case Nil{}:
+      []
+    case f <> t:
+      f
+
+# A host frame's tag, connection, length and TCP sequence number.
+def host_meta(+f: +List<U32>) -> +List<U32>:
+  List.append(&2, U32, List.take(&2, U32, f, 3n), [B.Bytes.read_be32(List.drop(&2, U32, f, 41n))])
+
+def host_metas(fs: +List<+List<U32>>) -> +List<+List<U32>>:
+  match fs:
+    case Nil{}:
+      []
+    case f <> t:
+      host_meta(f) <> host_metas(t)
+
+def show_metas(fs: +List<+List<U32>>) -> String:
+  List.show(~&2, ~+List<U32>, ~show, host_metas(fs))
+
+# The guest's window bounds what the NAT sends: 3000 bytes from the host
+# against a window of 1000 go out 1000 at a time, as the guest ACKs.
+def flow_window() -> IO(Unit):
+  +big = noise(3000n, 11)
+  +o1 = gf(opened(N.Slirp.new(), 40000, 0), gtcpw(40000, 16, 1000, 2, 1000, []))
+  +o2 = he(net(o1), V.TcpData{0, big})
+  +o3 = gf(net(o2), gtcpw(40000, 16, 1000, 1002, 1000, []))
+  +o4 = gf(net(o3), gtcpw(40000, 16, 1000, 2002, 65535, []))
+  +o5 = he(net(o4), V.TcpEof{0})
+  do IO<Unit>:
+    step("flow bare ack", o1, [], [])
+    step("flow first 1000", o2, [htcp(40000, 24, 2, 1000, 0, List.take(&2, U32, big, 1000n))], [])
+    T.eq_u32("flow queued", N.Slirp.queued(net(o2)), 2000)
+    step("flow next 1000 on ack", o3, [htcp(40000, 24, 1002, 1000, 0, B.Bytes.slice(big, 1000n, 1000n))], [])
+    step("flow rest on a wide window", o4, [htcp(40000, 24, 2002, 1000, 0, List.drop(&2, U32, big, 2000n))], [])
+    step("flow fin after the data", o5, [htcp(40000, 17, 3002, 1000, 0, [])], [])
+
+# A FIN waits for the queued data; a zero window holds everything back.
+def flow_eof_waits() -> IO(Unit):
+  +o1 = gf(opened(N.Slirp.new(), 40000, 0), gtcpw(40000, 16, 1000, 2, 0, []))
+  +o2 = he(net(o1), V.TcpData{0, [1, 2, 3]})
+  +o3 = he(net(o2), V.TcpEof{0})
+  +o4 = gf(net(o3), gtcpw(40000, 16, 1000, 2, 100, []))
+  do IO<Unit>:
+    step("zero window holds data", o2, [], [])
+    step("eof waits for data", o3, [], [])
+    step("window update sends data then fin", o4, [htcp(40000, 24, 2, 1000, 0, [1, 2, 3]), htcp(40000, 17, 5, 1000, 0, [])], [])
+
+# Bytes held on the host (TcpReady) go out as host frames within the window.
+def flow_held() -> IO(Unit):
+  +o1 = gf(opened(N.Slirp.new(), 40000, 0), gtcpw(40000, 16, 1000, 2, 3000, []))
+  +o2 = he(net(o1), V.TcpReady{0, 5000})
+  +o3 = gf(net(o2), gtcpw(40000, 16, 1000, 3002, 65535, []))
+  do IO<Unit>:
+    T.eq_str("held first 3000", show_metas(frames(o2)), "[[256, 0, 3000, 2]]")
+    T.eq_str("held rest on ack", show_metas(frames(o3)), "[[256, 0, 2000, 3002]]")
+    T.eq_str("held frame headers", show(List.take(&2, U32, List.drop(&2, U32, first(frames(o2)), 3n), 14n)), show(List.append(&2, U32, N.Slirp.guest_mac(), List.append(&2, U32, N.Slirp.gateway_mac(), [8, 0]))))
+
 def main() -> IO(Unit):
   do IO<Unit>:
     lifetime()
@@ -351,3 +414,6 @@ def main() -> IO(Unit):
     arp()
     icmp()
     junk()
+    flow_window()
+    flow_eof_waits()
+    flow_held()

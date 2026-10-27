@@ -2,7 +2,8 @@
 # A long run: the busybox guest (2 vCPUs) loops over disk, shared-folder,
 # network and memory traffic, checking every byte it reads back
 # (tests/guest/rootfs/soak.sh), while the host pauses and resumes it through
-# the control socket every minute and samples the VMM's memory every 10 s.
+# the control socket every minute (SOAK_PAUSE seconds) and samples the VMM's
+# memory every 10 s.
 #   scripts/soak.sh [MINUTES]         default 10
 # Passes when every round checked out, the guest finished, and the VMM's
 # resident memory at the end is within 20% of its size after the first
@@ -38,7 +39,7 @@ while kill -0 $vm 2>/dev/null && [ "$(date +%s)" -lt $deadline ]; do
   rss=$(ps -o rss= -p $vm 2>/dev/null | tr -d ' ')
   rounds=$(grep -c '^SOAK-ITER' "$t/run.log")
   [ -n "$rss" ] && printf '%s\t%s\t%s\n' $((now - start)) "$rss" "$rounds" >> "$res"
-  if [ $((now - last_pause)) -ge 60 ] && [ -S "$sock" ]; then
+  if [ $((now - last_pause)) -ge "${SOAK_PAUSE:-60}" ] && [ -S "$sock" ]; then
     [ "$(echo pause | nc -U "$sock")" = paused ] && sleep 1 && [ "$(echo resume | nc -U "$sock")" = running ] && pauses=$((pauses + 1))
     last_pause=$now
   fi

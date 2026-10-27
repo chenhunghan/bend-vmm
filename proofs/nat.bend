@@ -42,3 +42,12 @@ def L.nat.guest_fin():
 
 def L.nat.unknown_rst():
   {==}
+
+def L.nat.window_bounds_data():
+  {==}
+
+def L.nat.ack_opens_window():
+  {==}
+
+def L.nat.fin_waits_for_data():
+  {==}

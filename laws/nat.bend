@@ -92,3 +92,21 @@ law nat.guest_fin:
 
 law nat.unknown_rst:
   {frames(N.Slirp.guest_frame(N.Slirp.new(), guest_tcp(16, 5, 77, []))) == [host_tcp(4, 77, 0, 0, [])] : +List<+List<U32>>}
+
+# Proposed: flow control. The guest's window (its ACK plus its window
+# field) bounds the host data the NAT sends; the rest waits for an ACK, and
+# the FIN waits for the data.
+def guest_ack(ack: U32, win: U32) -> +List<U32>:
+  to_host(W.Tcp.build(g(), remote(), W.Tcp{40000, 80, 1000, ack, 16, win, 0, []}), remote(), 6)
+
+def narrow() -> N.Slirp:
+  net(N.Slirp.guest_frame(established(), guest_ack(2, 2)))
+
+law nat.window_bounds_data:
+  {frames(N.Slirp.host_event(narrow(), V.TcpData{0, [1, 2, 3]})) == [host_tcp(24, 2, 1000, 0, [1, 2])] : +List<+List<U32>>}
+
+law nat.ack_opens_window:
+  {frames(N.Slirp.guest_frame(net(N.Slirp.host_event(narrow(), V.TcpData{0, [1, 2, 3]})), guest_ack(4, 2))) == [host_tcp(24, 4, 1000, 0, [3])] : +List<+List<U32>>}
+
+law nat.fin_waits_for_data:
+  {frames(N.Slirp.host_event(net(N.Slirp.host_event(narrow(), V.TcpData{0, [1, 2, 3]})), V.TcpEof{0})) == [] : +List<+List<U32>>}

@@ -20,6 +20,8 @@ io_eff(CID(Hvf.disk_size), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.disk_read), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.disk_write), hvf_unavailable);
 io_eff(CID(Hvf.disk_copy), hvf_unavailable);
+io_eff(CID(Hvf.tcp_fill), () => 0);
+io_eff(CID(Hvf.net_copy), hvf_unavailable);
 io_eff(CID(Hvf.file_size), hvf_unavailable);
 io_eff(CID(Hvf.stdin_wait), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.disk_flush), hvf_unavailable);

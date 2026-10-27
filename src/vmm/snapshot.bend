@@ -17,7 +17,8 @@ import ./machine.bend as Mc
 # The machine's device state as a stream of 32-bit words, for snapshots.
 # Snap.encode and Snap.decode are inverses (laws/snapshot.bend). The stream
 # starts with the magic 1112428109 ("BVMS" read as a little-endian word, 0x534d5642)
-# and the format version 2 (2 added the UEFI flash state); lists and strings are length-prefixed; a sum type
+# and the format version 3 (2 added the UEFI flash state, 3 the NAT's flow
+# control); lists and strings are length-prefixed; a sum type
 # writes its constructor's index first. The host stores this next to guest
 # RAM, vCPU registers and the GIC state (host/hvf.c, "Snapshots").
 
@@ -25,7 +26,7 @@ def Snap.magic() -> U32:
   1112428109
 
 def Snap.version() -> U32:
-  2
+  3
 
 # Encoders
 # ========
@@ -66,8 +67,8 @@ def Enc.conns(cs: +List<Nt.Conn>) -> +List<U32>:
   match cs:
     case Nil{}:
       []
-    case Con{Nt.Conn{id, gp, rip, rp, st, gs, hs}, rest}:
-      List.append(&2, U32, [id, gp, rip, rp, st, gs, hs], Enc.conns(rest))
+    case Con{Nt.Conn{id, gp, rip, rp, st, gs, hs, Nt.Flow{wnd, held, queue, eof}}, rest}:
+      List.append(&2, U32, [id, gp, rip, rp, st, gs, hs, wnd, held, Bool.to_u32(eof)], List.append(&2, U32, X.Enc.bytes(queue), Enc.conns(rest)))
 
 def Enc.slirp(s: Nt.Slirp) -> +List<U32>:
   match s:
@@ -240,8 +241,12 @@ def Dec.conns(n: Nat) -> X.Dec<+List<Nt.Conn>>:
         st : U32 <- X.Dec.u32()
         gs : U32 <- X.Dec.u32()
         hs : U32 <- X.Dec.u32()
+        wnd : U32 <- X.Dec.u32()
+        held : U32 <- X.Dec.u32()
+        eof : Bool <- X.Dec.bool()
+        queue : +List<U32> <- X.Dec.bytes()
         rest : +List<Nt.Conn> <- Dec.conns(p)
-        return Nt.Conn{id, gp, rip, rp, st, gs, hs} <> rest
+        return Nt.Conn{id, gp, rip, rp, st, gs, hs, Nt.Flow{wnd, held, queue, eof}} <> rest
 
 def Dec.slirp() -> X.Dec<Nt.Slirp>:
   do X.Dec<Nt.Slirp>:

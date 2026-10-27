@@ -110,7 +110,7 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   out=$(drive 60 "busybox shell" 'echo hi-$((40+2))\n' "hi-42" 'poweroff -f\n' -- ./out/bend-vmm --mem 1024 --kernel out/guest/Image --initrd out/guest/guest.cpio 2>&1)
   if grep -q "^hi-42" <<<"$out"; then grn "ok: console input"; else red "failed: console input"; tail -5 <<<"$out"; fail=1; fi
   out=$(drive 90 "busybox shell" 'reboot -f\n' "busybox shell" 'poweroff -f\n' -- ./out/bend-vmm --mem 1024 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio 2>&1)
-  if [ "$(grep -c 'GUEST: up' <<<"$out")" = 2 ] && grep -q "stopped (0)" <<<"$out"; then grn "ok: reboot (gzip kernel)"; else red "failed: reboot"; grep -a -E "GUEST|reset|stopped" <<<"$out"; fail=1; fi
+  if [ "$(grep -c 'GUEST: up' <<<"$out")" = 2 ] && grep -q "stopped (0)" <<<"$out"; then grn "ok: reboot (gzip kernel)"; else red "failed: reboot"; grep -a -v sysreg <<<"$out" | tail -15; fail=1; fi
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
@@ -123,7 +123,7 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   [ "$(echo "snapshot $t/vm.snap" | nc -U "$sock")" = saved ] && grn "ok: snapshot ($(du -h "$t/vm.snap" | cut -f1) on disk)" || { red "failed: snapshot"; fail=1; }
   echo quit | nc -U "$sock" >/dev/null; slp 1
   out=$(drive 40 "restored" 'cat /tmp/m\n' "MARK-42" 'poweroff -f\n' -- ./out/bend-vmm --restore "$t/vm.snap" 2>&1)
-  grep -q "^MARK-42" <<<"$(tr -d '\r' <<<"$out")" && grep -q "stopped (0)" <<<"$out" && grn "ok: restore (guest RAM and CPUs continue)" || { red "failed: restore"; tail -5 <<<"$out"; fail=1; }
+  grep -q "^MARK-42" <<<"$(tr -d '\r' <<<"$out")" && grep -q "stopped (0)" <<<"$out" && grn "ok: restore (guest RAM and CPUs continue)" || { red "failed: restore"; grep -a -v sysreg <<<"$out" | tail -15; fail=1; }
   rm -rf "$t"
 fi
 
@@ -156,7 +156,7 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   out=$(drive 100 "login:" 'root\n' "~# " "$set_var" "login:" 'root\n' "~# " "$get_var" -- \
     ./out/bend-vmm --firmware out/uefi/code.fd --vars "$t/vars.fd" --mem 1024 --cpus 2 --disk out/uefi/alpine.iso:ro 2>&1 | tr -d '\r')
   grep -q "Welcome to Alpine" <<<"$out" && grn "ok: UEFI boots the Alpine ISO (edk2, GRUB, Linux $(grep -ao 'Linux [0-9][^ ]*' <<<"$out" | head -1 | cut -d' ' -f2))" || { red "failed: UEFI boot"; tail -5 <<<"$out"; fail=1; }
-  grep -q "SET-42" <<<"$out" && [ "$(grep -c 'Welcome to Alpine Linux' <<<"$out")" = 2 ] && grn "ok: UEFI reboot" || { red "failed: UEFI reboot"; fail=1; }
+  grep -q "SET-42" <<<"$out" && [ "$(grep -c 'Welcome to Alpine Linux' <<<"$out")" = 2 ] && grn "ok: UEFI reboot" || { red "failed: UEFI reboot"; grep -a -v sysreg <<<"$out" | tail -15; fail=1; }
   grep -B1 "AFTER-REBOOT" <<<"$out" | grep -q "^bend-ok" && grep -q "bend-ok" "$t/vars.fd" && grn "ok: EFI variable persists (flash, --vars)" || { red "failed: EFI variable"; grep -a -B2 AFTER-REBOOT <<<"$out"; fail=1; }
   grep -q "reboot: Power down" <<<"$out" && grn "ok: UEFI power off" || { red "failed: UEFI power off"; fail=1; }
   rm -rf "$t"

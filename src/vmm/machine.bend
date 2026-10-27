@@ -683,13 +683,27 @@ def Machine.backlog(devs: +List<D.Dev>) -> U32:
     case +d <> t:
       Bool.pick(U32, D.Dev.net(d), D.Dev.backlog(d), Machine.backlog(t))
 
-# The number of frames pending for the guest in the NetKind device (0 when
-# there is none). The host reads it to hold back its socket readers, as the
-# NAT assumes a lossless link to the guest.
+def Machine.big(ds: +List<D.Dev>) -> Bool:
+  match ds:
+    case Nil{}:
+      False{}
+    case Con{+d, t}:
+      Bool.pick(Bool, D.Dev.net(d), D.Dev.big(d), Machine.big(t))
+
+# Whether the first NetKind device takes TCP segments of up to 64 KiB (host
+# frames, so host data comes as V.TcpReady): see D.Dev.big.
+def Machine.net_big(m: Machine) -> Bool:
+  match m:
+    case Machine{p, u, ui, ds, di, r, ri, n, fl}:
+      Machine.big(ds)
+
+# The frames pending for the guest in the NetKind device (0 when there is
+# none), plus the NAT's queued bytes in 1460-byte segments: what the host's
+# readers wait on.
 def Machine.net_backlog(m: Machine) -> U32:
   match m:
     case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
-      Machine.backlog(devs)
+      (Machine.backlog(devs) + (Nt.Slirp.queued(nt) / 1460 : U32) : U32)
 
 def Machine.vsock_devs.out(-R: Type, o: D.DevOut, t: +List<D.Dev>) -> V.Op<R, +List<D.Dev>>:
   match o:

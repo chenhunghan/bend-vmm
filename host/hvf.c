@@ -1878,6 +1878,12 @@ typedef struct {
   int      fd;
   int      parked;  // an effect waits on fd in the event loop
   int      closing; // closed while parked: the parked effect closes fd
+  // TCP data held for the guest (Hvf.tcp_fill): rlen bytes, the first roff
+  // of them already moved into guest memory by Hvf.net_copy, which writes to
+  // wake[1] once all are
+  uint8_t* rbuf;
+  uint32_t rlen, roff;
+  int      wake[2];
 } HvfSock;
 
 static HvfSock  hvf_socks[HVF_MAX_SOCKS];
@@ -1923,7 +1929,7 @@ static HvfSock* hvf_sock(uint32_t key, int udp) {
 static HvfSock* hvf_sock_new(uint32_t key, int udp, int fd) {
   for (int i = 0; i < HVF_MAX_SOCKS; i++) {
     if (!hvf_socks[i].used) {
-      hvf_socks[i] = (HvfSock){1, key, udp, fd, 0, 0};
+      hvf_socks[i] = (HvfSock){.used = 1, .key = key, .udp = udp, .fd = fd, .wake = {-1, -1}};
       return &hvf_socks[i];
     }
   }
@@ -1933,15 +1939,27 @@ static HvfSock* hvf_sock_new(uint32_t key, int udp, int fd) {
 // Closing a socket that an effect is parked on would pull the fd out from
 // under the event loop's poll. Instead it is shut down, which wakes the
 // parked effect, and that effect closes it (hvf_sock_woke).
+static void hvf_sock_release(HvfSock* k) {
+  close(k->fd);
+  if (k->wake[0] >= 0) {
+    close(k->wake[0]);
+    close(k->wake[1]);
+  }
+  free(k->rbuf);
+  *k = (HvfSock){.wake = {-1, -1}};
+}
+
 static void hvf_sock_free(HvfSock* k) {
   if (k->parked) {
     shutdown(k->fd, SHUT_RDWR);
+    if (k->wake[1] >= 0) {
+      (void)!write(k->wake[1], "x", 1); // an effect may wait on wake[0]
+    }
     k->closing = 1;
     k->key     = 0xffffffffu; // no longer found by key
     return;
   }
-  close(k->fd);
-  k->used = 0;
+  hvf_sock_release(k);
 }
 
 // The parked effect woke: if its socket was closed meanwhile, finish the
@@ -1949,9 +1967,7 @@ static void hvf_sock_free(HvfSock* k) {
 static int hvf_sock_woke(HvfSock* k) {
   k->parked = 0;
   if (k->closing) {
-    close(k->fd);
-    k->used    = 0;
-    k->closing = 0;
+    hvf_sock_release(k);
     return 1;
   }
   return 0;
@@ -2042,6 +2058,102 @@ Term hvf_tcp_recv_run(Env e, Term* f, IoWork* w) {
   w->made   = (intptr_t)(k - hvf_socks);
   k->parked = 1;
   return io_wait_on(w, k->fd, POLLIN, 0, hvf_tcp_recv_more);
+}
+
+// The most a TCP segment to the guest carries: its IPv4 packet (20 + 20
+// header bytes) stays within 65535 bytes.
+#define HVF_RBUF 65495
+
+static Term hvf_tcp_fill_read(Env e, IoWork* w) {
+  HvfSock* k = hvf_sock_at(w);
+  if (hvf_sock_woke(k)) {
+    return (Term)0;
+  }
+  ssize_t n = recv(k->fd, k->rbuf, HVF_RBUF, 0);
+  if (n < 0 && errno == EAGAIN) {
+    k->parked = 1;
+    return io_wait_on(w, k->fd, POLLIN, 0, hvf_tcp_fill_read);
+  }
+  k->rlen = n > 0 ? (uint32_t)n : 0;
+  k->roff = 0;
+  if (hvf_trace & 2) {
+    fprintf(stderr, "[trace] tcp %u: holds %u\n", k->key, k->rlen);
+  }
+  return (Term)k->rlen;
+}
+
+static Term hvf_tcp_fill_taken(Env e, IoWork* w) {
+  HvfSock* k = hvf_sock_at(w);
+  char     b[64];
+  while (read(k->wake[0], b, sizeof b) > 0) {
+  }
+  if (hvf_sock_woke(k)) {
+    return (Term)0;
+  }
+  k->parked = 1;
+  if (k->rlen) {
+    return io_wait_on(w, k->wake[0], POLLIN, 0, hvf_tcp_fill_taken);
+  }
+  return io_wait_on(w, k->fd, POLLIN, 0, hvf_tcp_fill_read);
+}
+
+// Hvf.tcp_fill(conn) -> U32: once the guest has the bytes held for it (by
+// Hvf.net_copy), parks until the socket has data and holds up to 65495
+// bytes of it for the guest: their count; 0 at EOF, on an error, or once the
+// connection is closed.
+Term hvf_tcp_fill_run(Env e, Term* f, IoWork* w) {
+  HvfSock* k = hvf_sock((u32)f[0], 0);
+  if (!k) {
+    return (Term)0;
+  }
+  if (!k->rbuf) {
+    k->rbuf = io_mem(malloc(HVF_RBUF));
+    if (pipe(k->wake) != 0) {
+      return (Term)0;
+    }
+    fcntl(k->wake[0], F_SETFL, O_NONBLOCK);
+    fcntl(k->wake[1], F_SETFL, O_NONBLOCK);
+  }
+  w->made   = (intptr_t)(k - hvf_socks);
+  k->parked = 1;
+  if (k->rlen) {
+    return io_wait_on(w, k->wake[0], POLLIN, 0, hvf_tcp_fill_taken);
+  }
+  return io_wait_on(w, k->fd, POLLIN, 0, hvf_tcp_fill_read);
+}
+
+// Hvf.net_copy(conn, iovs) -> U32: moves the next bytes held for TCP
+// connection conn into the pieces of guest memory (as Hvf.disk_copy takes
+// them), in order, zeros where they run out; once all held bytes moved, the
+// hold is free for the next Hvf.tcp_fill. The count moved.
+Term hvf_net_copy_run(Env e, Term* f, IoWork* w) {
+  static uint8_t* hva[HVF_MAX_IOVS];
+  static u64      len[HVF_MAX_IOVS];
+  HvfSock*        k = hvf_sock((u32)f[0], 0);
+  u64             nb;
+  char*           b = io_cbuf(e, f[1], &nb, CID(Con));
+  int             n = hvf_iovs(b, nb, hva, len, HVF_MAX_IOVS);
+  free(b);
+  uint32_t have = k && k->rbuf ? k->rlen - k->roff : 0, at = 0;
+  for (int i = 0; i < n; i++) {
+    u64 m = have - at < len[i] ? have - at : len[i];
+    if (m) {
+      memcpy(hva[i], k->rbuf + k->roff + at, m);
+    }
+    memset(hva[i] + m, 0, len[i] - m);
+    at += (uint32_t)m;
+  }
+  if (hvf_trace & 2) {
+    fprintf(stderr, "[trace] tcp %u: %u of %u bytes to the guest\n", (u32)f[0], at, have);
+  }
+  if (k && k->rbuf) {
+    k->roff += at;
+    if (k->roff >= k->rlen) {
+      k->rlen = k->roff = 0;
+      (void)!write(k->wake[1], "x", 1);
+    }
+  }
+  return (Term)at;
 }
 
 // Hvf.tcp_send(conn, bytes) -> U32: writes all bytes (waiting for room);
@@ -3323,6 +3435,12 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.tcp_recv)
   io_eff(CID(Hvf.tcp_recv), hvf_tcp_recv_run);
+#endif
+#ifdef CID(Hvf.tcp_fill)
+  io_eff(CID(Hvf.tcp_fill), hvf_tcp_fill_run);
+#endif
+#ifdef CID(Hvf.net_copy)
+  io_eff(CID(Hvf.net_copy), hvf_net_copy_run);
 #endif
 #ifdef CID(Hvf.tcp_send)
   io_eff(CID(Hvf.tcp_send), hvf_tcp_send_run);

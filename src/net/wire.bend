@@ -305,3 +305,29 @@ def Tcp.build(src: U32, dst: U32, t: Tcp) -> +List<U32>:
   +len = U32.from_nat(Nat.add(Wire.len(h0), Wire.len(payload)))
   c = Csum.of(Wire.cat(Wire.pseudo(src, dst, 6, len), Wire.cat(h0, payload)))
   Wire.cat(Tcp.header(t, c), payload)
+
+# A frame whose payload stays on the host: [256, conn, len] then its
+# headers. 256 is no byte, so such a frame is never a plain one. The device
+# writes the headers and has the host move the len bytes it holds for TCP
+# connection conn right after them (V.VmNetToRam): the payload never passes
+# through Bend.
+def Wire.host_tag() -> U32:
+  256
+
+def Wire.host_frame(conn: U32, len: U32, head: +List<U32>) -> +List<U32>:
+  Wire.host_tag() <> conn <> len <> head
+
+def Wire.is_host_frame(f: +List<U32>) -> Bool:
+  match f:
+    case Nil{}:
+      False{}
+    case x <> t:
+      U32.is_eq(x, Wire.host_tag())
+
+# The 20-byte IPv4 header (IHL 5, flags DF, id 0, TTL 64) of a packet with
+# len bytes after the header, with its checksum.
+def Ipv4.head(+src: U32, +dst: U32, +proto: U32, +len: U32) -> +List<U32>:
+  +ttl_proto = {[64, 0, 64, (proto .&. 255 : U32)] : +List<U32>}
+  +pre = Wire.cat([69, 0], Wire.cat(Wire.be16((20 + len : U32)), Wire.cat([0, 0], ttl_proto)))
+  +addrs = Wire.cat(B.Bytes.be32(src), B.Bytes.be32(dst))
+  Wire.cat(pre, Wire.cat(Wire.be16(Csum.of(Wire.cat(pre, Wire.cat([0, 0], addrs)))), addrs))

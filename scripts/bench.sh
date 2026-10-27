@@ -13,9 +13,9 @@
 #   mmio-exit       the same from a Linux process (tests/guest/bench.c)
 #   disk-*          virtio-blk: sequential 1 MiB read and write, 4 KiB random
 #                   reads (QD1), O_DIRECT on a 256 MiB image
-#   net-*, 9p-*     a 64 MiB download from a host HTTP server through the NAT,
-#                   HTTP request latency, the shared folder's read, write and
-#                   stat
+#   net-*, 9p-*     a 64 MiB download from a host HTTP server through the NAT
+#                   and a 64 MiB upload to a host socket, HTTP request
+#                   latency, the shared folder's read, write and stat
 #   rss-*           the VMM's resident memory after the guest benchmarks
 # SKIP_BUILD=1 uses out/bend-vmm as it is.
 set -uo pipefail
@@ -60,6 +60,7 @@ head -c 67108864 /dev/urandom > "$t/www/big"; echo 67108864 > "$t/www/size"
 ln "$t/www/big" "$t/share/big"; cp "$t/www/size" "$t/share/size"
 port=$((20000 + RANDOM % 20000))
 (cd "$t/www" && exec python3 -m http.server "$port" --bind 127.0.0.1 >/dev/null 2>&1) & http=$!
+python3 scripts/bench/sink.py $((port + 1)) 67108864 & sink=$!
 sleep 1
 $vmm --mem 1024 --cpus 2 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/disk.img" --share "$t/share" \
   --cmdline "console=ttyAMA0 quiet bendbench benchttp=$port" > "$t/run.log" 2>&1 &
@@ -71,7 +72,7 @@ while kill -0 $vm 2>/dev/null; do
   sleep 0.5
 done
 wait $vm 2>/dev/null
-kill $http 2>/dev/null
+kill $http $sink 2>/dev/null
 tr -d '\r' < "$t/run.log" | awk '/^BENCH [a-z0-9]/ && $2 != "guest-init" { print $2, $3, $4 }' | while read -r n v u; do rec "$n" "$v" "$u"; done
 rec rss-peak "$((rss / 1024))" MiB
 cp "$t/run.log" out/bench/guest.log

@@ -5,6 +5,8 @@
 //                    QD1); on vCPU CPU when given
 //   bench mmio       guest exits: 100000 reads of the PL031 RTC's data
 //                    register through /dev/mem (each one traps to the VMM)
+//   bench on CPU PROG ARGS...  runs PROG on vCPU CPU only (where the devices'
+//                    interrupts land, so no IPI wakes it: steadier numbers)
 // Prints `BENCH <name> <value> <unit>` lines.
 
 typedef unsigned long u64;
@@ -33,6 +35,7 @@ static i64 sys(i64 n, i64 a, i64 b, i64 c, i64 d, i64 e, i64 f) {
 #define SYS_clock_gettime 113
 #define SYS_ioctl 29
 #define SYS_sched_setaffinity 122
+#define SYS_execve 221
 #define AT_FDCWD -100
 #define O_RDONLY 0
 #define O_RDWR 2
@@ -134,6 +137,12 @@ void _start_c(u64* sp) {
   int argc = (int)sp[0];
   char** argv = (char**)(sp + 1);
   int rc = 2;
+  if (argc >= 4 && eq(argv[1], "on")) {
+    u64 mask = 1ul << (argv[2][0] - '0');
+    sys(SYS_sched_setaffinity, 0, sizeof mask, (i64)&mask, 0, 0, 0);
+    sys(SYS_execve, (i64)argv[3], (i64)(argv + 3), (i64)(argv + argc + 1), 0, 0, 0);
+    sys(SYS_exit, 127, 0, 0, 0, 0, 0);
+  }
   if (argc >= 4) {
     u64 mask = 1ul << (argv[3][0] - '0');
     sys(SYS_sched_setaffinity, 0, sizeof mask, (i64)&mask, 0, 0, 0);

@@ -29,7 +29,8 @@ import ./input.bend as In
 #                space follows the driver's select/subsel writes
 #                (In.Input.config)
 #   NetKind:     virtio-net, device id 1, two queues (0 receiveq1,
-#                1 transmitq1), also VIRTIO_NET_F_MAC (U.U64{1, 32}), config
+#                1 transmitq1), also VIRTIO_NET_F_MAC, GUEST_CSUM and
+#                GUEST_TSO4 (U.U64{1, 162}: see src/virtio/net.bend), config
 #                space N.Net.config(mac)
 #   P9Kind:      virtio-9p on host share `share`, device id 9, one queue,
 #                also VIRTIO_9P_MOUNT_TAG (U.U64{1, 1}), config space
@@ -102,7 +103,7 @@ def Dev.mmio(kind: DevKind) -> M.VirtioMmio:
     case ConsoleKind{}:
       M.VirtioMmio.new(3, Dev.features(), 2n, 256, [])
     case NetKind{mac}:
-      M.VirtioMmio.new(1, U.U64{1, 32}, 2n, 256, N.Net.config(mac))
+      M.VirtioMmio.new(1, U.U64{1, 162}, 2n, 256, N.Net.config(mac))
     case P9Kind{share, tag}:
       M.VirtioMmio.new(9, U.U64{1, 1}, 1n, 256, P.P9.config(tag))
     case VsockKind{cid}:
@@ -601,6 +602,18 @@ def Dev.vsock(d: Dev) -> Bool:
   match d:
     case Dev{k, m, qs, st}:
       Dev.is_vsock(k)
+
+def Dev.big.mmio(m: M.VirtioMmio) -> Bool:
+  match m:
+    case M.VirtioMmio{id, df, U.U64{dh, dl}, dfs, drs, qs, cfgs, st, ist, cg, cfg}:
+      U32.is_eq((dl .&. 130 : U32), 130)
+
+# Whether a net device's driver took GUEST_CSUM and GUEST_TSO4 (bits 1 and
+# 7): it then receives TCP segments of up to 64 KiB as host frames.
+def Dev.big(d: Dev) -> Bool:
+  match d:
+    case Dev{k, m, qs, st}:
+      Dev.is_net(k) && Dev.big.mmio(m)
 
 # A vsock device's backlog (Vs.Vsock.backlog; 0 for other kinds).
 def Dev.vsock_backlog(d: Dev) -> U32:

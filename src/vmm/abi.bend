@@ -53,6 +53,10 @@ type NetEvent is Data:
   TcpEof{conn: U32}
   # A datagram from ip:port to guest port dport.
   UdpData{ip: U32, port: U32, dport: U32, bytes: +List<U32>}
+  # len bytes from the remote side wait in the host's buffer for the
+  # connection (instead of TcpData when the guest takes big segments): they
+  # go to the guest by VmNetToRam, never through Bend.
+  TcpReady{conn: U32, len: U32}
 
 # A piece of guest memory: len bytes at addr. Devices name the memory of a
 # descriptor chain this way, and the host moves bytes in and out of it.
@@ -199,6 +203,9 @@ type Vm<-A: Type> is Type:
   VmDiskToRam{disk: U32, offset: U.U64, iovs: +List<Iov>, next: Vm<A>}
   # Copies the pieces of guest memory, in order, to the disk from offset.
   VmRamToDisk{disk: U32, offset: U.U64, iovs: +List<Iov>, next: Vm<A>}
+  # Moves the bytes the host holds for TCP connection conn (TcpReady) into
+  # the pieces of guest memory, in order, and frees the host's buffer.
+  VmNetToRam{conn: U32, iovs: +List<Iov>, next: Vm<A>}
 
 # Device code is written in Op, a continuation monad over Vm: its bind needs
 # no recursion, so `do Op<R, A>:` blocks pass Bend's termination check. R is
@@ -259,6 +266,9 @@ def Op.disk_to_ram(-R: Type, disk: U32, offset: U.U64, iovs: +List<Iov>) -> Op<R
 
 def Op.ram_to_disk(-R: Type, disk: U32, offset: U.U64, iovs: +List<Iov>) -> Op<R, Unit>:
   Op{k => VmRamToDisk{disk, offset, iovs, k(Unit{})}}
+
+def Op.net_to_ram(-R: Type, conn: U32, iovs: +List<Iov>) -> Op<R, Unit>:
+  Op{k => VmNetToRam{conn, iovs, k(Unit{})}}
 
 def Op.random(-R: Type, len: U32) -> Op<R, +List<U32>>:
   Op{k => VmRandom{len, k}}

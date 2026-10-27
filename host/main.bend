@@ -260,6 +260,10 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
       do IO<A>:
         _ : U32 <- H.Host.disk_copy(d, 1, off, iovs)
         interp(cpu, mc, done, A, next)
+    case V.VmNetToRam{conn, iovs, next}:
+      do IO<A>:
+        _ : U32 <- H.Host.net_copy(conn, iovs)
+        interp(cpu, mc, done, A, next)
     case V.VmRandom{n, k}:
       do IO<A>:
         bs : +List<U32> <- H.Hvf.random(n)
@@ -329,10 +333,38 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
         net_wait(mc, 5000n)
         tcp_reader(mc, done, conn)
 
-@unsafe def tcp_reader(+mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+@unsafe def tcp_reader.small(+mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
   do IO<Unit>:
     +bs : +List<U32> <- H.Hvf.tcp_recv(conn)
     tcp_reader.got(List.is_empty(&2, U32, bs), mc, done, conn, bs)
+
+@unsafe def tcp_reader.held(eof: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32, n: U32) -> IO(Unit):
+  match eof:
+    case True{}:
+      net_deliver(mc, done, V.TcpEof{conn})
+    case False{}:
+      do IO<Unit>:
+        net_deliver(mc, done, V.TcpReady{conn, n})
+        tcp_reader(mc, done, conn)
+
+@unsafe def tcp_reader.mode(big: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  match big:
+    case True{}:
+      do IO<Unit>:
+        +n : U32 <- H.Hvf.tcp_fill(conn)
+        tcp_reader.held(U32.is_zero(n), mc, done, conn, n)
+    case False{}:
+      tcp_reader.small(mc, done, conn)
+
+# A connection's reader. A guest that takes 64 KiB segments gets the host's
+# data as V.TcpReady: up to 65495 bytes held on the host, moved into guest
+# memory when delivered (Hvf.tcp_fill waits for that before it reads more).
+# Otherwise the bytes go through the NAT as V.TcpData.
+@unsafe def tcp_reader(+mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  do IO<Unit>:
+    +m : M.Machine <- take(mc)
+    put(mc, m)
+    tcp_reader.mode(M.Machine.net_big(m), mc, done, conn)
 
 @unsafe def tcp_task.connected(ok: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
   match ok:

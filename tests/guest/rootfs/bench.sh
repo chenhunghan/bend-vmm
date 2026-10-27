@@ -17,8 +17,12 @@ if [ -n "$port" ] && [ -e /sys/class/net/eth0 ]; then
   ip link set lo up; ip link set eth0 up
   udhcpc -i eth0 -q -t 5 -T 1 -n >/dev/null 2>&1
   bytes=$(wget -q -O - "http://10.0.2.2:$port/size")
-  s=$(up); wget -q -O /dev/null "http://10.0.2.2:$port/big"; e=$(up)
+  s=$(up); /bin/bench on 0 /bin/wget -q -O /dev/null "http://10.0.2.2:$port/big"; e=$(up)
   rate net-download $bytes $s $e
+  # upload: the host's sink (scripts/bench/sink.py) on the next port takes
+  # $bytes bytes and closes
+  s=$(up); dd if=/dev/zero bs=1048576 count=$((bytes / 1048576)) 2>/dev/null | /bin/bench on 0 /bin/nc 10.0.2.2 $((port + 1)); e=$(up)
+  rate net-upload $bytes $s $e
   s=$(up); i=0; while [ $i -lt 50 ]; do wget -q -O /dev/null "http://10.0.2.2:$port/size"; i=$((i + 1)); done; e=$(up)
   awk -v s=$s -v e=$e 'BEGIN { printf "BENCH net-http-request %.1f ms\n", (e - s) * 1000 / 50 }'
 fi
@@ -26,9 +30,9 @@ if grep -qs share /sys/bus/virtio/drivers/9pnet_virtio/*/mount_tag; then
   msize=$(sed -n 's/.*benchmsize=\([0-9]*\).*/\1/p' /proc/cmdline)
   mkdir -p /mnt/share && mount -t 9p -o trans=virtio,version=9p2000.L,msize=${msize:-524288} share /mnt/share
   bytes=$(cat /mnt/share/size)
-  s=$(up); dd if=/mnt/share/big of=/dev/null bs=1M 2>/dev/null; e=$(up)
+  s=$(up); /bin/bench on 0 /bin/dd if=/mnt/share/big of=/dev/null bs=1M 2>/dev/null; e=$(up)
   rate 9p-read $bytes $s $e
-  s=$(up); dd if=/dev/zero of=/mnt/share/out bs=1M count=$((bytes / 1048576)) 2>/dev/null; e=$(up)
+  s=$(up); /bin/bench on 0 /bin/dd if=/dev/zero of=/mnt/share/out bs=1M count=$((bytes / 1048576)) 2>/dev/null; e=$(up)
   rate 9p-write $bytes $s $e
   s=$(up); i=0; while [ $i -lt 200 ]; do stat /mnt/share/size >/dev/null; i=$((i + 1)); done; e=$(up)
   awk -v s=$s -v e=$e 'BEGIN { printf "BENCH 9p-stat %.2f ms\n", (e - s) * 1000 / 200 }'
