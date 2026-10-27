@@ -261,6 +261,44 @@ def short_header() -> IO(Unit):
   +s = S.Sim.write(machine(t, 1, [0]), u64(16384), hdr(0, 1))
   check("blk short header", run(s), 16400, [1], used(1, [0, 1]), True{}, 1, disk())
 
+# What a request does on a disk of 65536 sectors (32 MiB), running on the
+# simulator up to its first disk effect ("disk") or its end ("status" and the
+# status byte at 16912).
+def touch(fuel: Nat, -A: Type, s: S.Sim, m: V.Vm<A>) -> String:
+  match fuel:
+    case 0n:
+      "fuel"
+    case 1n+f:
+      match m:
+        case V.VmRead{+a, n, k}:
+          +s = s
+          touch(f, A, s, k(S.Sim.read(s, a, n)))
+        case V.VmWrite{a, bs, next}:
+          touch(f, A, S.Sim.write(s, a, bs), next)
+        case V.VmRet{x}:
+          "status " ++ show(S.Sim.read(s, u64(16912), 1))
+        case V.VmDiskToRam{d, o, i, next}:
+          "disk"
+        case V.VmRamToDisk{d, o, i, next}:
+          "disk"
+        case _:
+          "other"
+
+def big(t: U32, flags: U32, len: U32) -> String:
+  +tb = cat(desc(16384, 16, 1, 1), cat(desc(16400, len, flags, 2), desc(16912, 1, 2, 0)))
+  +s = S.Sim.write(machine(tb, 1, [0]), u64(16384), hdr(t, 0))
+  touch(100n, Q.Vq & Bool, s, V.Op.finish(Q.Vq & Bool, K.Blk.serve(Q.Vq & Bool, 0, u64(65536), False{}, queue())))
+
+# 15. One request moves at most 16 MiB: a longer one is IOERR, the disk
+# untouched.
+def big_requests() -> IO(Unit):
+  do IO<Unit>:
+    T.eq_str("blk read of 16 MiB served", big(0, 3, 16777216), "disk")
+    T.eq_str("blk read past 16 MiB is IOERR", big(0, 3, 16777217), "status [1]")
+    T.eq_str("blk write of 16 MiB served", big(1, 1, 16777216), "disk")
+    T.eq_str("blk write past 16 MiB is IOERR", big(1, 1, 16777217), "status [1]")
+    T.eq_str("blk write of 4 GiB is IOERR", big(1, 1, 4294967295), "status [1]")
+
 def main() -> IO(Unit):
   do IO<Unit>:
     T.eq_str("blk config", show(K.Blk.config(U.U64{1, 2})), "[2, 0, 0, 0, 1, 0, 0, 0]")
@@ -282,3 +320,7 @@ def main() -> IO(Unit):
     short_header()
     T.eq_str("blk features rw", show(feats(K.Blk.features(False{}))), "[1, 512]")
     T.eq_str("blk features ro", show(feats(K.Blk.features(True{}))), "[1, 544]")
+    big_requests()
+    T.eq_str("blk offered rw", show(feats(K.Blk.offered(False{}))), "[1, 518]")
+    T.eq_str("blk offered ro", show(feats(K.Blk.offered(True{}))), "[1, 550]")
+    T.eq_str("blk config with limits", show(K.Blk.config_limits(U.U64{1, 2})), "[2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 128, 0, 0, 0]")

@@ -157,8 +157,8 @@ def feats_of(r: Maybe<&1, S.Sim & +List<U32>>) -> +List<U32>:
 def kinds() -> IO(Unit):
   do IO<Unit>:
     T.eq_str("device rng features hi, lo, id, config", show(feats_of(S.Sim.exec(+List<U32>, mem(), feats(D.RngKind{})))), "[1, 0, 4, 0]")
-    T.eq_str("device blk features hi, lo, id, capacity", show(feats_of(S.Sim.exec(+List<U32>, mem(), feats(D.BlkKind{0, u64(2048)})))), "[1, 512, 2, 2048]")
-    T.eq_str("device blk ro features hi, lo, id, capacity", show(feats_of(S.Sim.exec(+List<U32>, mem(), feats(D.BlkRoKind{0, u64(2048)})))), "[1, 544, 2, 2048]")
+    T.eq_str("device blk features hi, lo, id, capacity", show(feats_of(S.Sim.exec(+List<U32>, mem(), feats(D.BlkKind{0, u64(2048)})))), "[1, 518, 2, 2048]")
+    T.eq_str("device blk ro features hi, lo, id, capacity", show(feats_of(S.Sim.exec(+List<U32>, mem(), feats(D.BlkRoKind{0, u64(2048)})))), "[1, 550, 2, 2048]")
 
 def main() -> IO(Unit):
   do IO<Unit>:

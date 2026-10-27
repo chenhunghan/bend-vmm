@@ -12,7 +12,8 @@ import ../disk/store.bend as S
 # (Q.Vq.segs). Op.disk_flush makes writes durable. Offered features: VIRTIO_F_VERSION_1 and
 # VIRTIO_BLK_F_FLUSH, plus VIRTIO_BLK_F_RO on a read-only disk (no
 # multi-queue). Config space: capacity, a little-endian u64 count of 512-byte
-# sectors.
+# sectors. The device (Blk.offered, Blk.config_limits) also offers SIZE_MAX
+# and SEG_MAX, with size_max and seg_max after the capacity.
 #
 # A request is one chain: a 16-byte readable header {type u32, reserved u32,
 # sector u64}, data descriptors, and a final 1-byte writable status.
@@ -24,8 +25,9 @@ import ../disk/store.bend as S
 #   type 8 GET_ID: write the id string (Blk.id(), NUL-padded to 20 bytes) into
 #                  the writable data descriptors
 #   other types:   status UNSUPP
-# Status: 0 OK, 1 IOERR (the access ends past capacity*512, or the chain has no
-# writable status byte to answer in), 2 UNSUPP. The used length is the number
+# Status: 0 OK, 1 IOERR (the access ends past capacity*512, moves more than
+# Blk.max_len() bytes, or the chain has no writable status byte to answer
+# in), 2 UNSUPP. The used length is the number
 # of bytes written into the chain, status byte included.
 
 def Blk.id() -> String:
@@ -38,6 +40,39 @@ def Blk.features(ro: Bool) -> U.U64:
 
 def Blk.config(sectors: U.U64) -> +List<U32>:
   B.Bytes.le64(sectors)
+
+# The most data one request moves (16 MiB): a longer one is IOERR, the disk
+# untouched. A guest's lengths must not size the store walk (Blk.fuel steps,
+# a cluster at a time).
+def Blk.max_len() -> U32:
+  16777216
+
+def Blk.len_ok(+len: U32) -> Bool:
+  U32.is_le(len, Blk.max_len())
+
+# What the device offers so that Linux never builds a request past
+# Blk.max_len(): VIRTIO_BLK_F_SIZE_MAX (bit 1) with size_max 128 KiB per
+# segment and VIRTIO_BLK_F_SEG_MAX (bit 2) with seg_max 128 segments
+# (128 * 128 KiB = 16 MiB; with the header and the status, 130 descriptors
+# fit a queue of 256).
+def Blk.size_max() -> U32:
+  131072
+
+def Blk.seg_max() -> U32:
+  128
+
+def Blk.offered.go(f: U.U64) -> U.U64:
+  match f:
+    case U.U64{h, l}:
+      U.U64{h, (l .|. 6 : U32)}
+
+# Blk.features, plus SIZE_MAX and SEG_MAX: what the device offers.
+def Blk.offered(ro: Bool) -> U.U64:
+  Blk.offered.go(Blk.features(ro))
+
+# The config space with the limits: capacity, size_max, seg_max.
+def Blk.config_limits(sectors: U.U64) -> +List<U32>:
+  List.append(&2, U32, Blk.config(sectors), List.append(&2, U32, B.Bytes.le32(Blk.size_max()), B.Bytes.le32(Blk.seg_max())))
 
 # Status codes.
 def Blk.s_ok() -> U32:
@@ -111,7 +146,10 @@ def Blk.reply(-R: Type, +w: +List<Q.Desc>, +room: U32, res: U32 & +List<U32>) ->
 def Blk.fuel() -> Nat:
   1000000n
 
-# IN: the room before the status byte filled from the store at sector.
+# IN: the room before the status byte filled from the store at sector. The
+# store's host effects report no status (V.Op.disk_to_ram and the others
+# answer Unit), so a host read error cannot become IOERR here; OUT reports
+# what S.Store.write answers.
 def Blk.in(-R: Type, ok: Bool, st: S.Store, sector: U.U64, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
   match ok:
     case False{}:
@@ -139,8 +177,9 @@ def Blk.out_ro(-R: Type, ro: Bool, st: S.Store, +sectors: U.U64, +sector: U.U64,
     case True{}:
       Blk.reply(R, w, room, (Blk.s_ioerr(), []))
     case False{}:
-      +ss = Q.Vq.segs(r, 16, 4294967295)
-      Blk.out(R, Blk.fits(sectors, sector, V.Iov.total(ss)), st, sector, ss, w, room)
+      +ss = Q.Vq.segs(r, 16, (Blk.max_len() + 1 : U32))
+      +len = V.Iov.total(ss)
+      Blk.out(R, Blk.len_ok(len) && Blk.fits(sectors, sector, len), st, sector, ss, w, room)
 
 # FLUSH: makes earlier writes durable.
 def Blk.flush(-R: Type, st: S.Store, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
@@ -153,7 +192,8 @@ def Blk.exec.kind(
 ) -> V.Op<R, U32>:
   match k:
     case 0n:
-      Blk.in(R, Blk.fits(sectors, sector, (room - 1 : U32)), st, sector, w, room)
+      +len = (room - 1 : U32)
+      Blk.in(R, Blk.len_ok(len) && Blk.fits(sectors, sector, len), st, sector, w, room)
     case 1n:
       Blk.out_ro(R, ro, st, sectors, sector, r, w, room)
     case 2n:
