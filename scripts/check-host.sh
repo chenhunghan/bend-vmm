@@ -143,11 +143,18 @@ open(sys.argv[2],'w').write(str(n))" "${vs}_7000" "$(dirname "$vs")/got" & sink=
   grep -q "^HOST-FWD-SENT 4194304$" <<<"$hlog" && grep -aqE '^ *4194304 *$' <<<"$out" && grn "ok: --forward bulk (4 MiB host -> guest, every byte counted)" || { red "failed: --forward bulk"; echo "$hlog" | tail -3; grep -a -v sysreg <<<"$out" | tail -8; fail=1; }
   kill $fwd 2>/dev/null
   # a forward whose host port is taken stops the VMM at startup
-  python3 -c "import socket,sys,time; s=socket.socket(); s.bind(('127.0.0.1', int(sys.argv[1]))); s.listen(1); time.sleep(int(sys.argv[2]))" "$fport" $((40 * SLOW)) & busy=$!
-  slp 1
-  out=$( (alarm 40 ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --forward "$fport:22" --cmdline "console=ttyAMA0 quiet") 2>&1 < /dev/null)
-  kill $busy 2>/dev/null; wait $busy 2>/dev/null
-  grep -q "cannot listen on 127.0.0.1:$fport: Address already in use" <<<"$out" && grn "ok: --forward on a taken port is a startup error" || { red "failed: --forward on a taken port"; tail -3 <<<"$out"; fail=1; }
+  # (the forward test above leaves $fport in TIME_WAIT: the busy listener
+  # sets SO_REUSEADDR so that it can bind it, and then holds it listening)
+  python3 -c "import socket,sys,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('127.0.0.1', int(sys.argv[1]))); s.listen(1); print('BUSY-UP', flush=True); time.sleep(int(sys.argv[2]))" "$fport" $((40 * SLOW)) > "$(dirname "$vs")/busy.log" 2>&1 & busy=$!
+  for _ in $(seq $((50 * SLOW))); do grep -q BUSY-UP "$(dirname "$vs")/busy.log" 2>/dev/null && break; kill -0 $busy 2>/dev/null || break; sleep 0.1; done
+  if grep -q BUSY-UP "$(dirname "$vs")/busy.log" 2>/dev/null && kill -0 $busy 2>/dev/null; then
+    out=$( (alarm 40 ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --forward "$fport:22" --cmdline "console=ttyAMA0 quiet") 2>&1 < /dev/null)
+    kill $busy 2>/dev/null; wait $busy 2>/dev/null
+    grep -q "cannot listen on 127.0.0.1:$fport: Address already in use" <<<"$out" && grn "ok: --forward on a taken port is a startup error" || { red "failed: --forward on a taken port"; tail -3 <<<"$out"; fail=1; }
+  else
+    kill $busy 2>/dev/null; wait $busy 2>/dev/null
+    red "failed: --forward on a taken port (the busy listener on 127.0.0.1:$fport did not start)"; cat "$(dirname "$vs")/busy.log" 2>/dev/null; fail=1
+  fi
   rm -rf "$(dirname "$vs")"
   out=$( (alarm 120 ./out/bend-vmm --mem 4096 --cpus 8 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --disk out/guest/disk.img --cmdline "console=ttyAMA0 bendtest bendcpus=8 quiet") 2>&1 )
   if grep -q GUEST-TESTS-DONE <<<"$out" && ! grep -q "GUEST-TEST FAIL" <<<"$out"; then grn "ok: 8 cpus, 4 GiB (RAM past 4 GiB)"; else red "failed: 8 cpus, 4 GiB"; grep -a GUEST <<<"$out" | tail; fail=1; fi
