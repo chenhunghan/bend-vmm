@@ -21,8 +21,10 @@ import ./queue.bend as Q
 # buf_alloc - (sent - fwd_cnt) bytes in flight. This device hands guest data
 # to the host at once, so it consumes everything it receives, advertises
 # 256 KiB, and sends a CREDIT_UPDATE whenever half of that has been consumed
-# since the last one. Host data waits per connection until the guest's credit
-# allows it, in packets of at most 4096 payload bytes.
+# since the last one, unless the host program is behind (VsBlocked): then
+# the credit waits for VsUnblocked. Host data waits per connection until the guest's credit
+# allows it, in packets of at most Vs.max_payload() bytes, split further at
+# delivery when the guest's buffer is smaller.
 
 def Vs.host_cid() -> U32:
   2
@@ -30,8 +32,12 @@ def Vs.host_cid() -> U32:
 def Vs.buf_alloc() -> U32:
   262144
 
+# The most payload a packet to the guest carries. Linux 6.8 posts rx
+# buffers of a page less the socket buffer's overhead (about 3.7 KiB with
+# the header): 3.5 KiB fits them; a packet that still does not fit a buffer
+# is split there (Vsq.rx.split).
 def Vs.max_payload() -> U32:
-  4096
+  3584
 
 # Caps on what a guest can make the device keep: packets queued for the
 # guest that answer it (RSTs, credit updates on request; further ones are
@@ -173,7 +179,7 @@ def VConn.credit(c: VConn, +alloc: U32, +fwd_cnt: U32) -> VConn:
     case VConn{id, gp, hp, st, tx, pa, pf, fwd, lf, pend, eof}:
       VConn{id, gp, hp, st, tx, alloc, fwd_cnt, fwd, lf, pend, eof}
 
-# What a connection can send now: min(credit, 4096, pending).
+# What a connection can send now: min(credit, Vs.max_payload(), pending).
 def VConn.room(c: VConn) -> Nat:
   match c:
     case VConn{id, gp, hp, st, +tx, +pa, +pf, fwd, lf, +pend, eof}:
@@ -241,6 +247,12 @@ def Vsock.with(vs: Vsock, conns: +List<VConn>, out: +List<+List<U32>>) -> Vsock:
     case Vsock{cid, cs, nid, np, old}:
       Vsock{cid, conns, nid, np, List.append(&2, +List<U32>, old, out)}
 
+# Packets queued for the guest, the connections kept.
+def Vsock.queue(vs: Vsock, out: +List<+List<U32>>) -> Vsock:
+  match vs:
+    case Vsock{cid, cs, nid, np, old}:
+      Vsock{cid, cs, nid, np, List.append(&2, +List<U32>, old, out)}
+
 # Vsock.with for a packet that answers the guest: it is dropped once
 # Vs.max_out() packets wait for the guest.
 def Vsock.with_ctl(vs: Vsock, conns: +List<VConn>, p: +List<U32>) -> Vsock:
@@ -279,16 +291,18 @@ def Vs.new_conn(vs: Vsock, +p: Pkt) -> VsOut:
 def Vs.rw_in.fin(update: Bool, vs: Vsock, +c: VConn, +cid: U.U64, cmds: +List<V.VsockCmd>) -> VsOut:
   match update:
     case True{}:
-      VsOut{Vsock.with(vs, [], [VConn.pkt(cid, c, Vs.credit_update(), 0, [])]), cmds}
+      VsOut{Vsock.queue(vs, [VConn.pkt(cid, c, Vs.credit_update(), 0, [])]), cmds}
     case False{}:
       VsOut{vs, cmds}
 
 def Vs.rw_in(+vs: Vsock, rest: +List<VConn>, c: VConn, payload: +List<U32>) -> VsOut:
   match c:
-    case VConn{+id, gp, hp, st, tx, pa, pf, fwd, +lf, pend, eof}:
+    case VConn{+id, gp, hp, +st, tx, pa, pf, fwd, +lf, pend, eof}:
+      +held = U32.is_ne((st .&. 256 : U32), 0)
       +payload = payload
       +fwd2 = (fwd + U32.from_nat(List.length(&2, U32, payload)) : U32)
-      +update = U32.is_le((Vs.buf_alloc() >> 1n : U32), (fwd2 - lf : U32))
+      # no credit update while the host program is behind (VsBlocked)
+      +update = Bool.not(held) && U32.is_le((Vs.buf_alloc() >> 1n : U32), (fwd2 - lf : U32))
       +c2 = {VConn{id, gp, hp, st, tx, pa, pf, fwd2, Bool.pick(U32, update, fwd2, lf), pend, eof} : VConn}
       +cid = Vsock.cid(vs)
       Vs.rw_in.fin(update, Vsock.with(vs, c2 <> rest, []), c2, cid, [V.VsSend{id, payload}])
@@ -414,6 +428,18 @@ def VConn.queue(c: VConn, bs: +List<U32>) -> VConn:
     case VConn{id, gp, hp, st, tx, pa, pf, fwd, lf, pend, eof}:
       VConn{id, gp, hp, st, tx, pa, pf, fwd, lf, List.append(&2, U32, pend, bs), eof}
 
+# Whether the host program is behind on this connection (bit 256 of state,
+# which holds no other value that high): no credit goes to the guest then.
+def VConn.blocked(c: VConn) -> Bool:
+  match c:
+    case VConn{id, gp, hp, st, tx, pa, pf, fwd, lf, pend, eof}:
+      U32.is_ne((st .&. 256 : U32), 0)
+
+def VConn.set_blocked(c: VConn, on: Bool) -> VConn:
+  match c:
+    case VConn{id, gp, hp, +st, tx, pa, pf, fwd, lf, pend, eof}:
+      VConn{id, gp, hp, Bool.pick(U32, on, (st .|. 256 : U32), (st .&. 4294967039 : U32)), tx, pa, pf, fwd, lf, pend, eof}
+
 def VConn.set_eof(c: VConn) -> VConn:
   match c:
     case VConn{id, gp, hp, st, tx, pa, pf, fwd, lf, pend, eof}:
@@ -433,6 +459,13 @@ def Vs.event.on(ev: V.VsockEvent, +vs: Vsock, rest: +List<VConn>, +c: VConn) -> 
       Vsock.keep(vs, rest, VConn.flush.all(VConn.set_eof(c), Vsock.cid(vs)), [])
     case V.VsIncoming{id, port}:
       VsOut{Vsock.with(vs, c <> rest, []), []}
+    case V.VsBlocked{id}:
+      VsOut{Vsock.with(vs, VConn.set_blocked(c, True{}) <> rest, []), []}
+    case V.VsUnblocked{id}:
+      # caught up: the credit held back goes to the guest now
+      +c2 = VConn.last_fwd(VConn.set_blocked(c, False{}))
+      +cid = Vsock.cid(vs)
+      VsOut{Vsock.with(vs, c2 <> rest, [VConn.pkt(cid, c2, Vs.credit_update(), 0, [])]), []}
 
 def Vs.event.conn(pick: Pick, vs: Vsock, ev: V.VsockEvent) -> VsOut:
   match pick:
@@ -462,6 +495,10 @@ def Vs.event.id(ev: V.VsockEvent) -> U32:
     case V.VsEof{id}:
       id
     case V.VsIncoming{id, port}:
+      id
+    case V.VsBlocked{id}:
+      id
+    case V.VsUnblocked{id}:
       id
 
 # An event from the host's sockets.
@@ -573,29 +610,75 @@ def Vsq.rx.deliver(-R: Type, q: Q.Vq, c: Q.Chain, +frame: +List<U32>) -> V.Op<R,
         n : U32 <- Q.Vq.scatter(R, Q.Chain{h, [], w}, frame)
         Q.Vq.push(R, q, h, len)
 
+# A chain's writable room.
+def Vsq.rx.chain_room(c: Q.Chain) -> U32:
+  match c:
+    case Q.Chain{h, r, w}:
+      Vsq.room(w)
+
 # Whether the header and the frame fit the chain's writable room.
 def Vsq.rx.fits(c: Q.Chain, +frame: +List<U32>) -> Bool:
   match c:
     case Q.Chain{h, r, w}:
       Nat.is_le(List.length(&2, U32, frame), U32.to_nat(Vsq.room(w)))
 
-# A popped chain: delivers the frame into it, or drops the frame and keeps the
-# chain (continuing with q0, the queue before the pop).
+# A data packet (RW) too big for a buffer of room bytes, as the part that
+# fills it and the rest, each with its own header (the same fields, its own
+# length): Some{(first, rest)}; None for anything else (a packet that is not
+# data, or a buffer with no room for payload).
+def Vsq.rx.split.go(ok: Bool, +frame: +List<U32>, +room: U32) -> Maybe<&1, +List<U32> & +List<U32>>:
+  match ok:
+    case False{}:
+      None{}
+    case True{}:
+      +hdr = List.take(&2, U32, frame, 44n)
+      +body = List.drop(&2, U32, frame, 44n)
+      +n = U32.to_nat((room - 44 : U32))
+      +rest = Nat.sub(List.length(&2, U32, body), n)
+      +h1 = List.append(&2, U32, List.take(&2, U32, hdr, 24n), List.append(&2, U32, B.Bytes.le32(U32.from_nat(n)), List.drop(&2, U32, hdr, 28n)))
+      +h2 = List.append(&2, U32, List.take(&2, U32, hdr, 24n), List.append(&2, U32, B.Bytes.le32(U32.from_nat(rest)), List.drop(&2, U32, hdr, 28n)))
+      Some{(List.append(&2, U32, h1, List.take(&2, U32, body, n)), List.append(&2, U32, h2, List.drop(&2, U32, body, n)))}
+
+def Vsq.rx.split(+frame: +List<U32>, +room: U32) -> Maybe<&1, +List<U32> & +List<U32>>:
+  +rw = U32.is_eq(B.Bytes.read_le16(B.Bytes.slice(frame, 30n, 2n)), Vs.rw())
+  Vsq.rx.split.go(rw && U32.is_lt(44, room) && Nat.is_lt(U32.to_nat(room), List.length(&2, U32, frame)), frame, room)
+
+# The rx pass between frames: the queue, whether a chain was used, and the
+# rest of a split packet, delivered next.
+type RxSt is Data:
+  RxSt{q: Q.Vq, used: Bool, more: Maybe<&2, +List<U32>>}
+
+# A frame that does not fit the popped chain: a data packet is split to fill
+# it (the rest goes first in line); anything else is dropped and the chain
+# kept (continuing with q0, the queue before the pop).
+def Vsq.rx.misfit(
+  -R: Type, parts: Maybe<&1, +List<U32> & +List<U32>>, q0: Q.Vq, q: Q.Vq, c: Q.Chain, used: Bool,
+  k: RxSt -> V.Op<R, VsRxq>
+) -> V.Op<R, VsRxq>:
+  match parts:
+    case None{}:
+      k(RxSt{q0, used, None{}})
+    case Some{(first, rest)}:
+      V.Op.bind(R, Q.Vq, VsRxq, Vsq.rx.deliver(R, q, c, first), q2 => k(RxSt{q2, True{}, Some{rest}}))
+
+# A popped chain: delivers the frame into it, or (Vsq.rx.misfit) splits or
+# drops it. k gets the queue, whether a chain was used, and a remainder to
+# deliver next.
 def Vsq.rx.serve(
-  -R: Type, fits: Bool, q0: Q.Vq, q: Q.Vq, c: Q.Chain, frame: +List<U32>, used: Bool,
-  k: Q.Vq & Bool -> V.Op<R, VsRxq>
+  -R: Type, fits: Bool, q0: Q.Vq, q: Q.Vq, +c: Q.Chain, +frame: +List<U32>, used: Bool,
+  k: RxSt -> V.Op<R, VsRxq>
 ) -> V.Op<R, VsRxq>:
   match fits:
     case False{}:
-      k((q0, used))
+      Vsq.rx.misfit(R, Vsq.rx.split(frame, Vsq.rx.chain_room(c)), q0, q, c, used, k)
     case True{}:
-      V.Op.bind(R, Q.Vq, VsRxq, Vsq.rx.deliver(R, q, c, frame), q2 => k((q2, True{})))
+      V.Op.bind(R, Q.Vq, VsRxq, Vsq.rx.deliver(R, q, c, frame), q2 => k(RxSt{q2, True{}, None{}}))
 
 # After a pop: stops on an empty queue with the frame and the rest left, else
 # serves the chain and continues with k.
 def Vsq.rx.step(
   -R: Type, q0: Q.Vq, r: Q.Vq & Maybe<&2, Q.Chain>, +frame: +List<U32>,
-  rest: +List<+List<U32>>, used: Bool, k: Q.Vq & Bool -> V.Op<R, VsRxq>
+  rest: +List<+List<U32>>, used: Bool, k: RxSt -> V.Op<R, VsRxq>
 ) -> V.Op<R, VsRxq>:
   match r:
     case (q, None{}):
@@ -603,20 +686,39 @@ def Vsq.rx.step(
     case (q, Some{+c}):
       Vsq.rx.serve(R, Vsq.rx.fits(c, frame), q0, q, c, frame, used, k)
 
-# Delivers or drops each frame in turn; st is the queue and whether any chain
-# was used. Every step takes one frame, so the frames bound the loop.
-def Vsq.rx.go(frames: +List<+List<U32>>, -R: Type, st: Q.Vq & Bool) -> V.Op<R, VsRxq>:
-  match frames:
-    case Nil{}:
-      match st:
-        case (q, used):
-          V.Op.pure(R, VsRxq, VsRxq{q, [], used})
-    case Con{frame, +rest}:
-      match st:
-        case (+q, used):
-          do V.Op<R, VsRxq>:
-            r : Q.Vq & Maybe<&2, Q.Chain> <- Q.Vq.pop(R, q)
-            Vsq.rx.step(R, q, r, frame, rest, used, st2 => Vsq.rx.go(rest, R, st2))
+# The frames still to deliver: a split's remainder first.
+def Vsq.rx.next(more: Maybe<&2, +List<U32>>, +rest: +List<+List<U32>>) -> +List<+List<U32>>:
+  match more:
+    case None{}:
+      rest
+    case Some{f}:
+      f <> rest
+
+# Delivers, splits or drops each frame in turn (a split's rest first). Every
+# step uses a chain or drops a frame, so fuel (the queue's size plus the
+# frames) bounds the loop.
+def Vsq.rx.go(fuel: Nat, -R: Type, s: RxSt, +frames: +List<+List<U32>>) -> V.Op<R, VsRxq>:
+  match fuel:
+    case 0n:
+      match s:
+        case RxSt{q, used, more}:
+          V.Op.pure(R, VsRxq, VsRxq{q, Vsq.rx.next(more, frames), used})
+    case 1n+f:
+      match s:
+        case RxSt{+q, used, more}:
+          match more:
+            case Some{fr}:
+              do V.Op<R, VsRxq>:
+                r : Q.Vq & Maybe<&2, Q.Chain> <- Q.Vq.pop(R, q)
+                Vsq.rx.step(R, q, r, fr, frames, used, s2 => Vsq.rx.go(f, R, s2, frames))
+            case None{}:
+              match frames:
+                case Nil{}:
+                  V.Op.pure(R, VsRxq, VsRxq{q, [], used})
+                case Con{frame, +rest}:
+                  do V.Op<R, VsRxq>:
+                    r : Q.Vq & Maybe<&2, Q.Chain> <- Q.Vq.pop(R, q)
+                    Vsq.rx.step(R, q, r, frame, rest, used, s2 => Vsq.rx.go(f, R, s2, rest))
 
 # Takes every available chain of the tx queue (at most num): its readable
 # bytes are one packet, pushed used with length 0.
@@ -626,9 +728,12 @@ def Vsq.tx(-R: Type, q: Q.Vq) -> V.Op<R, VsTxq>:
       Vsq.tx.go(U32.to_nat(num), R, (Q.Vq{num, d, dr, dv, na, nu}, []), False{})
 
 # Delivers packets into the rx queue, one per available chain, in order; a
-# packet larger than the chain's room is dropped and the chain is kept.
-def Vsq.rx(-R: Type, q: Q.Vq, frames: +List<+List<U32>>) -> V.Op<R, VsRxq>:
-  Vsq.rx.go(frames, R, (q, False{}))
+# data packet larger than the chain's room is split to fit it, another is
+# dropped and the chain kept.
+def Vsq.rx(-R: Type, q: Q.Vq, +frames: +List<+List<U32>>) -> V.Op<R, VsRxq>:
+  match q:
+    case Q.Vq{+num, d, dr, dv, na, nu}:
+      Vsq.rx.go(Nat.add(U32.to_nat(num), List.length(&2, +List<U32>, frames)), R, RxSt{Q.Vq{num, d, dr, dv, na, nu}, False{}, None{}}, frames)
 
 type VsTx is Data:
   VsTx{vs: Vsock, q: Q.Vq, cmds: +List<V.VsockCmd>, used: Bool}

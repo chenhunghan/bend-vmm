@@ -121,11 +121,40 @@ def tx_huge() -> U32:
   s = Sim.Sim.write(s, U.U64{0, 4224}, [0, 0, 1, 0, 0, 0])
   longest(100n, S.VsTxq, s, V.Op.finish(S.VsTxq, S.Vsq.tx(S.VsTxq, Q.Vq{8, U.U64{0, 4096}, U.U64{0, 4224}, U.U64{0, 4352}, 0, 0})), 0)
 
+# The guest sends 128 KiB (half the advertised buffer): the device answers
+# with a CREDIT_UPDATE and keeps the connection, so more data still goes to
+# the host (it used to forget every connection there, and the guest's next
+# packet got an RST).
+def send4k(n: Nat, +v: S.Vsock) -> S.Vsock:
+  match n:
+    case 0n:
+      v
+    case 1n+k:
+      send4k(k, st(S.Vsock.guest_packet(v, pkt(40000, 1234, 5, 0, 4096, 0, B.Bytes.zeros(4096n)))))
+
+def past_half() -> S.VsOut:
+  S.Vsock.guest_packet(send4k(32n, S.Vsock.drop_out(open4k())), pkt(40000, 1234, 5, 0, 4096, 0, [7]))
+
+# While the host program is behind (VsBlocked), 128 KiB from the guest earns
+# no credit update; VsUnblocked sends it.
+def blocked_half() -> S.Vsock:
+  send4k(32n, S.Vsock.drop_out(st(S.Vsock.host_event(open4k(), V.VsBlocked{0}))))
+
+# A data packet of 100 bytes for a 94-byte buffer: 50 bytes (the header
+# says 50) fill it, the other 50 follow in a packet of their own; a packet
+# that is not data is not split.
+def split_shape(m: Maybe<&1, +List<U32> & +List<U32>>) -> String:
+  match m:
+    case None{}:
+      "none"
+    case Some{(+a, +b)}:
+      shape([a, b]) ++ Nat.show(List.length(&2, U32, a)) ++ "+" ++ Nat.show(List.length(&2, U32, b))
+
 def main() -> IO(Unit):
   do IO<Unit>:
     +a : S.Vsock = st(S.Vsock.host_event(open4k(), V.VsData{0, B.Bytes.zeros(5000n)}))
-    T.eq_str("vsock credit caps data", shape(outs(a)), "op5/4096 ")
-    T.eq_u32("vsock backlog counts waiting bytes", S.Vsock.backlog(a), 1)
+    T.eq_str("vsock credit caps data", shape(outs(a)), "op5/3584 op5/512 ")
+    T.eq_u32("vsock backlog counts waiting bytes", S.Vsock.backlog(a), 2)
     +b : S.Vsock = st(S.Vsock.guest_packet(S.Vsock.drop_out(a), pkt(40000, 1234, 6, 0, 4096, 4096, [])))
     T.eq_str("vsock credit update releases the rest", shape(outs(b)), "op5/904 ")
     +c : S.Vsock = st(S.Vsock.host_event(S.Vsock.drop_out(b), V.VsEof{0}))
@@ -147,3 +176,9 @@ def main() -> IO(Unit):
     T.eq_u32("vsock no host connect past the cap", U32.from_nat(connects_of(flood_req(130n, S.Vsock.new(cid()), 0n))), 128)
     T.eq_str("vsock request past the cap gets rst", outs_of(flood_req(130n, S.Vsock.new(cid()), 0n)), "op3/0 op3/0 ")
     T.eq_u32("vsock tx reads at most 65580 bytes of a chain", tx_huge(), 65580)
+    T.eq_str("vsock data after the credit update reaches the host", show_cmds(cmds(past_half())), "[send 0/1]")
+    T.eq_str("vsock splits a data packet for a small buffer", split_shape(S.Vsq.rx.split(pkt(1234, 40000, 5, 0, 4096, 0, B.Bytes.zeros(100n)), 94)), "op5/50 op5/50 94+94")
+    T.eq_str("vsock does not split other packets", split_shape(S.Vsq.rx.split(pkt(1234, 40000, 6, 0, 4096, 0, []), 20)), "none")
+    T.eq_str("vsock no credit while the host is behind", shape(outs(blocked_half())), "")
+    T.eq_str("vsock credit once the host caught up", shape(outs(st(S.Vsock.host_event(blocked_half(), V.VsUnblocked{0})))), "op6/0 ")
+    T.eq_u32("vsock keeps the connection past the credit update", U32.from_nat(List.length(&2, S.VConn, S.Vsock.conns(st(past_half())))), 1)

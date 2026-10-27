@@ -7,6 +7,9 @@
 //                    register through /dev/mem (each one traps to the VMM)
 //   bench send IP PORT BYTES  TCP upload: BYTES in 1 MiB writes to IP:PORT
 //   bench recv IP PORT        TCP download: reads IP:PORT to its end
+//   bench vsend PORT BYTES  vsock upload: BYTES in 1 MiB writes to the host
+//                    (CID 2) port PORT
+//   bench vrecv PORT  vsock download: reads the host's port PORT to its end
 //   bench peek ADDR N  N 32-bit reads of physical ADDR (decimal) through
 //                    /dev/mem: an unmapped one traps to the VMM each time
 //                    (no tool in between: the NAT's own rate)
@@ -174,6 +177,31 @@ static i64 dial(const char* ip, const char* port) {
   return fd;
 }
 
+// A vsock connection to the host (CID 2) at port; the fd, or < 0.
+static i64 vdial(u64 port) {
+  struct { unsigned short fam, reserved; unsigned port, cid; unsigned char zero[4]; } sa = {40, 0, (unsigned)port, 2, {0}};
+  i64 fd = sys(SYS_socket, 40, 1, 0, 0, 0, 0);
+  if (fd < 0 || sys(SYS_connect, fd, (i64)&sa, sizeof sa, 0, 0, 0) < 0) { put("bench: cannot connect over vsock"); flush(); return -1; }
+  return fd;
+}
+
+static int send_all(i64 fd, u64 bytes, const char* name) {
+  u64 done = 0, t = now_ns();
+  memset(buf, 0x5a, 1 << 20);
+  while (done < bytes) {
+    u64 n = bytes - done < (1 << 20) ? bytes - done : (1 << 20);
+    i64 k = sys(SYS_write, fd, (i64)buf, (i64)n, 0, 0, 0);
+    if (k <= 0) break;
+    done += (u64)k;
+  }
+  sys(SYS_shutdown, fd, 1, 0, 0, 0, 0);
+  while (sys(SYS_read, fd, (i64)buf, 1 << 20, 0, 0, 0) > 0) {}
+  u64 ns = now_ns() - t;
+  sys(SYS_close, fd, 0, 0, 0, 0, 0);
+  rate(name, done, ns);
+  return 0;
+}
+
 static int net(int up, const char* ip, const char* port, u64 bytes) {
   i64 fd = dial(ip, port);
   if (fd < 0) return 1;
@@ -217,6 +245,22 @@ void _start_c(u64* sp) {
   else if (argc >= 5 && eq(argv[1], "send")) rc = net(1, argv[2], argv[3], num(argv[4]));
   else if (argc >= 4 && eq(argv[1], "recv")) rc = net(0, argv[2], argv[3], 0);
   else if (argc >= 4 && eq(argv[1], "peek")) rc = peek(num(argv[2]), num(argv[3]));
+  else if (argc >= 3 && eq(argv[1], "vrecv")) {
+    i64 fd = vdial(num(argv[2]));
+    u64 done = 0, t = now_ns();
+    if (fd >= 0) {
+      i64 k;
+      while ((k = sys(SYS_read, fd, (i64)buf, 1 << 20, 0, 0, 0)) > 0) done += (u64)k;
+      if (k < 0) { put("BENCH vsock-download-error "); putu((u64)-k); put(" errno"); flush(); }
+      rate("vsock-download", done, now_ns() - t);
+      put("BENCH vsock-download-bytes "); putu(done); put(" B"); flush();
+    }
+    rc = fd < 0;
+  }
+  else if (argc >= 4 && eq(argv[1], "vsend")) {
+    i64 fd = vdial(num(argv[2]));
+    rc = fd < 0 ? 1 : send_all(fd, num(argv[3]), "vsock-upload");
+  }
   sys(SYS_exit, rc, 0, 0, 0, 0, 0);
 }
 

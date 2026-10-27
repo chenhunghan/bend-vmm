@@ -111,6 +111,25 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   out=$( (alarm 120 python3 scripts/vsock-test.py "$vs" ./out/bend-vmm --mem 512 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --vsock "$vs" --cmdline "console=ttyAMA0 bendtest bendvsock quiet") 2>&1 )
   grep -q "GUEST-TEST PASS vsock-client" <<<"$out" && grn "ok: vsock guest -> host (Unix socket ${vs##*/}_1234)" || { red "failed: vsock guest -> host"; fail=1; }
   grep -q "GUEST-TEST PASS vsock-server" <<<"$out" && grep -q HOST-VSOCK-OK <<<"$out" && grn "ok: vsock host -> guest (CONNECT 5000)" || { red "failed: vsock host -> guest"; grep -a -i vsock <<<"$out" | tail -5; fail=1; }
+  # bulk both ways (a full credit window and more; packets split to the
+  # guest's buffers): 4 MiB from a host program, 4 MiB to one
+  python3 -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); c,_=s.accept(); c.sendall(bytes(4194304)); c.close()" "${vs}_7001" & src=$!
+  python3 -c "
+import socket,sys
+s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); c,_=s.accept(); n=0
+while True:
+  b=c.recv(1<<20)
+  if not b: break
+  n+=len(b)
+open(sys.argv[2],'w').write(str(n))" "${vs}_7000" "$(dirname "$vs")/got" & sink=$!
+  sleep 1
+  out=$(drive 120 "busybox shell" '/bin/bench vrecv 7001; /bin/bench vsend 7000 4194304; echo VS-DONE\n' "VS-DONE" 'poweroff -f\n' -- \
+    ./out/bend-vmm --mem 512 --cpus 2 --kernel out/guest/Image --initrd out/guest/guest.cpio --vsock "$vs" --cmdline "console=ttyAMA0 quiet" 2>&1 | tr -d '\r')
+  wait $src $sink 2>/dev/null
+  grep -aq "^BENCH vsock-download-bytes 4194304 B" <<<"$out" && [ "$(cat "$(dirname "$vs")/got" 2>/dev/null)" = 4194304 ] \
+    && grn "ok: vsock bulk both ways (4 MiB each: $(grep -a '^BENCH vsock-download ' <<<"$out" | cut -d' ' -f3) / $(grep -a '^BENCH vsock-upload' <<<"$out" | cut -d' ' -f3) MB/s)" \
+    || { red "failed: vsock bulk"; grep -a "^BENCH\|bench:" <<<"$out"; echo "host got $(cat "$(dirname "$vs")/got" 2>/dev/null)"; fail=1; }
+  kill $src $sink 2>/dev/null
   rm -rf "$(dirname "$vs")"
   out=$( (alarm 120 ./out/bend-vmm --mem 4096 --cpus 8 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --disk out/guest/disk.img --cmdline "console=ttyAMA0 bendtest bendcpus=8 quiet") 2>&1 )
   if grep -q GUEST-TESTS-DONE <<<"$out" && ! grep -q "GUEST-TEST FAIL" <<<"$out"; then grn "ok: 8 cpus, 4 GiB (RAM past 4 GiB)"; else red "failed: 8 cpus, 4 GiB"; grep -a GUEST <<<"$out" | tail; fail=1; fi

@@ -842,6 +842,38 @@ def vkey(+conn: U32) -> U32:
     case False{}:
       IO.spawn(Unit, vs_deliver(mc, done, V.VsRefused{conn}))
 
+# A vsock connection's flusher: the host program's socket takes the guest's
+# data when it can (Hvf.nat_send queues the rest, as for the NAT), so a
+# program that stops reading never holds the event loop. While it is behind
+# the guest gets no credit (VsBlocked, VsUnblocked); if it stays stuck past
+# the host's limits the socket is reset and the guest sees the host side end.
+@unsafe def vs_flusher.got(open: Bool, full: Bool, reset: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  match open full reset:
+    case True{} _ _:
+      do IO<Unit>:
+        vs_deliver(mc, done, V.VsUnblocked{conn})
+        vs_flusher(mc, done, conn)
+    case False{} True{} _:
+      do IO<Unit>:
+        vs_deliver(mc, done, V.VsBlocked{conn})
+        vs_flusher(mc, done, conn)
+    case False{} False{} True{}:
+      vs_deliver(mc, done, V.VsEof{conn})
+    case False{} False{} False{}:
+      IO.pure(Unit, Unit{})
+
+@unsafe def vs_flusher(+mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  do IO<Unit>:
+    +rc : U32 <- H.Hvf.tcp_flush(vkey(conn))
+    vs_flusher.got(U32.is_eq(rc, 0), U32.is_eq(rc, 3), U32.is_eq(rc, 2), mc, done, conn)
+
+@unsafe def vs_sent(flush: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  match flush:
+    case True{}:
+      IO.spawn(Unit, vs_flusher(mc, done, conn))
+    case False{}:
+      IO.pure(Unit, Unit{})
+
 # The --vsock base path, kept by the C side (Hvf.vsock_base).
 @unsafe def vsock_cmd(+mc: Chan(M.Machine), +done: Chan(U32), cmd: V.VsockCmd) -> IO(Unit):
   match cmd:
@@ -850,10 +882,10 @@ def vkey(+conn: U32) -> U32:
         base : String <- H.Hvf.vsock_base()
         rc : U32 <- H.Hvf.unix_connect(vkey(conn), base ++ "_" ++ U32.show(port))
         vs_connect.go(U32.is_zero(rc), mc, done, conn)
-    case V.VsSend{conn, bs}:
+    case V.VsSend{+conn, bs}:
       do IO<Unit>:
-        _ : U32 <- H.Hvf.tcp_send(vkey(conn), bs)
-        return Unit{}
+        rc : U32 <- H.Hvf.nat_send(vkey(conn), bs)
+        vs_sent(U32.is_eq(rc, 1), mc, done, conn)
     case V.VsShutdown{conn}:
       do IO<Unit>:
         _ : U32 <- H.Hvf.tcp_shutdown(vkey(conn))
@@ -864,7 +896,8 @@ def vkey(+conn: U32) -> U32:
         return Unit{}
     case V.VsAccepted{+conn, port}:
       do IO<Unit>:
-        _ : U32 <- H.Hvf.tcp_send(vkey(conn), B.Bytes.of_string("OK " ++ U32.show(port) ++ "\n"))
+        rc : U32 <- H.Hvf.nat_send(vkey(conn), B.Bytes.of_string("OK " ++ U32.show(port) ++ "\n"))
+        vs_sent(U32.is_eq(rc, 1), mc, done, conn)
         IO.spawn(Unit, vs_reader(mc, done, conn))
 
 # Host clients asking for guest ports.

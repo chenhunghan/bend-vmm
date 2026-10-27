@@ -161,6 +161,10 @@ type VsockEvent is Data:
   VsEof{conn: U32}
   # A host client asks to connect to guest port `port` (it sent "CONNECT port").
   VsIncoming{conn: U32, port: U32}
+  # The host program is not taking the guest's data as fast as it comes
+  # (Blocked: the guest gets no more credit) or has caught up (Unblocked).
+  VsBlocked{conn: U32}
+  VsUnblocked{conn: U32}
 
 # Host commands of the UEFI variable flash (src/dev/pflash.bend); offsets
 # are within the bank.

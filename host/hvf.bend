@@ -191,10 +191,6 @@ def Hvf.tcp_send_staged(conn: U32, slot: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.tcp_send(conn: U32, bytes: +List<U32>) -> IO(U32):
-  import "./hvf.c"
-  import "./hvf.js"
-
 # Guest data on a NAT connection, never waiting: 1 when a flusher must start
 # (Hvf.tcp_flush), else 0.
 def Hvf.nat_send(conn: U32, bytes: +List<U32>) -> IO(U32):

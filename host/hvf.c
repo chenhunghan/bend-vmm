@@ -2858,36 +2858,6 @@ Term hvf_net_holds_run(Env e, Term* f, IoWork* w) {
   return hvf_words(e, ws, (u64)n);
 }
 
-// Writes all of buf to the socket, waiting for room; 0, or an errno. Only
-// vsock's Unix sockets send this way (their peer is a host program); NAT
-// connections never wait (hvf_nat_send).
-static u32 hvf_send_all(HvfSock* k, const uint8_t* buf, u64 n) {
-  u64 at = 0;
-  while (at < n) {
-    ssize_t m = send(k->fd, buf + at, n - at, HVF_NOSIG);
-    if (m > 0) {
-      at += (u64)m;
-    } else if (m < 0 && errno == EAGAIN) {
-      struct pollfd p = {k->fd, POLLOUT, 0};
-      poll(&p, 1, 1000);
-    } else {
-      break;
-    }
-  }
-  return at == n ? 0 : (u32)EPIPE;
-}
-
-// Hvf.tcp_send(conn, bytes) -> U32: writes all bytes, waiting for room
-// (vsock); 0, or an errno.
-Term hvf_tcp_send_run(Env e, Term* f, IoWork* w) {
-  HvfSock* k = hvf_sock((u32)f[0], 0);
-  u64      n;
-  char*    buf = io_cbuf(e, f[1], &n, CID(Con));
-  u32      r   = !k || !buf ? (u32)EBADF : hvf_send_all(k, (const uint8_t*)buf, n);
-  free(buf);
-  return (Term)r;
-}
-
 // Hvf.nat_send(conn, bytes) -> U32: sends guest data on a NAT connection
 // as hvf_nat_send does: 1 when a flusher must start (Hvf.tcp_flush), else 0.
 Term hvf_nat_send_run(Env e, Term* f, IoWork* w) {
@@ -3893,6 +3863,14 @@ Term hvf_vsock_base_run(Env e, Term* f, IoWork* w) {
   return io_str(e, hvf_vs_base, strlen(hvf_vs_base));
 }
 static uint32_t hvf_vs_next = 0x80000000u;
+// vsock's Unix sockets: macOS gives them a send buffer of a few KiB, so
+// guest data would leave a few KiB per wake; 1 MiB lets it stream.
+static void hvf_unix_buf(int fd) {
+  int sz = 1 << 20;
+  setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz);
+  setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sz, sizeof sz);
+}
+
 
 // Hvf.unix_connect(key, path) -> U32: a non-blocking Unix-socket connect
 // filed under key; 0, or an errno.
@@ -3922,6 +3900,7 @@ Term hvf_unix_connect_run(Env e, Term* f, IoWork* w) {
 #ifdef SO_NOSIGPIPE
   setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
 #endif
+  hvf_unix_buf(fd);
   if (connect(fd, (struct sockaddr*)&a, sizeof a) != 0 && errno != EINPROGRESS) {
     int err = errno;
     close(fd);
@@ -3981,6 +3960,7 @@ static Term hvf_vs_accept(Env e, IoWork* w) {
 #ifdef SO_NOSIGPIPE
   setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
 #endif
+  hvf_unix_buf(c);
   w->hand         = c;
   w->made         = 0;
   hvf_vs_deadline = io_tick() + 5000000000ull;
@@ -4354,9 +4334,6 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.net_copy)
   io_eff(CID(Hvf.net_copy), hvf_net_copy_run);
-#endif
-#ifdef CID(Hvf.tcp_send)
-  io_eff(CID(Hvf.tcp_send), hvf_tcp_send_run);
 #endif
 #ifdef CID(Hvf.tcp_shutdown)
   io_eff(CID(Hvf.tcp_shutdown), hvf_tcp_shutdown_run);

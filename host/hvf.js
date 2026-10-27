@@ -49,7 +49,6 @@ io_eff(CID(Hvf.vcpu_queue), hvf_unavailable);
 io_eff(CID(Hvf.tcp_connect), hvf_unavailable);
 io_eff(CID(Hvf.tcp_wait), hvf_unavailable);
 io_eff(CID(Hvf.tcp_recv), () => ({ $: CID(Nil) }));
-io_eff(CID(Hvf.tcp_send), hvf_unavailable);
 io_eff(CID(Hvf.tcp_shutdown), hvf_unavailable);
 io_eff(CID(Hvf.nat_send), () => 0);
 io_eff(CID(Hvf.tcp_flush), () => 1);
