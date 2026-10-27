@@ -131,7 +131,7 @@ flush reaches stable storage (on macOS through `F_FULLFSYNC`).
 
 Debugging: `BEND_VMM_TRACE=1` prints every trapped exit, `=2` console input,
 interrupt line changes and TCP data held for the guest, `=4` staged
-transmit data.
+transmit data, `=8` shared-folder reads and writes (bits add up).
 
 Releases: a tag `v*` builds `bend-vmm` for macOS (signed with a Developer ID
 and notarized) and Linux arm64 and publishes both on a GitHub release
@@ -170,8 +170,8 @@ the guest pinned to vCPU 0 where device interrupts land):
 | disk sequential read / write (1 MiB, O_DIRECT) | ~310 / ~190 MB/s |
 | disk 4 KiB random read, QD1 | ~45-50k IOPS (~20 µs) |
 | TCP download / upload through the NAT (1 MiB reads and writes) | ~650 / ~590 MB/s |
-| the same with busybox `wget` / `dd \| nc` in the guest | ~500 / ~70 MB/s |
-| 9p read / write | ~190 / ~33 MB/s |
+| the same with busybox `wget` / `dd \| nc` in the guest | ~500-650 / ~80 MB/s |
+| 9p read / write | ~190 / ~100 MB/s |
 
 (busybox's own copy loop, not the VMM, bounds the `nc` upload.)
 

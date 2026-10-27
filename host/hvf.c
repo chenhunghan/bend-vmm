@@ -199,7 +199,7 @@ static HvfCpu hvf_cpus[HVF_MAX_CPUS];
 
 // BEND_VMM_TRACE: bit 1 prints every exception exit on stderr, bit 2 the
 // console input, interrupt line changes and TCP holds, bit 4 staged
-// transmit data.
+// transmit data, bit 8 shared-folder reads and writes.
 static int hvf_trace;
 
 static void hvf_put64(HvfCpu* c, uint64_t v) {
@@ -2900,6 +2900,10 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
       res = hvf_fs_err(e, EFAULT);
     } else {
       int64_t k = hvf_iov_io(fd, op == 14, (off_t)a, hva, len, n, 0);
+      if (hvf_trace & 8) {
+        fprintf(stderr, "[trace] 9p %s %s at %llu: %lld bytes in %d pieces\n", op == 14 ? "write" : "read", rel,
+                (unsigned long long)a, (long long)k, n);
+      }
       if (k < 0) {
         res = hvf_fs_err(e, errno);
       } else {

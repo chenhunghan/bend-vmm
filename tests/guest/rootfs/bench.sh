@@ -36,7 +36,9 @@ if grep -qs share /sys/bus/virtio/drivers/9pnet_virtio/*/mount_tag; then
   bytes=$(cat /mnt/share/size)
   s=$(up); /bin/bench on 0 /bin/dd if=/mnt/share/big of=/dev/null bs=1M 2>/dev/null; e=$(up)
   rate 9p-read $bytes $s $e
-  s=$(up); /bin/bench on 0 /bin/dd if=/dev/zero of=/mnt/share/out bs=1M count=$((bytes / 1048576)) 2>/dev/null; e=$(up)
+  # not pinned: the guest's writeback works beside dd (pinned to vCPU 0
+  # with it, writes ran at a third of the speed)
+  s=$(up); /bin/dd if=/dev/zero of=/mnt/share/out bs=1M count=$((bytes / 1048576)) 2>/dev/null; e=$(up)
   rate 9p-write $bytes $s $e
   s=$(up); i=0; while [ $i -lt 200 ]; do stat /mnt/share/size >/dev/null; i=$((i + 1)); done; e=$(up)
   awk -v s=$s -v e=$e 'BEGIN { printf "BENCH 9p-stat %.2f ms\n", (e - s) * 1000 / 200 }'
