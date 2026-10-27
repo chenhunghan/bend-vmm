@@ -258,3 +258,40 @@ def Vq.scatter(-R: Type, c: Chain, bytes: +List<U32>) -> V.Op<R, U32>:
   match c:
     case Chain{h, r, w}:
       Vq.scatter.go(R, w, bytes)
+
+# A piece of guest memory a chain names: addr, len.
+type Seg is Data:
+  Seg{addr: U.U64, len: U32}
+
+def Seg.add(+s: Seg, +ss: +List<Seg>) -> +List<Seg>:
+  match s:
+    case Seg{a, +l}:
+      Bool.pick(+List<Seg>, U32.is_zero(l), ss, Seg{a, l} <> ss)
+
+# The memory of ds after its first skip bytes, at most max bytes of it, in
+# chain order (empty pieces left out).
+def Vq.segs(ds: +List<Desc>, +skip: U32, +max: U32) -> +List<Seg>:
+  match ds:
+    case Nil{}:
+      []
+    case Desc{+a, +l, f, n} <> t:
+      +past = U32.is_ge(skip, l)
+      +off = Bool.pick(U32, past, l, skip)
+      +take = U32.min((l - off : U32), max)
+      Seg.add(Seg{U.U64.add_u32(a, off), take}, Vq.segs(t, Bool.pick(U32, past, (skip - l : U32), 0), (max - take : U32)))
+
+# The total length of some segments.
+def Seg.total(ss: +List<Seg>) -> U32:
+  match ss:
+    case Nil{}:
+      0
+    case Seg{a, l} <> t:
+      (l + Seg.total(t) : U32)
+
+# Reads the first n readable bytes of a chain (fewer when it has fewer).
+def Vq.read_segs(-R: Type, ss: +List<Seg>) -> V.Op<R, +List<U32>>:
+  match ss:
+    case Nil{}:
+      V.Op.pure(R, +List<U32>, [])
+    case Seg{a, l} <> t:
+      Vq.cat(R, V.Op.read(R, a, l), Vq.read_segs(R, t))

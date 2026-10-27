@@ -1556,6 +1556,38 @@ Term hvf_disk_write_run(Env e, Term* f, IoWork* w) {
   return (Term)(k == (ssize_t)n ? 0 : HVF_ERR);
 }
 
+// Hvf.disk_copy(disk, dir, off_hi, off_lo, gpa_hi, gpa_lo, len) -> U32: moves
+// len bytes between disk image `disk` at the offset and guest RAM at gpa,
+// none of them through Bend: dir 0 reads the disk into RAM (zeros past the
+// image's end), 1 writes RAM to the disk. 0, or 0xFFFFFFFF (the range leaves
+// RAM, or an IO error).
+Term hvf_disk_copy_run(Env e, Term* f, IoWork* w) {
+  int      fd  = hvf_disk(f[0]);
+  int      out = (u32)f[1] != 0;
+  off_t    off = (off_t)hvf_u64(f[2], f[3]);
+  u64      n   = (u32)f[6];
+  uint8_t* p   = hvf_ptr(hvf_u64(f[4], f[5]), n);
+  if (fd < 0 || p == NULL) {
+    return (Term)HVF_ERR;
+  }
+  u64 done = 0;
+  while (done < n) {
+    ssize_t k = out ? pwrite(fd, p + done, n - done, off + (off_t)done)
+                    : pread(fd, p + done, n - done, off + (off_t)done);
+    if (k < 0 && errno == EINTR) {
+      continue;
+    }
+    if (k <= 0) {
+      break;
+    }
+    done += (u64)k;
+  }
+  if (!out && done < n) {
+    memset(p + done, 0, n - done);
+  }
+  return (Term)(out && done < n ? HVF_ERR : 0);
+}
+
 // Network (the host end of src/net/nat.bend)
 // ============================================
 //
@@ -3074,5 +3106,8 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.disk_write)
   io_eff(CID(Hvf.disk_write), hvf_disk_write_run);
+#endif
+#ifdef CID(Hvf.disk_copy)
+  io_eff(CID(Hvf.disk_copy), hvf_disk_copy_run);
 #endif
 }

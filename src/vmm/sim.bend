@@ -123,6 +123,12 @@ def Sim.disk_read(s: Sim, disk: U32, offset: U.U64, len: U32) -> +List<U32>:
     case Sim{b, m, +d, sd, c, r, p, i, pw, co, l, fl, nt, nw, fs, vs}:
       Bool.pick(+List<U32>, U32.is_zero(disk), B.Bytes.slice(d, U32.to_nat(U.U64.lo(offset)), U32.to_nat(len)), [])
 
+# VmDiskToRam: the disk's bytes, zero-padded to len, written to memory.
+def Sim.disk_to_ram(+s: Sim, disk: U32, offset: U.U64, addr: U.U64, +len: U32) -> Sim:
+  +n = U32.to_nat(len)
+  bs = List.take(&2, U32, List.append(&2, U32, Sim.disk_read(s, disk, offset, len), B.Bytes.zeros(n)), n)
+  Sim.write(s, addr, bs)
+
 def Sim.disk_write.go(zero: Bool, s: Sim, offset: U.U64, bytes: +List<U32>) -> Sim:
   match zero:
     case False{}:
@@ -294,6 +300,12 @@ def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
         case V.VmFs{+sh, +op, k}:
           +s = s
           Sim.run(f, A, Sim.fs_next(s, sh, op), k(Sim.fs_answer(s, sh, op)))
+        case V.VmDiskToRam{+dk, +off, a, +n, next}:
+          +s = s
+          Sim.run(f, A, Sim.disk_to_ram(s, dk, off, a, n), next)
+        case V.VmRamToDisk{dk, off, +a, +n, next}:
+          +s = s
+          Sim.run(f, A, Sim.disk_write(s, dk, off, Sim.read(s, a, n)), next)
 
 # Runs an Op to completion with a generous step budget.
 def Sim.exec(-A: Type, s: Sim, m: V.Op<A, A>) -> Maybe<&1, Sim & A>:

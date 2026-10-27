@@ -5,8 +5,10 @@ import ../vmm/abi.bend as V
 import ./queue.bend as Q
 
 # virtio-blk (Virtio 1.2 section 5.2), device id 2, one request queue. The
-# backing store is a host disk image reached through Op.disk_read,
-# Op.disk_write and Op.disk_flush. Offered features: VIRTIO_F_VERSION_1 and
+# backing store is a host disk image. Request data moves between it and the
+# chain's memory on the host (Op.disk_to_ram, Op.ram_to_disk: no byte passes
+# through Bend); Bend reads only the header, decides, and names the memory
+# (Q.Vq.segs). Op.disk_flush makes writes durable. Offered features: VIRTIO_F_VERSION_1 and
 # VIRTIO_BLK_F_FLUSH, plus VIRTIO_BLK_F_RO on a read-only disk (no
 # multi-queue). Config space: capacity, a little-endian u64 count of 512-byte
 # sectors.
@@ -74,53 +76,6 @@ def Blk.fits(+sectors: U.U64, +sector: U.U64, len: U32) -> Bool:
 def Blk.offset(sector: U.U64) -> U.U64:
   U.U64.shl(9n, sector)
 
-# bs cut or zero-padded to exactly len bytes.
-def Blk.fill(bs: +List<U32>, +len: Nat) -> +List<U32>:
-  List.take(&2, U32, List.append(&2, U32, bs, B.Bytes.zeros(len)), len)
-
-def Blk.answer(-R: Type, st: U32, data: +List<U32>) -> V.Op<R, U32 & +List<U32>>:
-  V.Op.pure(R, U32 & +List<U32>, (st, data))
-
-def Blk.in.go(-R: Type, ok: Bool, disk: U32, sector: U.U64, +len: U32) -> V.Op<R, U32 & +List<U32>>:
-  match ok:
-    case False{}:
-      Blk.answer(R, Blk.s_ioerr(), [])
-    case True{}:
-      do V.Op<R, U32 & +List<U32>>:
-        bs : +List<U32> <- V.Op.disk_read(R, disk, Blk.offset(sector), len)
-        Blk.answer(R, Blk.s_ok(), Blk.fill(bs, U32.to_nat(len)))
-
-# IN: reads len bytes at sector, answers them with the status.
-def Blk.in(-R: Type, disk: U32, sectors: U.U64, +sector: U.U64, +len: U32) -> V.Op<R, U32 & +List<U32>>:
-  Blk.in.go(R, Blk.fits(sectors, sector, len), disk, sector, len)
-
-def Blk.out.go(-R: Type, ok: Bool, disk: U32, sector: U.U64, body: +List<U32>) -> V.Op<R, U32 & +List<U32>>:
-  match ok:
-    case False{}:
-      Blk.answer(R, Blk.s_ioerr(), [])
-    case True{}:
-      do V.Op<R, U32 & +List<U32>>:
-        V.Op.disk_write(R, disk, Blk.offset(sector), body)
-        Blk.answer(R, Blk.s_ok(), [])
-
-# OUT: writes body at sector.
-def Blk.out(-R: Type, disk: U32, sectors: U.U64, +sector: U.U64, +body: +List<U32>) -> V.Op<R, U32 & +List<U32>>:
-  Blk.out.go(R, Blk.fits(sectors, sector, U32.from_nat(List.length(&2, U32, body))), disk, sector, body)
-
-# OUT on a disk that may be read-only: IOERR without writing when ro.
-def Blk.out_ro(-R: Type, ro: Bool, disk: U32, sectors: U.U64, sector: U.U64, body: +List<U32>) -> V.Op<R, U32 & +List<U32>>:
-  match ro:
-    case True{}:
-      Blk.answer(R, Blk.s_ioerr(), [])
-    case False{}:
-      Blk.out(R, disk, sectors, sector, body)
-
-# FLUSH: makes earlier writes durable.
-def Blk.flush(-R: Type, disk: U32) -> V.Op<R, U32 & +List<U32>>:
-  do V.Op<R, U32 & +List<U32>>:
-    V.Op.disk_flush(R, disk)
-    Blk.answer(R, Blk.s_ok(), [])
-
 # The request kind of a type field: 0 IN, 1 OUT, 2 GET_ID, 3 FLUSH,
 # 4 unsupported.
 def Blk.kind(+t: U32) -> Nat:
@@ -129,44 +84,26 @@ def Blk.kind(+t: U32) -> Nat:
       Bool.pick(Nat, U32.is_eq(t, 8), 2n,
         Bool.pick(Nat, U32.is_eq(t, 4), 3n, 4n))))
 
-def Blk.exec.kind(
-  -R: Type, k: Nat, ro: Bool, disk: U32, sectors: U.U64, sector: U.U64, len: U32, body: +List<U32>
-) -> V.Op<R, U32 & +List<U32>>:
-  match k:
-    case 0n:
-      Blk.in(R, disk, sectors, sector, len)
-    case 1n:
-      Blk.out_ro(R, ro, disk, sectors, sector, body)
-    case 2n:
-      Blk.answer(R, Blk.s_ok(), Blk.id_bytes())
-    case 3n:
-      Blk.flush(R, disk)
-    case _:
-      Blk.answer(R, Blk.s_unsupp(), [])
+# Copies the disk from byte offset off into the segments, in order: the
+# host moves the bytes (Op.disk_to_ram), none pass through Bend.
+def Blk.copy_in(ss: +List<Q.Seg>, -R: Type, +disk: U32, +off: U.U64) -> V.Op<R, Unit>:
+  match ss:
+    case Nil{}:
+      V.Op.pure(R, Unit, Unit{})
+    case Q.Seg{a, +l} <> t:
+      do V.Op<R, Unit>:
+        V.Op.disk_to_ram(R, disk, off, a, l)
+        Blk.copy_in(t, R, disk, U.U64.add_u32(off, l))
 
-def Blk.exec.go(
-  -R: Type, short: Bool, ro: Bool, disk: U32, sectors: U.U64, len: U32, req: +List<U32>
-) -> V.Op<R, U32 & +List<U32>>:
-  match short:
-    case True{}:
-      Blk.answer(R, Blk.s_ioerr(), [])
-    case False{}:
-      +req = req
-      t = B.Bytes.read_le32(req)
-      sector = B.Bytes.read_le64(List.drop(&2, U32, req, 8n))
-      body = List.drop(&2, U32, req, 16n)
-      Blk.exec.kind(R, Blk.kind(t), ro, disk, sectors, sector, len, body)
-
-# Runs the request whose readable bytes are req (header, then OUT data), with
-# len bytes of writable data room, on a disk that is read-only when ro.
-# Answers the status and the data to return.
-def Blk.exec_ro(-R: Type, ro: Bool, disk: U32, sectors: U.U64, len: U32, +req: +List<U32>) -> V.Op<R, U32 & +List<U32>>:
-  short = Nat.is_lt(List.length(&2, U32, req), 16n)
-  Blk.exec.go(R, short, ro, disk, sectors, len, req)
-
-# Blk.exec_ro on a read-write disk.
-def Blk.exec(-R: Type, disk: U32, sectors: U.U64, len: U32, +req: +List<U32>) -> V.Op<R, U32 & +List<U32>>:
-  Blk.exec_ro(R, False{}, disk, sectors, len, req)
+# Copies the segments, in order, to the disk from byte offset off.
+def Blk.copy_out(ss: +List<Q.Seg>, -R: Type, +disk: U32, +off: U.U64) -> V.Op<R, Unit>:
+  match ss:
+    case Nil{}:
+      V.Op.pure(R, Unit, Unit{})
+    case Q.Seg{a, +l} <> t:
+      do V.Op<R, Unit>:
+        V.Op.ram_to_disk(R, disk, off, a, l)
+        Blk.copy_out(t, R, disk, U.U64.add_u32(off, l))
 
 # Writes byte b at offset off of the writable area ds.
 def Blk.put(-R: Type, ds: +List<Q.Desc>, +off: U32, +b: U32) -> V.Op<R, Unit>:
@@ -189,26 +126,97 @@ def Blk.reply(-R: Type, +w: +List<Q.Desc>, +room: U32, res: U32 & +List<U32>) ->
         Blk.put(R, w, last, st)
         return (n + 1 : U32)
 
+# IN: the room before the status byte filled from the disk at sector.
+def Blk.in(-R: Type, ok: Bool, disk: U32, sector: U.U64, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
+  match ok:
+    case False{}:
+      Blk.reply(R, w, room, (Blk.s_ioerr(), []))
+    case True{}:
+      +last = (room - 1 : U32)
+      do V.Op<R, U32>:
+        Blk.copy_in(Q.Vq.segs(w, 0, last), R, disk, Blk.offset(sector))
+        Blk.put(R, w, last, Blk.s_ok())
+        return room
+
+# OUT: the readable data after the header (ss) written at sector.
+def Blk.out(-R: Type, ok: Bool, disk: U32, sector: U.U64, ss: +List<Q.Seg>, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
+  match ok:
+    case False{}:
+      Blk.reply(R, w, room, (Blk.s_ioerr(), []))
+    case True{}:
+      do V.Op<R, U32>:
+        Blk.copy_out(ss, R, disk, Blk.offset(sector))
+        Blk.reply(R, w, room, (Blk.s_ok(), []))
+
+# OUT on a disk that may be read-only: IOERR without writing when ro.
+def Blk.out_ro(-R: Type, ro: Bool, disk: U32, +sectors: U.U64, +sector: U.U64, +r: +List<Q.Desc>, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
+  match ro:
+    case True{}:
+      Blk.reply(R, w, room, (Blk.s_ioerr(), []))
+    case False{}:
+      +ss = Q.Vq.segs(r, 16, 4294967295)
+      Blk.out(R, Blk.fits(sectors, sector, Q.Seg.total(ss)), disk, sector, ss, w, room)
+
+# FLUSH: makes earlier writes durable.
+def Blk.flush(-R: Type, disk: U32, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
+  do V.Op<R, U32>:
+    V.Op.disk_flush(R, disk)
+    Blk.reply(R, w, room, (Blk.s_ok(), []))
+
+def Blk.exec.kind(
+  -R: Type, k: Nat, ro: Bool, disk: U32, +sectors: U.U64, +sector: U.U64, +r: +List<Q.Desc>, +w: +List<Q.Desc>, +room: U32
+) -> V.Op<R, U32>:
+  match k:
+    case 0n:
+      Blk.in(R, Blk.fits(sectors, sector, (room - 1 : U32)), disk, sector, w, room)
+    case 1n:
+      Blk.out_ro(R, ro, disk, sectors, sector, r, w, room)
+    case 2n:
+      Blk.reply(R, w, room, (Blk.s_ok(), Blk.id_bytes()))
+    case 3n:
+      Blk.flush(R, disk, w, room)
+    case _:
+      Blk.reply(R, w, room, (Blk.s_unsupp(), []))
+
+# Runs a request whose first 16 readable bytes are hdr {type, reserved,
+# sector}; a shorter header is an IOERR.
+def Blk.exec.go(
+  -R: Type, short: Bool, +hdr: +List<U32>, ro: Bool, disk: U32, sectors: U.U64, r: +List<Q.Desc>, +w: +List<Q.Desc>, +room: U32
+) -> V.Op<R, U32>:
+  match short:
+    case True{}:
+      Blk.reply(R, w, room, (Blk.s_ioerr(), []))
+    case False{}:
+      +t = B.Bytes.read_le32(hdr)
+      sector = B.Bytes.read_le64(List.drop(&2, U32, hdr, 8n))
+      Blk.exec.kind(R, Blk.kind(t), ro, disk, sectors, sector, r, w, room)
+
+def Blk.exec(
+  -R: Type, +hdr: +List<U32>, ro: Bool, disk: U32, sectors: U.U64, r: +List<Q.Desc>, +w: +List<Q.Desc>, +room: U32
+) -> V.Op<R, U32>:
+  Blk.exec.go(R, Nat.is_lt(List.length(&2, U32, hdr), 16n), hdr, ro, disk, sectors, r, w, room)
+
 def Blk.answer_chain(
-  -R: Type, empty: Bool, ro: Bool, disk: U32, sectors: U.U64, +w: +List<Q.Desc>, +room: U32, +req: +List<U32>
+  -R: Type, empty: Bool, ro: Bool, disk: U32, sectors: U.U64, +r: +List<Q.Desc>, +w: +List<Q.Desc>, +room: U32
 ) -> V.Op<R, U32>:
   match empty:
     case True{}:
       V.Op.pure(R, U32, 0)
     case False{}:
       do V.Op<R, U32>:
-        res : U32 & +List<U32> <- Blk.exec_ro(R, ro, disk, sectors, (room - 1 : U32), req)
-        Blk.reply(R, w, room, res)
+        hdr : +List<U32> <- Q.Vq.read_segs(R, Q.Vq.segs(r, 0, 16))
+        Blk.exec(R, hdr, ro, disk, sectors, r, w, room)
 
 # Serves one request chain and pushes it used. A chain without a writable
 # byte has no status to answer in: it is returned untouched, used length 0.
+# The header is read through Bend; the data moves between the disk and the
+# chain's memory on the host (Blk.copy_in, Blk.copy_out).
 def Blk.serve_chain(-R: Type, ro: Bool, disk: U32, sectors: U.U64, q: Q.Vq, c: Q.Chain) -> V.Op<R, Q.Vq>:
   match c:
     case Q.Chain{+h, r, +w}:
       +room = Blk.room(w)
       do V.Op<R, Q.Vq>:
-        req : +List<U32> <- Q.Vq.gather(R, Q.Chain{h, r, []})
-        n : U32 <- Blk.answer_chain(R, U32.is_zero(room), ro, disk, sectors, w, room, req)
+        n : U32 <- Blk.answer_chain(R, U32.is_zero(room), ro, disk, sectors, r, w, room)
         Q.Vq.push(R, q, h, n)
 
 # After a pop: stops on an empty queue, else serves the chain and continues

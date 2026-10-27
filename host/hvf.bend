@@ -89,6 +89,10 @@ def Hvf.disk_write(disk: U32, off_hi: U32, off_lo: U32, bytes: +List<U32>) -> IO
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.disk_copy(disk: U32, dir: U32, off_hi: U32, off_lo: U32, gpa_hi: U32, gpa_lo: U32, len: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 # Host sockets for the NAT (see host/hvf.c, "Network").
 def Hvf.tcp_connect(conn: U32, ip: U32, port: U32) -> IO(U32):
   import "./hvf.c"
@@ -330,6 +334,13 @@ def Host.disk_write(disk: U32, off: U.U64, bytes: +List<U32>) -> IO(U32):
   match off:
     case U.U64{h, l}:
       Hvf.disk_write(disk, h, l, bytes)
+
+# Moves len bytes between a disk and guest RAM on the host: dir 0 disk to
+# RAM, 1 RAM to disk.
+def Host.disk_copy(disk: U32, dir: U32, off: U.U64, gpa: U.U64, len: U32) -> IO(U32):
+  match off gpa:
+    case U.U64{oh, ol} U.U64{gh, gl}:
+      Hvf.disk_copy(disk, dir, oh, ol, gh, gl, len)
 
 def Host.disk_size(disk: U32) -> IO(U.U64):
   do IO<U.U64>:

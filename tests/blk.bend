@@ -242,6 +242,25 @@ def in_ro() -> IO(Unit):
     check("blk dev ro read", run_dev(D.BlkRoKind{0, u64(4)}, s), 16400, cat(slice(disk(), 512n, 512n), [0]), used(1, [0, 513]), True{}, 1, disk())
     check("blk ro get_id", run_ro(g), 16400, cat(id(), [0]), used(1, [0, 21]), True{}, 1, disk())
 
+# 12. OUT whose header and data share one descriptor (528 bytes).
+def write_one_desc() -> IO(Unit):
+  +t = cat(desc(16384, 528, 1, 1), desc(16912, 1, 2, 0))
+  +s = S.Sim.write(machine(t, 1, [0]), u64(16384), hdr(1, 3))
+  +s = S.Sim.write(s, u64(16400), List.replicate(U32, 512n, 171))
+  check("blk write one descriptor", run(s), 16912, [0], used(1, [0, 1]), True{}, 1, cat(slice(disk(), 0n, 1536n), List.replicate(U32, 512n, 171)))
+
+# 13. IN whose data and status share one writable descriptor (513 bytes).
+def read_one_desc() -> IO(Unit):
+  +t = cat(desc(16384, 16, 1, 1), desc(16400, 513, 2, 0))
+  +s = S.Sim.write(machine(t, 1, [0]), u64(16384), hdr(0, 1))
+  check("blk read one descriptor", run(s), 16400, cat(slice(disk(), 512n, 512n), [0]), used(1, [0, 513]), True{}, 1, disk())
+
+# 14. A header shorter than 16 bytes: IOERR.
+def short_header() -> IO(Unit):
+  +t = cat(desc(16384, 8, 1, 1), desc(16400, 1, 2, 0))
+  +s = S.Sim.write(machine(t, 1, [0]), u64(16384), hdr(0, 1))
+  check("blk short header", run(s), 16400, [1], used(1, [0, 1]), True{}, 1, disk())
+
 def main() -> IO(Unit):
   do IO<Unit>:
     T.eq_str("blk config", show(K.Blk.config(U.U64{1, 2})), "[2, 0, 0, 0, 1, 0, 0, 0]")
@@ -258,5 +277,8 @@ def main() -> IO(Unit):
     flush()
     out_ro()
     in_ro()
+    write_one_desc()
+    read_one_desc()
+    short_header()
     T.eq_str("blk features rw", show(feats(K.Blk.features(False{}))), "[1, 512]")
     T.eq_str("blk features ro", show(feats(K.Blk.features(True{}))), "[1, 544]")

@@ -15,3 +15,17 @@ law virtio_queue.parse_flags_high_byte:
 
 law virtio_queue.from_cfg:
   {Q.Vq.from_cfg(M.QueueCfg{256, 4, True{}, U.U64{0, 4096}, U.U64{0, 8192}, U.U64{0, 12288}}) == Q.Vq{4, U.U64{0, 4096}, U.U64{0, 8192}, U.U64{0, 12288}, 0, 0} : Q.Vq}
+
+# Proposed: the memory a device moves on the host (Vq.segs) is the chain's
+# own, after the header, cut at the room it may use.
+law virtio_queue.segs_skip_header_desc:
+  {Q.Vq.segs([Q.Desc{U.U64{0, 100}, 16, 1, 1}, Q.Desc{U.U64{0, 200}, 512, 1, 0}], 16, 4294967295) == [Q.Seg{U.U64{0, 200}, 512}] : +List<Q.Seg>}
+
+law virtio_queue.segs_skip_inside_desc:
+  {Q.Vq.segs([Q.Desc{U.U64{0, 100}, 528, 1, 0}], 16, 4294967295) == [Q.Seg{U.U64{0, 116}, 512}] : +List<Q.Seg>}
+
+law virtio_queue.segs_cut_at_max:
+  {Q.Vq.segs([Q.Desc{U.U64{0, 100}, 300, 2, 1}, Q.Desc{U.U64{0, 500}, 300, 2, 0}], 0, 400) == [Q.Seg{U.U64{0, 100}, 300}, Q.Seg{U.U64{0, 500}, 100}] : +List<Q.Seg>}
+
+law virtio_queue.segs_nothing_past_max:
+  {Q.Vq.segs([Q.Desc{U.U64{0, 100}, 300, 2, 1}, Q.Desc{U.U64{0, 500}, 300, 2, 0}], 0, 300) == [Q.Seg{U.U64{0, 100}, 300}] : +List<Q.Seg>}

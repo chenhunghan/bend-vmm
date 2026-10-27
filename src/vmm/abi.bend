@@ -174,6 +174,12 @@ type Vm<-A: Type> is Type:
   # A flash command; continues with the value a FlashRead read (0 for the
   # others).
   VmFlash{cmd: FlashCmd, k: U32 -> Vm<A>}
+  # Copies len bytes of disk image `disk` at byte offset into guest memory at
+  # addr (zeros past the image's end), host to guest with no copy through
+  # Bend. The host does nothing when the range leaves guest RAM.
+  VmDiskToRam{disk: U32, offset: U.U64, addr: U.U64, len: U32, next: Vm<A>}
+  # Copies len bytes of guest memory at addr to disk image `disk` at offset.
+  VmRamToDisk{disk: U32, offset: U.U64, addr: U.U64, len: U32, next: Vm<A>}
 
 # Device code is written in Op, a continuation monad over Vm: its bind needs
 # no recursion, so `do Op<R, A>:` blocks pass Bend's termination check. R is
@@ -228,6 +234,12 @@ def Op.disk_read(-R: Type, disk: U32, offset: U.U64, len: U32) -> Op<R, +List<U3
 
 def Op.disk_write(-R: Type, disk: U32, offset: U.U64, bytes: +List<U32>) -> Op<R, Unit>:
   Op{k => VmDiskWrite{disk, offset, bytes, k(Unit{})}}
+
+def Op.disk_to_ram(-R: Type, disk: U32, offset: U.U64, addr: U.U64, len: U32) -> Op<R, Unit>:
+  Op{k => VmDiskToRam{disk, offset, addr, len, k(Unit{})}}
+
+def Op.ram_to_disk(-R: Type, disk: U32, offset: U.U64, addr: U.U64, len: U32) -> Op<R, Unit>:
+  Op{k => VmRamToDisk{disk, offset, addr, len, k(Unit{})}}
 
 def Op.random(-R: Type, len: U32) -> Op<R, +List<U32>>:
   Op{k => VmRandom{len, k}}
