@@ -177,10 +177,10 @@ floor (`Csum.small`, `Tcp.small`).
 
 - UEFI: a fw_cfg device (boot order, kernel loading) and a graphics output
   (ramfb) for the firmware's own screens.
-- vsock to the guest (~100 MB/s) is bound by Linux's ~3.7 KiB rx buffers:
-  a packet per buffer, each a queue pop, a header and a host copy. Batching
-  the avail-ring and descriptor reads (as for virtio-blk) would help every
-  queue.
+- vsock to the guest (~100 MB/s) is bound by the guest: Linux 6.8 posts
+  ~3.7 KiB rx buffers, so ~40k packets a second, while the VMM side is
+  mostly idle (a larger guest buffer, a 1 MiB host hold and pinning the
+  reader to vCPU 0 each changed nothing).
 - A vCPU waiting on another's interrupt pays Hypervisor.framework's ~80 µs
   WFI wake (a disk request from vCPU 1: ~100 µs against ~21 µs on vCPU 0).
 - No sandbox: the VMM runs with the user's rights.

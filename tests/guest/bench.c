@@ -9,7 +9,8 @@
 //   bench recv IP PORT        TCP download: reads IP:PORT to its end
 //   bench vsend PORT BYTES  vsock upload: BYTES in 1 MiB writes to the host
 //                    (CID 2) port PORT
-//   bench vrecv PORT  vsock download: reads the host's port PORT to its end
+//   bench vrecv PORT [BUF]  vsock download: reads the host's port PORT to its
+//                    end (BUF: the socket's receive buffer, default Linux's)
 //   bench vecho PORT ROUNDS SEED  sends ROUNDS blocks of 64 KiB (from SEED)
 //                    to an echoing host port, checks each block it gets back;
 //                    exits 1 on a mismatch
@@ -188,6 +189,20 @@ static i64 vdial(u64 port) {
   return fd;
 }
 
+#define SYS_setsockopt 208
+// vdial with the socket's buffer set first (SO_VM_SOCKETS_BUFFER_MAX_SIZE 2,
+// then SO_VM_SOCKETS_BUFFER_SIZE 0, level AF_VSOCK) when bufsz is not 0.
+static i64 vdial2(u64 port, u64 bufsz) {
+  if (!bufsz) return vdial(port);
+  struct { unsigned short fam, reserved; unsigned port, cid; unsigned char zero[4]; } sa = {40, 0, (unsigned)port, 2, {0}};
+  i64 fd = sys(SYS_socket, 40, 1, 0, 0, 0, 0);
+  if (fd < 0) return -1;
+  sys(SYS_setsockopt, fd, 40, 2, (i64)&bufsz, 8, 0);
+  sys(SYS_setsockopt, fd, 40, 0, (i64)&bufsz, 8, 0);
+  if (sys(SYS_connect, fd, (i64)&sa, sizeof sa, 0, 0, 0) < 0) { put("bench: cannot connect over vsock"); flush(); return -1; }
+  return fd;
+}
+
 static int send_all(i64 fd, u64 bytes, const char* name) {
   u64 done = 0, t = now_ns();
   memset(buf, 0x5a, 1 << 20);
@@ -276,7 +291,8 @@ void _start_c(u64* sp) {
   else if (argc >= 4 && eq(argv[1], "peek")) rc = peek(num(argv[2]), num(argv[3]));
   else if (argc >= 5 && eq(argv[1], "vecho")) rc = vecho(num(argv[2]), num(argv[3]), num(argv[4]));
   else if (argc >= 3 && eq(argv[1], "vrecv")) {
-    i64 fd = vdial(num(argv[2]));
+    u64 bufsz = argc >= 4 ? num(argv[3]) : 0;
+    i64 fd = vdial2(num(argv[2]), bufsz);
     u64 done = 0, t = now_ns();
     if (fd >= 0) {
       i64 k;
