@@ -7,8 +7,9 @@ import ../src/virtio/queue.bend as Q
 import ../src/virtio/vsock.bend as S
 import ./t.bend as T
 
-# virtio-vsock protocol scenarios beyond laws/vsock.bend: credit-limited
-# host data, credit updates, EOF and shutdown, host-initiated connections.
+# virtio-vsock protocol scenarios beyond laws/vsock.bend: host data the rx
+# pass copies into posted buffers as credit allows, credit updates, EOF and
+# shutdown, host-initiated connections, staged transmits.
 
 def cid() -> U.U64:
   U.U64{0, 3}
@@ -51,6 +52,12 @@ def show_cmd(c: V.VsockCmd) -> String:
       "close " ++ U32.show(id)
     case V.VsAccepted{id, port}:
       "accepted " ++ U32.show(id) ++ ":" ++ U32.show(port)
+    case V.VsSendStaged{id, slot}:
+      "staged " ++ U32.show(id) ++ "/" ++ U32.show(slot)
+    case V.VsStageDrop{slot}:
+      "drop " ++ U32.show(slot)
+    case V.VsRelease{id}:
+      "release " ++ U32.show(id)
 
 def show_cmds(cs: +List<V.VsockCmd>) -> String:
   List.show(~&2, ~V.VsockCmd, ~show_cmd, cs)
@@ -112,14 +119,106 @@ def longest(fuel: Nat, -A: Type, s: Sim.Sim, m: V.Vm<A>, +top: U32) -> U32:
         case _:
           top
 
+# How many bytes the first VmStage of a program stages (0 when none).
+def staged(fuel: Nat, -A: Type, s: Sim.Sim, m: V.Vm<A>) -> U32:
+  match fuel:
+    case 0n:
+      0
+    case 1n+f:
+      match m:
+        case V.VmRead{+a, +n, k}:
+          +s = s
+          staged(f, A, s, k(Bool.pick(+List<U32>, U32.is_lt(4096, n), [], Sim.Sim.read(s, a, n))))
+        case V.VmWrite{a, bs, next}:
+          staged(f, A, Sim.Sim.write(s, a, bs), next)
+        case V.VmStage{iovs, k}:
+          V.Iov.total(iovs)
+        case _:
+          0
+
 # A tx queue (8 entries: descriptors 4096, available ring 4224, used ring
-# 4352) whose one chain is a readable descriptor 4294967295 bytes long: the
-# device reads at most a header and 64 KiB of payload of it.
-def tx_huge() -> U32:
+# 4352) whose one chain is a readable descriptor 4294967295 bytes long at
+# 4608, where an RW header claims 4294967295 bytes: the device reads only the
+# 44-byte header through Bend and stages at most 64 KiB of payload.
+def tx_huge_sim() -> Sim.Sim:
   +s = Sim.Sim.new(U.U64{0, 4096}, 1024n)
   s = Sim.Sim.write(s, U.U64{0, 4096}, [0, 18, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0])
   s = Sim.Sim.write(s, U.U64{0, 4224}, [0, 0, 1, 0, 0, 0])
-  longest(100n, S.VsTxq, s, V.Op.finish(S.VsTxq, S.Vsq.tx(S.VsTxq, Q.Vq{8, U.U64{0, 4096}, U.U64{0, 4224}, U.U64{0, 4352}, 0, 0})), 0)
+  Sim.Sim.write(s, U.U64{0, 4608}, pkt(40000, 1234, 5, 0, 4096, 0, []))
+
+def tx_huge_prog() -> V.Vm<S.VsTxq>:
+  V.Op.finish(S.VsTxq, S.Vsq.tx(S.VsTxq, Q.Vq{8, U.U64{0, 4096}, U.U64{0, 4224}, U.U64{0, 4352}, 0, 0}))
+
+def tx_huge() -> U32:
+  longest(100n, S.VsTxq, tx_huge_sim(), tx_huge_prog(), 0)
+
+# The same header saying 4294967295 bytes (its len field at 24..27 set).
+def tx_huge_staged() -> U32:
+  +s = Sim.Sim.write(tx_huge_sim(), U.U64{0, 4632}, [255, 255, 255, 255])
+  staged(100n, S.VsTxq, s, tx_huge_prog())
+
+# Host data into posted buffers: an rx queue of 8 chains (descriptors 4096,
+# available ring 4224, used ring 4352), chain i one writable buffer of 1024
+# bytes at 8192 + 1024 i.
+def rx_desc(i: Nat) -> +List<U32>:
+  match i:
+    case 0n:
+      []
+    case 1n+(+p):
+      List.append(&2, U32, rx_desc(p), List.append(&2, U32, B.Bytes.le64(U.U64{0, (8192 + 1024 * U32.from_nat(p) : U32)}), List.append(&2, U32, B.Bytes.le32(1024), [2, 0, 0, 0])))
+
+def rx_sim() -> Sim.Sim:
+  +s = Sim.Sim.new(U.U64{0, 4096}, 16384n)
+  s = Sim.Sim.write(s, U.U64{0, 4096}, rx_desc(8n))
+  Sim.Sim.write(s, U.U64{0, 4224}, [0, 0, 8, 0, 0, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0])
+
+def rxq() -> Q.Vq:
+  Q.Vq{8, U.U64{0, 4096}, U.U64{0, 4224}, U.U64{0, 4352}, 0, 0}
+
+# The used lengths after an rx pass, and its commands.
+def used_lens(n: Nat, +s: Sim.Sim) -> String:
+  match n:
+    case 0n:
+      ""
+    case 1n+(+p):
+      used_lens(p, s) ++ U32.show(B.Bytes.read_le32(Sim.Sim.read(s, U.U64{0, (4360 + 8 * U32.from_nat(p) : U32)}, 4))) ++ " "
+
+def rx_run.of(r: Maybe<&1, Sim.Sim & S.VsRx>, v: S.Vsock) -> String:
+  match r:
+    case None{}:
+      "failed"
+    case Some{(+s, S.VsRx{v2, q, cs, used})}:
+      +idx = B.Bytes.read_le16(Sim.Sim.read(s, U.U64{0, 4354}, 2))
+      "used " ++ U32.show(idx) ++ ": " ++ used_lens(U32.to_nat(idx), s) ++ show_cmds(cs)
+
+def rx_run(+v: S.Vsock) -> String:
+  rx_run.of(Sim.Sim.exec(S.VsRx, rx_sim(), S.Vsock.rx(S.VsRx, v, rxq())), v)
+
+def rx_state.of(r: Maybe<&1, Sim.Sim & S.VsRx>, v: S.Vsock) -> S.Vsock:
+  match r:
+    case None{}:
+      v
+    case Some{(s, S.VsRx{v2, q, cs, used})}:
+      v2
+
+def rx_state(+v: S.Vsock) -> S.Vsock:
+  rx_state.of(Sim.Sim.exec(S.VsRx, rx_sim(), S.Vsock.rx(S.VsRx, v, rxq())), v)
+
+# The header of the first packet the rx pass wrote (buffer 0 at 8192): its
+# op and length.
+def rx_first.of(r: Maybe<&1, Sim.Sim & S.VsRx>, v: S.Vsock) -> String:
+  match r:
+    case None{}:
+      "failed"
+    case Some{(s, r)}:
+      shape([Sim.Sim.read(s, U.U64{0, 8192}, 44)])
+
+def rx_first(+v: S.Vsock) -> String:
+  rx_first.of(Sim.Sim.exec(S.VsRx, rx_sim(), S.Vsock.rx(S.VsRx, v, rxq())), v)
+
+# The connection of open4k() (guest buffer 4096) with host data held.
+def held(n: U32) -> S.Vsock:
+  st(S.Vsock.host_event(open4k(), V.VsReady{0, n}))
 
 # The guest sends 128 KiB (half the advertised buffer): the device answers
 # with a CREDIT_UPDATE and keeps the connection, so more data still goes to
@@ -140,24 +239,19 @@ def past_half() -> S.VsOut:
 def blocked_half() -> S.Vsock:
   send4k(32n, S.Vsock.drop_out(st(S.Vsock.host_event(open4k(), V.VsBlocked{0}))))
 
-# A data packet of 100 bytes for a 94-byte buffer: 50 bytes (the header
-# says 50) fill it, the other 50 follow in a packet of their own; a packet
-# that is not data is not split.
-def split_shape(m: Maybe<&1, +List<U32> & +List<U32>>) -> String:
-  match m:
-    case None{}:
-      "none"
-    case Some{(+a, +b)}:
-      shape([a, b]) ++ Nat.show(List.length(&2, U32, a)) ++ "+" ++ Nat.show(List.length(&2, U32, b))
-
 def main() -> IO(Unit):
   do IO<Unit>:
-    +a : S.Vsock = st(S.Vsock.host_event(open4k(), V.VsData{0, B.Bytes.zeros(5000n)}))
-    T.eq_str("vsock credit caps data", shape(outs(a)), "op5/3584 op5/512 ")
-    T.eq_u32("vsock backlog counts waiting bytes", S.Vsock.backlog(a), 2)
-    +b : S.Vsock = st(S.Vsock.guest_packet(S.Vsock.drop_out(a), pkt(40000, 1234, 6, 0, 4096, 4096, [])))
-    T.eq_str("vsock credit update releases the rest", shape(outs(b)), "op5/904 ")
-    +c : S.Vsock = st(S.Vsock.host_event(S.Vsock.drop_out(b), V.VsEof{0}))
+    # 5000 held bytes, credit 4096, 1 KiB buffers: four full packets (980
+    # bytes each, 1024 with the header) and 176, then the credit is spent;
+    # the hold is not all out, so no release
+    T.eq_str("vsock credit caps data", rx_run(held(5000)), "used 5: 1024 1024 1024 1024 220 []")
+    T.eq_str("vsock rx writes an RW header", rx_first(held(5000)), "op5/980 ")
+    T.eq_str("vsock nothing held, nothing sent", rx_run(open4k()), "used 0: []")
+    +a : S.Vsock = rx_state(held(5000))
+    +b : S.Vsock = st(S.Vsock.guest_packet(a, pkt(40000, 1234, 6, 0, 4096, 4096, [])))
+    T.eq_str("vsock credit update releases the rest", rx_run(b), "used 1: 948 [release 0]")
+    T.eq_u32("vsock backlog counts queued packets", S.Vsock.backlog(held(5000)), 0)
+    +c : S.Vsock = st(S.Vsock.host_event(S.Vsock.drop_out(rx_state(b)), V.VsEof{0}))
     T.eq_str("vsock host eof -> shutdown(send)", shape(outs(c)), "op4/0 ")
     T.eq_str("vsock guest shutdown(send)", show_cmds(cmds(S.Vsock.guest_packet(c, pkt(40000, 1234, 4, 2, 4096, 5000, [])))), "[shutdown 0]")
     T.eq_str("vsock guest shutdown(both)", show_cmds(cmds(S.Vsock.guest_packet(c, pkt(40000, 1234, 4, 3, 4096, 5000, [])))), "[shutdown 0, close 0]")
@@ -165,7 +259,7 @@ def main() -> IO(Unit):
     T.eq_str("vsock duplicate request ignored", show_cmds(cmds(S.Vsock.guest_packet(open4k(), pkt(40000, 1234, 1, 0, 4096, 0, [])))), "[]")
     +h : S.Vsock = S.Vsock.drop_out(st(S.Vsock.host_event(S.Vsock.new(cid()), V.VsIncoming{2147483648, 5000})))
     T.eq_str("vsock host connect accepted", show_cmds(cmds(S.Vsock.guest_packet(h, pkt(5000, 1024, 2, 0, 65536, 0, [])))), "[accepted 2147483648:1024]")
-    T.eq_str("vsock data waits for the response", shape(outs(st(S.Vsock.host_event(h, V.VsData{2147483648, [1, 2]})))), "")
+    T.eq_str("vsock data waits for the response", rx_run(st(S.Vsock.host_event(h, V.VsReady{2147483648, 2}))), "used 0: []")
     # Guest-driven state is capped: RSTs for unknown connections stop at 256
     # queued packets, connections at 128 (a REQUEST past it gets an RST and
     # no host connect).
@@ -175,10 +269,11 @@ def main() -> IO(Unit):
     T.eq_u32("vsock connections capped at 128", U32.from_nat(conns_of(flood_req(130n, S.Vsock.new(cid()), 0n))), 128)
     T.eq_u32("vsock no host connect past the cap", U32.from_nat(connects_of(flood_req(130n, S.Vsock.new(cid()), 0n))), 128)
     T.eq_str("vsock request past the cap gets rst", outs_of(flood_req(130n, S.Vsock.new(cid()), 0n)), "op3/0 op3/0 ")
-    T.eq_u32("vsock tx reads at most 65580 bytes of a chain", tx_huge(), 65580)
+    T.eq_u32("vsock tx reads only the header through Bend", tx_huge(), 44)
+    T.eq_u32("vsock tx stages at most 64 KiB of payload", tx_huge_staged(), 65536)
+    T.eq_str("vsock a staged RW goes to the host", show_cmds(cmds(S.Vsock.guest_staged(open4k(), pkt(40000, 1234, 5, 0, 4096, 0, []), S.Stg{3, 100}))), "[staged 0/3]")
+    T.eq_str("vsock a staged RW for no connection is freed", show_cmds(cmds(S.Vsock.guest_staged(S.Vsock.new(cid()), pkt(40000, 1234, 5, 0, 4096, 0, []), S.Stg{3, 100}))), "[drop 3]")
     T.eq_str("vsock data after the credit update reaches the host", show_cmds(cmds(past_half())), "[send 0/1]")
-    T.eq_str("vsock splits a data packet for a small buffer", split_shape(S.Vsq.rx.split(pkt(1234, 40000, 5, 0, 4096, 0, B.Bytes.zeros(100n)), 94)), "op5/50 op5/50 94+94")
-    T.eq_str("vsock does not split other packets", split_shape(S.Vsq.rx.split(pkt(1234, 40000, 6, 0, 4096, 0, []), 20)), "none")
     T.eq_str("vsock no credit while the host is behind", shape(outs(blocked_half())), "")
     T.eq_str("vsock credit once the host caught up", shape(outs(st(S.Vsock.host_event(blocked_half(), V.VsUnblocked{0})))), "op6/0 ")
     T.eq_u32("vsock keeps the connection past the credit update", U32.from_nat(List.length(&2, S.VConn, S.Vsock.conns(st(past_half())))), 1)

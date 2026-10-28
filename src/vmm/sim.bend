@@ -378,6 +378,9 @@ def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
         case V.VmStage{iovs, k}:
           # the simulator stages everything in slot 0
           Sim.run(f, A, s, k(0))
+        case V.VmVsToRam{conn, off, +iovs, next}:
+          # the simulator's host holds 120 ('x') in every vsock byte too
+          Sim.run(f, A, Sim.scatter(iovs, s, List.replicate(U32, U32.to_nat(V.Iov.total(iovs)), 120)), next)
         case V.VmNetToRam{conn, off, +iovs, next}:
           # the simulator's host holds 120 ('x') in every byte it buffered
           Sim.run(f, A, Sim.scatter(iovs, s, List.replicate(U32, U32.to_nat(V.Iov.total(iovs)), 120)), next)

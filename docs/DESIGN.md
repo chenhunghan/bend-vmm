@@ -177,10 +177,10 @@ floor (`Csum.small`, `Tcp.small`).
 
 - UEFI: a fw_cfg device (boot order, kernel loading) and a graphics output
   (ramfb) for the firmware's own screens.
-- vsock moves its payload through Bend lists (about 7 MB/s to the guest,
-  27 MB/s from it); the NAT's V.Iov path (a host hold copied straight into
-  guest memory, staged transmits) would lift it, but VConn's byte-list
-  `pending` is pinned by laws/snapshot.bend.
+- vsock to the guest (~100 MB/s) is bound by Linux's ~3.7 KiB rx buffers:
+  a packet per buffer, each a queue pop, a header and a host copy. Batching
+  the avail-ring and descriptor reads (as for virtio-blk) would help every
+  queue.
 - A vCPU waiting on another's interrupt pays Hypervisor.framework's ~80 µs
   WFI wake (a disk request from vCPU 1: ~100 µs against ~21 µs on vCPU 0).
 - No sandbox: the VMM runs with the user's rights.

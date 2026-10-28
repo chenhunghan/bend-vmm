@@ -81,7 +81,7 @@ def conns(n: Nat) -> +List<S.VConn>:
     case 0n:
       []
     case 1n+(+p):
-      S.VConn{U32.from_nat(p), U32.from_nat(p), 1, 1, 0, 0, 0, 0, 0, [], False{}} <> conns(p)
+      S.VConn{U32.from_nat(p), U32.from_nat(p), 1, 1, 0, 0, 0, 0, 0, 0, 0} <> conns(p)
 
 law vsock.max_out:
   {S.Vs.max_out() == 256n : Nat}

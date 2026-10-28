@@ -240,6 +240,10 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
     case V.FlashMap{on}:
       H.Hvf.flash(3, Bool.to_u32(on), 0, [])
 
+# A vsock connection's key in the host's socket table (apart from the NAT's).
+def vkey(+conn: U32) -> U32:
+  (conn .^. 1073741824 : U32)
+
 # Runs the Vm program of an exit of vCPU cpu. VmCpuOn starts that vCPU's loop,
 # which is defined below (hence @unsafe: the two recurse into each other).
 @unsafe def interp(+cpu: U32, +mc: Chan(M.Machine), +done: Chan(U32), -A: Type, m: V.Vm<A>) -> IO(A):
@@ -330,6 +334,10 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
     case V.VmNetToRam{conn, off, iovs, next}:
       do IO<A>:
         _ : U32 <- H.Host.net_copy(conn, off, iovs)
+        interp(cpu, mc, done, A, next)
+    case V.VmVsToRam{+conn, off, iovs, next}:
+      do IO<A>:
+        _ : U32 <- H.Host.net_copy(vkey(conn), off, iovs)
         interp(cpu, mc, done, A, next)
     case V.VmRandom{n, k}:
       do IO<A>:
@@ -790,43 +798,23 @@ def pointer_of(arg: String) -> Maybe<&2, In.Hid>:
     m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.vsock_event(m0, ev))
     put(mc, m1)
 
-def vkey(+conn: U32) -> U32:
-  (conn .^. 1073741824 : U32)
-
-# Holds a reader back while the guest has too much vsock data pending.
-@unsafe def vs_wait(+mc: Chan(M.Machine), fuel: Nat) -> IO(Unit):
-  match fuel:
-    case 0n:
-      IO.pure(Unit, Unit{})
-    case 1n+f:
-      do IO<Unit>:
-        +m : M.Machine <- take(mc)
-        put(mc, m)
-        vs_wait.go(U32.is_lt(M.Machine.vsock_backlog(m), 32), mc, f)
-
-@unsafe def vs_wait.go(ok: Bool, +mc: Chan(M.Machine), fuel: Nat) -> IO(Unit):
-  match ok:
-    case True{}:
-      IO.pure(Unit, Unit{})
-    case False{}:
-      do IO<Unit>:
-        IO.sleep(2)
-        vs_wait(mc, fuel)
-
-@unsafe def vs_reader.got(eof: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32, bs: +List<U32>) -> IO(Unit):
+# A vsock connection's reader: the host holds what the program sent (up to
+# Hvf.tcp_fill's buffer) and the device copies it into the guest's buffers
+# (VmVsToRam); once all of it is out (VsRelease) the host reads again, so the
+# guest's pace holds the program back. EOF or an error ends it.
+@unsafe def vs_reader.got(eof: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32, +n: U32) -> IO(Unit):
   match eof:
     case True{}:
       vs_deliver(mc, done, V.VsEof{conn})
     case False{}:
       do IO<Unit>:
-        vs_deliver(mc, done, V.VsData{conn, bs})
-        vs_wait(mc, 5000n)
+        vs_deliver(mc, done, V.VsReady{conn, n})
         vs_reader(mc, done, conn)
 
 @unsafe def vs_reader(+mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
   do IO<Unit>:
-    +bs : +List<U32> <- H.Hvf.tcp_recv(vkey(conn))
-    vs_reader.got(List.is_empty(&2, U32, bs), mc, done, conn, bs)
+    +n : U32 <- H.Hvf.tcp_fill(vkey(conn))
+    vs_reader.got(U32.is_zero(n), mc, done, conn, n)
 
 @unsafe def vs_task.connected(ok: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
   match ok:
@@ -895,6 +883,18 @@ def vkey(+conn: U32) -> U32:
       do IO<Unit>:
         rc : U32 <- H.Hvf.nat_send(vkey(conn), bs)
         vs_sent(U32.is_eq(rc, 1), mc, done, conn)
+    case V.VsSendStaged{+conn, slot}:
+      do IO<Unit>:
+        rc : U32 <- H.Hvf.tcp_send_staged(vkey(conn), slot)
+        vs_sent(U32.is_eq(rc, 1), mc, done, conn)
+    case V.VsStageDrop{slot}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.stage_drop(slot)
+        return Unit{}
+    case V.VsRelease{conn}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.tcp_release(vkey(conn))
+        return Unit{}
     case V.VsShutdown{conn}:
       do IO<Unit>:
         _ : U32 <- H.Hvf.tcp_shutdown(vkey(conn))

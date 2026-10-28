@@ -41,7 +41,7 @@ law snapshot.roundtrip_busy:
   {S.Snap.decode(S.Snap.encode(busy())) == Some{busy()} : Maybe<&2, Mc.Machine>}
 
 law snapshot.magic_first:
-  {List.take(&2, U32, S.Snap.encode(fresh()), 2n) == [1112428109, 3] : +List<U32>}
+  {List.take(&2, U32, S.Snap.encode(fresh()), 2n) == [1112428109, 4] : +List<U32>}
 
 law snapshot.bad_magic:
   {S.Snap.decode(List.set(&2, U32, S.Snap.encode(fresh()), 0n, 7)) == None{} : Maybe<&2, Mc.Machine>}
@@ -58,10 +58,10 @@ law snapshot.trailing:
 law snapshot.empty:
   {S.Snap.decode([]) == None{} : Maybe<&2, Mc.Machine>}
 
-# A machine with a vsock device holding a connection, pending host data and
-# a packet for the guest.
+# A machine with a vsock device holding a connection (3 bytes held on the
+# host, 2 of them sent) and a packet for the guest.
 def vsock_machine() -> Mc.Machine:
-  Mc.Machine{P.PsciState{[True{}]}, Uart.Pl011.new(), False{}, [D.Dev{D.VsockKind{w(3)}, M.VirtioMmio.new(19, U.U64{1, 0}, 3n, 256, [3, 0, 0, 0, 0, 0, 0, 0]), [], D.VsState{Vs.Vsock{w(3), [Vs.VConn{0, 40000, 1234, 1, 10, 4096, 4, 7, 0, [1, 2, 3], True{}}], 1, 1024, [[9, 8]]}}}], [False{}], Rtc.Pl031.new(), False{}, Nt.Slirp.new(), Pf.Pflash.new()}
+  Mc.Machine{P.PsciState{[True{}]}, Uart.Pl011.new(), False{}, [D.Dev{D.VsockKind{w(3)}, M.VirtioMmio.new(19, U.U64{1, 0}, 3n, 256, [3, 0, 0, 0, 0, 0, 0, 0]), [], D.VsState{Vs.Vsock{w(3), [Vs.VConn{0, 40000, 1234, 1, 10, 4096, 4, 7, 0, 3, 2}], 1, 1024, [[9, 8]]}}}], [False{}], Rtc.Pl031.new(), False{}, Nt.Slirp.new(), Pf.Pflash.new()}
 
 law snapshot.roundtrip_vsock:
   {S.Snap.decode(S.Snap.encode(vsock_machine())) == Some{vsock_machine()} : Maybe<&2, Mc.Machine>}

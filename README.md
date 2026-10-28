@@ -175,7 +175,7 @@ the guest pinned to vCPU 0 where device interrupts land):
 | TCP download / upload through the NAT (1 MiB reads and writes) | ~650 / ~590 MB/s |
 | the same with busybox `wget` / `dd \| nc` in the guest | ~500-650 / ~80 MB/s |
 | 9p read / write | ~190 / ~100 MB/s |
-| vsock to / from the guest (bytes still pass through Bend) | ~7 / ~27 MB/s |
+| vsock to / from the guest | ~100 / ~1500 MB/s |
 
 (busybox's own copy loop, not the VMM, bounds the `nc` upload.)
 

@@ -19,8 +19,8 @@ import ../disk/qcow2.bend as Qc
 # The machine's device state as a stream of 32-bit words, for snapshots.
 # Snap.encode and Snap.decode are inverses (laws/snapshot.bend). The stream
 # starts with the magic 1112428109 ("BVMS" read as a little-endian word, 0x534d5642)
-# and the format version 3 (2 added the UEFI flash state, 3 the NAT's flow
-# control); lists and strings are length-prefixed; a sum type
+# and the format version 4 (2 added the UEFI flash state, 3 the NAT's flow
+# control, 4 vsock's host-held data counts); lists and strings are length-prefixed; a sum type
 # writes its constructor's index first. The host stores this next to guest
 # RAM, vCPU registers and the GIC state (host/hvf.c, "Snapshots").
 
@@ -28,7 +28,7 @@ def Snap.magic() -> U32:
   1112428109
 
 def Snap.version() -> U32:
-  3
+  4
 
 # Encoders
 # ========
@@ -145,8 +145,8 @@ def Enc.vconns(cs: +List<Vs.VConn>) -> +List<U32>:
   match cs:
     case Nil{}:
       []
-    case Con{Vs.VConn{id, gp, hp, st, tx, pa, pf, fwd, lf, pend, eof}, rest}:
-      List.append(&2, U32, [id, gp, hp, st, tx, pa, pf, fwd, lf], List.append(&2, U32, X.Enc.bytes(pend), Bool.to_u32(eof) <> Enc.vconns(rest)))
+    case Con{Vs.VConn{id, gp, hp, st, tx, pa, pf, fwd, lf, hd, sn}, rest}:
+      List.append(&2, U32, [id, gp, hp, st, tx, pa, pf, fwd, lf, hd, sn], Enc.vconns(rest))
 
 def Enc.vsock(v: Vs.Vsock) -> +List<U32>:
   match v:
@@ -480,10 +480,10 @@ def Dec.vconns(n: Nat) -> X.Dec<+List<Vs.VConn>>:
         pf : U32 <- X.Dec.u32()
         fwd : U32 <- X.Dec.u32()
         lf : U32 <- X.Dec.u32()
-        pend : +List<U32> <- X.Dec.bytes()
-        eof : Bool <- X.Dec.bool()
+        hd : U32 <- X.Dec.u32()
+        sn : U32 <- X.Dec.u32()
         rest : +List<Vs.VConn> <- Dec.vconns(p)
-        return Vs.VConn{id, gp, hp, st, tx, pa, pf, fwd, lf, pend, eof} <> rest
+        return Vs.VConn{id, gp, hp, st, tx, pa, pf, fwd, lf, hd, sn} <> rest
 
 def Dec.state.vsock() -> X.Dec<D.DevState>:
   do X.Dec<D.DevState>:

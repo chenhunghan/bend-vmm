@@ -352,8 +352,8 @@ def Dev.pass.vs_tx(r: Vs.VsTx) -> Pass:
 
 def Dev.pass.vs_rx(r: Vs.VsRx) -> Pass:
   match r:
-    case Vs.VsRx{v, q, used}:
-      Pass{q, VsState{v}, [], [], [], used}
+    case Vs.VsRx{v, q, cmds, used}:
+      Pass{q, VsState{v}, [], [], cmds, used}
 
 # The vsock device's pass: tx (queue 1), rx (queue 0); the event queue (2)
 # is never used.
@@ -464,6 +464,16 @@ def Dev.flush(-R: Type, k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevSta
     o : DevOut <- Dev.notify(R, Dev.qget(qs, 0, 0), k, m, qs, st, 0)
     return DevOut.dev(o)
 
+# The rx pass (Dev.flush) with its vsock commands kept (VsRelease).
+def Dev.flush.out(-R: Type, k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState) -> V.Op<R, DevOut>:
+  +qs = qs
+  Dev.notify(R, Dev.qget(qs, 0, 0), k, m, qs, st, 0)
+
+def DevOut.join(bs: +List<U32>, fs: +List<+List<U32>>, vc: +List<V.VsockCmd>, o: DevOut) -> DevOut:
+  match o:
+    case DevOut{d, bs2, fs2, vc2}:
+      DevOut{d, List.append(&2, U32, bs, bs2), List.append(&2, +List<U32>, fs, fs2), List.append(&2, V.VsockCmd, vc, vc2)}
+
 def Dev.after.vsock(-R: Type, again: Bool, o: DevOut) -> V.Op<R, DevOut>:
   match again:
     case False{}:
@@ -472,8 +482,8 @@ def Dev.after.vsock(-R: Type, again: Bool, o: DevOut) -> V.Op<R, DevOut>:
       match o:
         case DevOut{Dev{k, m, qs, st}, bs, fs, vc}:
           do V.Op<R, DevOut>:
-            d : Dev <- Dev.flush(R, k, m, qs, st)
-            return DevOut{d, bs, fs, vc}
+            o2 : DevOut <- Dev.flush.out(R, k, m, qs, st)
+            return DevOut.join(bs, fs, vc, o2)
 
 def Dev.is_vsock(k: DevKind) -> Bool:
   match k:
@@ -647,8 +657,8 @@ def Dev.host_vsock.fin(-R: Type, k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, o
   match o:
     case Vs.VsOut{v, cmds}:
       do V.Op<R, DevOut>:
-        d : Dev <- Dev.flush(R, k, m, qs, VsState{v})
-        return DevOut{d, [], [], cmds}
+        o2 : DevOut <- Dev.flush.out(R, k, m, qs, VsState{v})
+        return DevOut.join([], [], cmds, o2)
 
 # An event from the host's vsock sockets: through the protocol, then the
 # packets it queued go into the rx queue. Other kinds are unchanged.

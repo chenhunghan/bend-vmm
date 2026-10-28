@@ -155,6 +155,14 @@ type VsockCmd is Data:
   # The guest connects to host port `port`.
   VsConnect{conn: U32, port: U32}
   VsSend{conn: U32, bytes: +List<U32>}
+  # The guest's payload of a staged slot (VmStage) to the host, never
+  # through Bend; the slot is freed.
+  VsSendStaged{conn: U32, slot: U32}
+  # A staged slot that goes nowhere (its packet was refused): freed.
+  VsStageDrop{slot: U32}
+  # Every byte the host held for the connection (VsReady) reached the guest:
+  # the host may read more.
+  VsRelease{conn: U32}
   # The guest will send no more.
   VsShutdown{conn: U32}
   VsClose{conn: U32}
@@ -165,7 +173,10 @@ type VsockCmd is Data:
 type VsockEvent is Data:
   VsConnected{conn: U32}
   VsRefused{conn: U32}
-  VsData{conn: U32, bytes: +List<U32>}
+  # len bytes from the host program wait in the host's buffer for the
+  # connection: they go to the guest by VmVsToRam, never through Bend, and
+  # the buffer is refilled after VsRelease.
+  VsReady{conn: U32, len: U32}
   # The host side will send no more.
   VsEof{conn: U32}
   # A host client asks to connect to guest port `port` (it sent "CONNECT port").
@@ -240,6 +251,9 @@ type Vm<-A: Type> is Type:
   # Copies the pieces of guest memory, in order, into a new host buffer (a
   # staged slot, sent or freed later by a NetCmd); continues with its slot.
   VmStage{iovs: +List<Iov>, k: U32 -> Vm<A>}
+  # Copies the bytes from offset off of what the host holds for vsock
+  # connection conn (VsReady) into the pieces of guest memory, in order.
+  VmVsToRam{conn: U32, off: U32, iovs: +List<Iov>, next: Vm<A>}
   # Disk images by layout (src/disk): zeros over the pieces of guest memory.
   VmZeroRam{iovs: +List<Iov>, next: Vm<A>}
   # Grows disk image `disk` by len zero bytes, starting at a multiple of
@@ -322,6 +336,9 @@ def Op.ram_to_disk(-R: Type, disk: U32, offset: U.U64, iovs: +List<Iov>) -> Op<R
 
 def Op.net_to_ram(-R: Type, conn: U32, off: U32, iovs: +List<Iov>) -> Op<R, Unit>:
   Op{k => VmNetToRam{conn, off, iovs, k(Unit{})}}
+
+def Op.vs_to_ram(-R: Type, conn: U32, off: U32, iovs: +List<Iov>) -> Op<R, Unit>:
+  Op{k => VmVsToRam{conn, off, iovs, k(Unit{})}}
 
 def Op.stage(-R: Type, iovs: +List<Iov>) -> Op<R, U32>:
   Op{k => VmStage{iovs, k}}
