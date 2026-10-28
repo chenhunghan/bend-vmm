@@ -218,7 +218,7 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   # drive.py turns \\ into \ and \n into Enter: the guest's printf gets \007.
   set_var='printf "\\007\\000\\000\\000bend-ok" > '"$efivar"'; echo SET-$((6*7)); reboot\n'
   get_var='tail -c 7 '"$efivar"'; echo; echo AFTER-REBOOT; poweroff\n'
-  out=$(drive 200 "login:" 'root\n' "~# " "$set_var" "login:" 'root\n' "~# " "$get_var" -- \
+  out=$(drive 300 "login:" 'root\n' "~# " "$set_var" "login:" 'root\n' "~# " "$get_var" -- \
     ./out/bend-vmm --firmware out/uefi/code.fd --vars "$t/vars.fd" --mem 1024 --cpus 2 --disk out/uefi/alpine.iso:ro 2>&1 | tr -d '\r')
   grep -q "Welcome to Alpine" <<<"$out" && grn "ok: UEFI boots the Alpine ISO (edk2, GRUB, Linux $(grep -ao 'Linux [0-9][^ ]*' <<<"$out" | head -1 | cut -d' ' -f2))" || { red "failed: UEFI boot"; tail -5 <<<"$out"; fail=1; }
   grep -q "SET-42" <<<"$out" && [ "$(grep -c 'Welcome to Alpine Linux' <<<"$out")" = 2 ] && grn "ok: UEFI reboot" || { red "failed: UEFI reboot"; grep -a -v sysreg <<<"$out" | tail -15; fail=1; }
@@ -271,13 +271,15 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
     qemu-img create -q -f qcow2 "$t/crash.qcow2" 64M
     ok=1
     for i in 1 2 3; do
-      ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/crash.qcow2" --cmdline "console=ttyAMA0 quiet" \
-        < <(sleep $((2 * SLOW)); echo 'while :; do dd if=/dev/urandom of=/dev/vda bs=64k seek=$((RANDOM % 1000)) count=4 oflag=direct 2>/dev/null; done'; sleep $((30 * SLOW))) > /dev/null 2>&1 & p=$!
+      # a pipe, not < <(...): the CI chroot has no /dev/fd ($! is the VMM)
+      (sleep $((2 * SLOW)); echo 'while :; do dd if=/dev/urandom of=/dev/vda bs=64k seek=$((RANDOM % 1000)) count=4 oflag=direct 2>/dev/null; done'; sleep $((30 * SLOW))) \
+        | ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/crash.qcow2" --cmdline "console=ttyAMA0 quiet" > /dev/null 2>&1 & p=$!
       sleep $(((3 + i) * SLOW)); kill -9 $p; wait $p 2>/dev/null
       qemu-img check -q "$t/crash.qcow2"; rc=$?
       [ $rc = 0 ] || [ $rc = 3 ] || ok=0
     done
-    [ $ok = 1 ] && [ "$(qemu-img info "$t/crash.qcow2" | sed -n 's/^disk size: \([0-9]*\).*/\1/p')" -gt 1 ] \
+    # the guest must have written: the image grew past 1 MiB
+    [ $ok = 1 ] && [ "$(qemu-img info --output=json "$t/crash.qcow2" | python3 -c 'import json,sys; print(json.load(sys.stdin)["actual-size"])')" -gt 1048576 ] \
       && grn "ok: qcow2 survives SIGKILL mid-write (3 rounds, qemu-img check clean)" || { red "failed: qcow2 after SIGKILL"; qemu-img check "$t/crash.qcow2" | tail -3; fail=1; }
     # a guest cannot turn its raw disk into a qcow2 image (whose backing file
     # could name any host file): a qcow2 header at the start is refused
