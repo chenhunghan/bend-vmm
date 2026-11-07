@@ -53,3 +53,31 @@ law control.empty:
 
 law control.verb_case:
   {C.Ctl.parse("PAUSE") == C.CUnknown{} : C.Cmd}
+
+# Proposed: framing of what the host reads (review of a6fba53): an empty
+# line or a bare connect gets an answer and the service goes on; a line cut
+# short and a command missing its argument get their usage.
+
+law control.frame_line:
+  {C.Ctl.frame([0, 112, 97, 117, 115, 101]) == Some{C.CPause{}} : Maybe<&2, C.Cmd>}
+
+law control.frame_empty:
+  {C.Ctl.frame([0]) == Some{C.CUnknown{}} : Maybe<&2, C.Cmd>}
+
+law control.frame_too_long:
+  {C.Ctl.frame([1, 112]) == Some{C.CBad{"line too long (at most 1024 bytes)"}} : Maybe<&2, C.Cmd>}
+
+law control.frame_no_socket:
+  {C.Ctl.frame([2]) == None{} : Maybe<&2, C.Cmd>}
+
+law control.frame_nothing:
+  {C.Ctl.frame([]) == None{} : Maybe<&2, C.Cmd>}
+
+law control.snapshot_no_path:
+  {C.Ctl.parse("snapshot") == C.CBad{"usage: snapshot PATH"} : C.Cmd}
+
+law control.screendump_no_path:
+  {C.Ctl.parse("screendump  ") == C.CBad{"usage: screendump PATH"} : C.Cmd}
+
+law control.type_nothing:
+  {C.Ctl.parse("type") == C.CBad{"usage: type TEXT"} : C.Cmd}

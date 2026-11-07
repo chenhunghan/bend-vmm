@@ -7,6 +7,7 @@ import ../src/vmm/machine.bend as M
 import ../src/vmm/snapshot.bend as Snap
 import ../src/vmm/snapfile.bend as Sf
 import ../src/vmm/control.bend as Ctl
+import ../src/dev/pointer.bend as Ptr
 import ../src/net/nat.bend as Nt
 import ../src/arm64/psci.bend as Ps
 import ../src/virtio/device.bend as D
@@ -23,18 +24,19 @@ import ./version.bend as Ver
 import ../src/disk/store.bend as St
 import ../src/disk/qcow2.bend as Qc
 
-# bend-vmm: boots an arm64 Linux kernel (or a bare-metal payload) on
-# Hypervisor.framework. All machine logic is the pure src/vmm/machine.bend;
-# this file only drives it:
+# bend-vmm: boots an arm64 Linux kernel, UEFI firmware or a bare-metal
+# payload, or restores a snapshot, on Hypervisor.framework (macOS) or KVM
+# (Linux). All machine logic is the pure src/vmm/machine.bend (and the
+# snapshot file's layout src/vmm/snapfile.bend, the control protocol
+# src/vmm/control.bend, the window's input src/dev/pointer.bend); this file
+# only drives it:
 #   - one vCPU loop per CPU, each its own Bend computation (IO.spawn), whose
 #     H.Host.run parks while the guest runs, so vCPUs run in parallel;
 #   - the machine state lives in a one-slot channel, taken by the vCPU whose
 #     exit is being handled and put back after, so exits serialize;
 #   - interp runs the Vm program an exit handler answers, effect by effect.
 #
-# usage: bend-vmm --kernel Image [--initrd file] [--cmdline "..."]
-#                 [--mem MiB] [--cpus N] [--disk image]
-#        bend-vmm --payload file.bin      (bare metal: entered at RAM base)
+# usage: see usage() below (bend-vmm --help).
 
 # A VMM message on stderr, after the guest's console output so far.
 def log_err(msg: String) -> IO(Unit):
@@ -661,10 +663,7 @@ def reply_rc(+rc: U32, ok: String) -> String:
 @unsafe def power_button(+mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
   type_keys(mc, done, [In.HidKey{116, True{}}, In.HidKey{116, False{}}])
 
-# One command line (src/vmm/control.bend says which), carried out.
-@unsafe def command(+mc: Chan(M.Machine), +done: Chan(U32), line: String) -> IO(String):
-  command.run(Ctl.Ctl.parse(line), mc, done)
-
+# A control command (src/vmm/control.bend says which a line is), carried out.
 @unsafe def command.run(c: Ctl.Cmd, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(String):
   match c:
     case Ctl.CPause{}:
@@ -713,21 +712,23 @@ def reply_rc(+rc: U32, ok: String) -> String:
         return "powering down"
     case Ctl.CUnknown{}:
       IO.pure(String, Ctl.Ctl.usage())
+    case Ctl.CBad{why}:
+      IO.pure(String, why)
 
-@unsafe def ctl_loop.got(stop: Bool, +mc: Chan(M.Machine), +done: Chan(U32), bs: +List<U32>) -> IO(Unit):
-  match stop:
-    case True{}:
+@unsafe def ctl_loop.got(got: Maybe<&2, Ctl.Cmd>, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+  match got:
+    case None{}:
       IO.pure(Unit, Unit{})
-    case False{}:
+    case Some{c}:
       do IO<Unit>:
-        r : String <- command(mc, done, Fs.Fs.chars(bs))
+        r : String <- command.run(c, mc, done)
         _ : U32 <- H.Hvf.ctl_reply(r)
         ctl_loop(mc, done)
 
 @unsafe def ctl_loop(+mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
   do IO<Unit>:
-    +bs : +List<U32> <- H.Hvf.ctl_next()
-    ctl_loop.got(List.is_empty(&2, U32, bs), mc, done, bs)
+    bs : +List<U32> <- H.Hvf.ctl_next()
+    ctl_loop.got(Ctl.Ctl.frame(bs), mc, done)
 
 # A console escape: p toggles pause, s snapshots to ./bend-vmm.snap, h
 # prints the keys.
@@ -888,46 +889,33 @@ def reply_rc(+rc: U32, ok: String) -> String:
 # virtio keyboard (as Linux key codes, Km.Keymap.linux), the pointer and its
 # buttons to the virtio tablet; closing the window stops the VM. The window
 # is w x h points, one per framebuffer pixel.
-# A window coordinate (0..size-1) on the tablet's 0..32767 scale.
-def display.scale(+v: U32, +size: U32) -> U32:
-  ((v * 32767 : U32) / Bool.pick(U32, U32.is_lt(size, 2), 1, (size - 1 : U32)) : U32)
 
-# A pointer's position (pixels from the window's top left, past its edge
-# while a button holds it) as a window coordinate, 0..size-1.
-def display.coord(+v: F32, +size: U32) -> U32:
-  +p = Bool.pick(U32, F32.is_lt(v, 0.0), 0, F32.to_u32(v))
-  Bool.pick(U32, U32.is_lt(p, size), p, Bool.pick(U32, U32.is_zero(size), 0, (size - 1 : U32)))
+def display.is_close(ev: Event) -> Bool:
+  match ev:
+    case Close{}:
+      True{}
+    case _:
+      False{}
 
-# A W3C button (0 main, 1 middle, 2 right, 3 back, 4 forward) as the
-# tablet's (0 left, 1 right, 2 middle, 3 side, 4 extra: BTN_LEFT + b).
-def display.button(+b: U32) -> U32:
-  Bool.pick(U32, U32.is_eq(b, 1), 2, Bool.pick(U32, U32.is_eq(b, 2), 1, b))
-
+# Each window event as keyboard and tablet reports (src/dev/pointer.bend);
+# closing the window stops the VM.
 @unsafe def display.events(+mc: Chan(M.Machine), +done: Chan(U32), +w: U32, +h: U32, evs: List<Event>) -> IO(Bool):
   match evs:
     case Nil{}:
       IO.pure(Bool, False{})
-    case Con{ev, rest}:
-      match ev:
-        case Close{}:
-          do IO<Bool>:
-            _ : Result<&1, &1, U32, Unit> <- Chan.send(U32, done, 0)
-            return True{}
-        case Key{code, down}:
-          do IO<Bool>:
-            display.hid(mc, done, In.HidKey{Km.Keymap.linux(code), down})
-            display.events(mc, done, w, h, rest)
-        case Press{id, tool, x, y, time, b, down}:
-          do IO<Bool>:
-            display.hid(mc, done, In.HidMove{display.scale(display.coord(x, w), w), display.scale(display.coord(y, h), h)})
-            display.hid(mc, done, In.HidButton{display.button(b), down})
-            display.events(mc, done, w, h, rest)
-        case Move{id, tool, x, y, time}:
-          do IO<Bool>:
-            display.hid(mc, done, In.HidMove{display.scale(display.coord(x, w), w), display.scale(display.coord(y, h), h)})
-            display.events(mc, done, w, h, rest)
-        case _:
-          display.events(mc, done, w, h, rest)
+    case Con{+ev, rest}:
+      display.event(display.is_close(ev), mc, done, w, h, ev, rest)
+
+@unsafe def display.event(close: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +w: U32, +h: U32, ev: Event, rest: List<Event>) -> IO(Bool):
+  match close:
+    case True{}:
+      do IO<Bool>:
+        _ : Result<&1, &1, U32, Unit> <- Chan.send(U32, done, 0)
+        return True{}
+    case False{}:
+      do IO<Bool>:
+        type_keys(mc, done, Ptr.Ptr.hids(ev, w, h))
+        display.events(mc, done, w, h, rest)
 
 @unsafe def display.loop(+mc: Chan(M.Machine), +done: Chan(U32), +w: U32, +h: U32, win: Window) -> IO(Unit):
   do IO<Unit>:
@@ -1792,9 +1780,10 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     +st : +List<U32> <- H.Hvf.snap_open(path)
     die_if(U32.is_ne(H.Host.first(st), 0), "cannot read the snapshot (" ++ U32.show(H.Host.first(st)) ++ ")")
     hb : +List<U32> <- H.Hvf.snap_peek(0, 0, 40)
-    _ : Sf.Layout <- snap.start(Sf.Snapf.head(Sf.Snapf.word(st, 1n), hb), Sf.Snapf.u64_at(st, 2n))
+    +l : Sf.Layout <- snap.start(Sf.Snapf.head(Sf.Snapf.word(st, 1n), hb), Sf.Snapf.u64_at(st, 2n))
     saved : List<String> <- H.Hvf.snap_args()
     +o : Opts = restore.opts(saved, now)
+    die_if(Bool.not(Sf.Snapf.agrees(l, ram(), Opts.mem(o), Opts.cpus(o))), "the snapshot's header does not match the machine its command line makes")
     +why : String = restore.differs(o, now)
     die_if(Bool.not(String.is_empty(why)), why)
     +vm : U32 <- H.Host.vm_init(Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), ram(), Opts.cpus(o))

@@ -96,3 +96,36 @@ def L.snapfile.plan_of_sizes():
 
 def L.snapfile.plan_of_short():
   {==}
+
+def L.snapfile.head_at_limits():
+  {==}
+
+def L.snapfile.head_ram_one():
+  {==}
+
+def L.snapfile.need_gic_most():
+  {==}
+
+def L.snapfile.need_cpu_most():
+  {==}
+
+def L.snapfile.plan_of_stray_word():
+  {==}
+
+def L.snapfile.plan_of_none_cpus():
+  {==}
+
+def L.snapfile.agrees():
+  {==}
+
+def L.snapfile.agrees_fewer_cpus_started():
+  {==}
+
+def L.snapfile.agrees_too_many_cpus():
+  {==}
+
+def L.snapfile.agrees_other_ram():
+  {==}
+
+def L.snapfile.agrees_other_base():
+  {==}

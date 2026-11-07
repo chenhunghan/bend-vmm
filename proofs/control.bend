@@ -52,3 +52,27 @@ def L.control.empty():
 def L.control.verb_case():
   {==}
 
+def L.control.frame_line():
+  {==}
+
+def L.control.frame_empty():
+  {==}
+
+def L.control.frame_too_long():
+  {==}
+
+def L.control.frame_no_socket():
+  {==}
+
+def L.control.frame_nothing():
+  {==}
+
+def L.control.snapshot_no_path():
+  {==}
+
+def L.control.screendump_no_path():
+  {==}
+
+def L.control.type_nothing():
+  {==}
+

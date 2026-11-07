@@ -196,8 +196,11 @@ def Snapf.plan_of.pick(ok: Bool, p: Maybe<&2, +List<Piece>>) -> Maybe<&2, +List<
 # base, RAM size, argv length, word count, GIC length (each hi, lo), vCPUs,
 # then each vCPU's blob length (hi, lo)].
 def Snapf.plan_of(+ws: +List<U32>) -> Maybe<&2, +List<Piece>>:
-  +cs = Snapf.lens(List.drop(&2, U32, ws, 12n))
+  +tail = List.drop(&2, U32, ws, 12n)
+  +cs = Snapf.lens(tail)
+  # exactly two words per vCPU: a stray word is a malformed answer
   +ok = U32.is_eq(U32.from_nat(List.length(&2, U.U64, cs)), Snapf.word(ws, 11n))
+    && U32.is_eq(U32.from_nat(List.length(&2, U32, tail)), (2 * Snapf.word(ws, 11n) : U32))
   Snapf.plan_of.pick(ok, Snapf.plan(Snapf.word(ws, 0n), Snapf.u64_at(ws, 1n), Snapf.u64_at(ws, 3n), Snapf.u64_at(ws, 5n), Snapf.u64_at(ws, 7n), Snapf.u64_at(ws, 9n), cs))
 
 # Reading
@@ -273,6 +276,15 @@ def Snapf.fits(l: Layout, +size: U.U64) -> Bool:
   match l:
     case Layout{Head{v, n, b, r, a}, ao, wo, nw, go, ng, cs, ro}:
       U.U64.is_le(U.U64.add(ro, r), size)
+
+# The header describes the machine the snapshot's own command line makes:
+# its RAM at base, mem MiB of it, and at most cpus vCPUs (a vCPU never
+# started is not saved). A snapshot is a file from elsewhere: the host maps
+# RAM by the header, so it must agree.
+def Snapf.agrees(l: Layout, +base: U.U64, +mem: U32, +cpus: U32) -> Bool:
+  match l:
+    case Layout{Head{v, n, b, r, a}, ao, wo, nw, go, ng, cs, ro}:
+      U.U64.is_eq(b, base) && U.U64.is_eq(r, U.U64.shl(20n, U.U64{0, mem})) && U32.is_le(n, cpus)
 
 # Wire forms for the host
 # =======================

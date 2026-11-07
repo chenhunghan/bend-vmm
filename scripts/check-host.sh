@@ -179,6 +179,21 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   # than the snapshot was taken with is refused
   out=$(./out/bend-vmm --restore "$t/vm.snap" --share "$t" 2>&1 < /dev/null)
   grep -q "taken without --share" <<<"$out" && grn "ok: restore refuses host paths the snapshot was not taken with" || { red "failed: restore path check"; tail -3 <<<"$out"; fail=1; }
+  # malformed snapshots (src/vmm/snapfile.bend refuses them) end the VMM
+  # with an error, never a crash: a cut header, RAM cut short, 65 vCPUs, a
+  # machine word count past 2^26
+  head -c 30 "$t/vm.snap" > "$t/bad1.snap"
+  head -c 1048576 "$t/vm.snap" > "$t/bad2.snap"
+  head -c 65536 "$t/vm.snap" > "$t/bad3.snap"; printf 'A' | dd of="$t/bad3.snap" bs=1 seek=12 conv=notrunc 2>/dev/null
+  head -c 65536 "$t/vm.snap" > "$t/bad4.snap"
+  nargs=$(od -An -tu4 -j32 -N4 "$t/vm.snap" | tr -d ' ')
+  printf '\377\377\377\377' | dd of="$t/bad4.snap" bs=1 seek=$((40 + nargs)) conv=notrunc 2>/dev/null
+  ok=1
+  for b in 1 2 3 4; do
+    out=$(./out/bend-vmm --restore "$t/bad$b.snap" 2>&1 < /dev/null); code=$?
+    [ $code = 1 ] && grep -q "cannot read the snapshot (22)" <<<"$out" || { ok=0; echo "bad$b: exit $code: $(tail -1 <<<"$out")"; }
+  done
+  [ $ok = 1 ] && grn "ok: restore refuses malformed snapshots (cut header, RAM cut short, 65 vCPUs, 2^32 machine words)" || { red "failed: malformed snapshots"; fail=1; }
   # SIGTERM, and the control socket's powerdown, press the guest's power
   # button (the virtio keyboard's KEY_POWER): the guest powers off
   for how in sigterm powerdown; do

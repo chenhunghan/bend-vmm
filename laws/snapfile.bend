@@ -130,3 +130,42 @@ law snapfile.plan_of_sizes:
 
 law snapfile.plan_of_short:
   {S.Snapf.plan_of([1, 0, 1073741824, 0, 536870912, 0, 2, 0, 10, 0, 64, 2, 0, 100]) == None{} : Maybe<&2, +List<S.Piece>>}
+
+# Proposed: bounds at their limits are accepted, and a stray word in the
+# host's sizes is refused (review of a6fba53).
+
+law snapfile.head_at_limits:
+  {S.Snapf.head(1, S.Snapf.head_bytes(S.Head{1, 64, w(0), U.U64{256, 0}, w(1048576)})) == Some{S.Head{1, 64, w(0), U.U64{256, 0}, w(1048576)}} : Maybe<&2, S.Head>}
+
+law snapfile.head_ram_one:
+  {S.Snapf.head(1, S.Snapf.head_bytes(S.Head{1, 1, w(0), w(1), w(0)})) == Some{S.Head{1, 1, w(0), w(1), w(0)}} : Maybe<&2, S.Head>}
+
+law snapfile.need_gic_most:
+  {S.Snapf.need(head(), [w(10), w(16777216)]) == S.NRead{w(16777314)} : S.Need}
+
+law snapfile.need_cpu_most:
+  {S.Snapf.need(head(), [w(10), w(64), w(1048576)]) == S.NRead{w(1048746)} : S.Need}
+
+law snapfile.plan_of_stray_word:
+  {S.Snapf.plan_of([1, 0, 1073741824, 0, 536870912, 0, 2, 0, 10, 0, 64, 2, 0, 100, 0, 0, 7]) == None{} : Maybe<&2, +List<S.Piece>>}
+
+law snapfile.plan_of_none_cpus:
+  {S.Snapf.plan_of([1, 0, 1073741824, 0, 536870912, 0, 2, 0, 10, 0, 64, 0]) == S.Snapf.plan(1, w(1073741824), w(536870912), w(2), w(10), w(64), []) : Maybe<&2, +List<S.Piece>>}
+
+# Proposed: the header must describe the machine the snapshot's command
+# line makes (review of a6fba53).
+
+law snapfile.agrees:
+  {S.Snapf.agrees(layout(), w(1073741824), 512, 2) == True{} : Bool}
+
+law snapfile.agrees_fewer_cpus_started:
+  {S.Snapf.agrees(layout(), w(1073741824), 512, 4) == True{} : Bool}
+
+law snapfile.agrees_too_many_cpus:
+  {S.Snapf.agrees(layout(), w(1073741824), 512, 1) == False{} : Bool}
+
+law snapfile.agrees_other_ram:
+  {S.Snapf.agrees(layout(), w(1073741824), 1024, 2) == False{} : Bool}
+
+law snapfile.agrees_other_base:
+  {S.Snapf.agrees(layout(), w(0), 512, 2) == False{} : Bool}

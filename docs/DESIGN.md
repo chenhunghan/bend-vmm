@@ -67,7 +67,8 @@ levels. The arch timer is the guest's virtual timer (PPI 27).
 
 - One pthread per vCPU, created by C. A vCPU must be run, and its registers
   read and written, on the thread that created it. The Bend effect
-  `Vcpu.run(cpu)` posts a request to that thread and parks on a pipe with
+  `Hvf.vcpu(cpu, op, ...)` (host/hvf.bend, called by `Host.run`) posts a
+  request to that thread and parks on a pipe with
   `io_wait_on`, so the Bend event loop stays free and several vCPUs run at
   once (one `IO.fork` per vCPU).
 - Guest RAM is one `mmap` region mapped with `hv_vm_map`. File loading
@@ -140,7 +141,7 @@ run on every exit with little work per side (`Trap.decode` was one: the
 exit got that much faster without it), and give recursive splits a size
 floor (`Csum.small`, `Tcp.small`).
 
-## Status (2026-10-28)
+## Status (2026-11-07)
 
 - Every module in `src/` is implemented and proven (`bend PROOF.bend`: ALL
   PROOFS CHECK; `VERDICT=1 scripts/check.sh` re-checks the done modules with
@@ -185,10 +186,19 @@ floor (`Csum.small`, `Tcp.small`).
   WFI wake (a disk request from vCPU 1: ~100 µs against ~21 µs on vCPU 0).
 - No sandbox: the VMM runs with the user's rights.
 - Less C: the snapshot file's layout (src/vmm/snapfile.bend: the host
-  writes and reads byte ranges where it says) and the control protocol
-  (src/vmm/control.bend) are pure Bend with laws now; the escape keys and
-  address mapping already were. Still decided in C: the NAT's host-side
-  send buffers (caps, stall and linger timers, the UDP flow table), which
-  run on socket readiness inside the event loop (moving them must not add an
-  effect round trip per send), and the vCPU register and vGIC blobs
-  (opaque, per hypervisor).
+  writes and reads byte ranges where it says, with its own memory-safety
+  caps), the control protocol and its framing (src/vmm/control.bend) and
+  the display window's input (src/dev/pointer.bend) are pure Bend with
+  laws now; the escape keys and address mapping already were. Still
+  decided in C: the NAT's host-side send buffers (caps, stall and linger
+  timers, the UDP flow table), which run on socket readiness inside the
+  event loop (moving them must not add an effect round trip per send), the
+  read-only fallback of a disk the user cannot write (host/hvf.c opens it
+  read-only, Bend still offers it writable), and the vCPU register and vGIC
+  blobs (opaque, per hypervisor). Unproven Bend in host/main.bend: option
+  parsing (an unknown flag or a bad number is ignored), --forward specs,
+  restore policy. Snapshots are written in place (a failed write loses the
+  file it replaces). Moving any of it: A/B scripts/bench.sh interleaved,
+  since Bend compiles the program as one state machine and even a changed
+  signature on the restore path (restore.machine) slowed every exit by
+  ~0.3 us.

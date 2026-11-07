@@ -2,7 +2,8 @@
 // Hypervisor.framework on macOS and KVM on Linux (the "Backends" section;
 // everything else is shared POSIX code).
 //
-// One VM per process. Guest RAM is one anonymous mapping at a fixed IPA.
+// One VM per process. Guest RAM is one mapping at a fixed IPA: anonymous,
+// or private (copy-on-write) from the snapshot a restore starts from.
 // Each vCPU lives on its own pthread, because Hypervisor.framework only
 // lets the creating thread run a vCPU or touch its registers. A Bend effect
 // on a vCPU posts a request to that thread and parks on the thread's pipe
@@ -894,14 +895,15 @@ static void hvf_service(HvfCpu* c) {
 }
 
 // A snapshot being restored: per-vCPU register blobs, the GIC state and the
-// machine words, read by Hvf.snap_open; RAM maps straight from the file.
+// machine words, read by Hvf.snap_load where src/vmm/snapfile.bend lays them
+// out; RAM maps straight from the file (fd).
 static struct {
   int       active;
   int       fd;
   uint32_t  ncpus;
   uint64_t  ram_base, ram_size, ram_off;
-  uint8_t*  cpu[64];
-  size_t    ncpu[64];
+  uint8_t*  cpu[HVF_MAX_CPUS];
+  size_t    ncpu[HVF_MAX_CPUS];
   uint8_t*  gic;
   size_t    ngic;
   uint32_t* words;
@@ -910,8 +912,14 @@ static struct {
   uint64_t  nargs;
 } hvf_snap;
 
+// Memory-safety limits on what the host reads from a snapshot, past every
+// bound src/vmm/snapfile.bend decides (its largest part is 2^28 bytes of
+// machine words; RAM is at most 2^40 bytes at an offset below 2^29).
+#define HVF_SNAP_MAX_PART ((uint64_t)1 << 28)
+#define HVF_SNAP_MAX_OFF  ((uint64_t)1 << 42)
+
 static void hvf_restore_cpu(HvfCpu* c, int cpu) {
-  if (hvf_snap.active && cpu < 64 && hvf_snap.cpu[cpu]) {
+  if (hvf_snap.active && cpu >= 0 && cpu < HVF_MAX_CPUS && hvf_snap.cpu[cpu]) {
     hvf_load_regs(c, hvf_snap.cpu[cpu], hvf_snap.ncpu[cpu]);
     c->icc  = hvf_snap.cpu[cpu];
     c->nicc = hvf_snap.ncpu[cpu];
@@ -3714,91 +3722,128 @@ Term hvf_snap_commit_run(Env e, Term* f, IoWork* w) {
   return (Term)(u32)err;
 }
 
+// The snapshot being read for a restore (-1: none). It becomes hvf_snap.fd,
+// which RAM maps from, only once Hvf.snap_load has read every part.
+static int hvf_snap_rfd = -1;
+
 // Hvf.snap_open(path) -> List<U32>: opens a snapshot for a restore;
 // Hvf.snap_peek and Hvf.snap_load read it where src/vmm/snapfile.bend says.
-// [0, this host's snapshot version, the file's size (hi, lo)], or [errno].
+// [0, this host's snapshot version, the file's size (hi, lo)], or [errno]
+// (EBUSY once a snapshot is restored).
 Term hvf_snap_open_run(Env e, Term* f, IoWork* w) {
   u64         n;
   char*       path = io_cstr(e, f[0], &n);
-  int         fd   = open(path, O_RDONLY | O_CLOEXEC);
+  int         fd   = hvf_snap.active ? -1 : open(path, O_RDONLY | O_CLOEXEC);
   struct stat st;
   free(path);
   if (fd < 0 || fstat(fd, &st) != 0) {
-    uint32_t err = (uint32_t)errno;
+    uint32_t err = hvf_snap.active ? EBUSY : (uint32_t)errno;
     if (fd >= 0) {
       close(fd);
     }
     return hvf_words(e, &err, 1);
   }
-  if (hvf_snap.fd > 0) {
-    close(hvf_snap.fd);
+  if (hvf_snap_rfd >= 0) {
+    close(hvf_snap_rfd);
   }
-  hvf_snap.fd    = fd;
+  hvf_snap_rfd   = fd;
   uint64_t sz    = (uint64_t)st.st_size;
   uint32_t ws[4] = {0, HVF_SNAP_VER, (uint32_t)(sz >> 32), (uint32_t)sz};
   return hvf_words(e, ws, 4);
 }
 
 // Hvf.snap_peek(off_hi, off_lo, len) -> List<U32>: up to len (at most 64)
-// bytes of the open snapshot at the offset; short at its end.
+// bytes of the open snapshot at the offset; short at its end ([] when none
+// is open).
 Term hvf_snap_peek_run(Env e, Term* f, IoWork* w) {
   uint8_t  b[64];
   uint32_t len = (u32)f[2] < sizeof b ? (u32)f[2] : (uint32_t)sizeof b;
-  ssize_t  k   = pread(hvf_snap.fd, b, len, (off_t)hvf_u64(f[0], f[1]));
+  uint64_t off = hvf_u64(f[0], f[1]);
+  ssize_t  k   = hvf_snap_rfd >= 0 && off <= HVF_SNAP_MAX_OFF ? pread(hvf_snap_rfd, b, len, (off_t)off) : -1;
   return io_list(e, (const char*)b, k > 0 ? (u64)k : 0);
 }
 
-// A part the load reads: (offset, length) from w at *i, into a new buffer
-// (with room for one more byte); 0, or -1.
+// A part the load reads: (offset, length) from ws at *i, into a new buffer
+// (with room for one more byte); 0, or -1. Bend's layout already bounds
+// every part (src/vmm/snapfile.bend); the host refuses a length past the
+// largest part (2^28 bytes of machine words) or an offset that could wrap
+// anyway, so its memory safety does not rest on that alone.
 static int hvf_snap_part(const uint32_t* ws, u64 n, u64* i, uint8_t** out, uint64_t* len) {
+  *out = NULL;
   if (*i + 4 > n) {
     return -1;
   }
   uint64_t off = ((uint64_t)ws[*i] << 32) | ws[*i + 1];
   *len         = ((uint64_t)ws[*i + 2] << 32) | ws[*i + 3];
   *i += 4;
+  if (*len > HVF_SNAP_MAX_PART || off > HVF_SNAP_MAX_OFF) {
+    return -1;
+  }
   *out = malloc(*len + 1);
-  return *out && hvf_pread_all(hvf_snap.fd, *out, *len, (off_t)off) == 0 ? 0 : -1;
+  return *out && hvf_pread_all(hvf_snap_rfd, *out, *len, (off_t)off) == 0 ? 0 : -1;
 }
 
 // Hvf.snap_load(layout) -> U32: reads argv, the machine words, the GIC
 // state and the vCPU blobs where the layout (Snapf.load.wire) puts them;
-// RAM maps later, by Hvf.init. 0, or an errno.
+// RAM maps later, by Hvf.init. 0, or an errno; nothing of a failed load is
+// kept.
 Term hvf_snap_load_run(Env e, Term* f, IoWork* w) {
-  u64       n;
-  uint32_t* ws = hvf_u32s(e, f[0], &n);
-  u64       i  = 6;
-  uint8_t * args = NULL, *words = NULL, *gic = NULL;
-  uint64_t  nargs = 0, nw = 0, ngic = 0;
-  int       bad = n < 19 || hvf_snap_part(ws, n, &i, &args, &nargs) || hvf_snap_part(ws, n, &i, &words, &nw)
-    || hvf_snap_part(ws, n, &i, &gic, &ngic);
-  hvf_snap.args   = (char*)args;
-  hvf_snap.nargs  = nargs;
-  hvf_snap.words  = (uint32_t*)words;
-  hvf_snap.nwords = nw / 4;
-  hvf_snap.gic    = gic;
-  hvf_snap.ngic   = (size_t)ngic;
+  u64         n;
+  uint32_t*   ws = hvf_u32s(e, f[0], &n);
+  u64         i  = 6;
+  uint8_t *   args = NULL, *words = NULL, *gic = NULL;
+  uint8_t*    cpu[HVF_MAX_CPUS] = {0};
+  size_t      ncpu[HVF_MAX_CPUS] = {0};
+  uint64_t    nargs = 0, nw = 0, ngic = 0, ram_size = 0, ram_off = 0;
+  uint32_t    ncpus = 0;
+  struct stat st;
+  int         bad = hvf_snap_rfd < 0 || hvf_snap.active || n < 19 || hvf_snap_part(ws, n, &i, &args, &nargs)
+    || hvf_snap_part(ws, n, &i, &words, &nw) || hvf_snap_part(ws, n, &i, &gic, &ngic);
   if (!bad) {
-    hvf_snap.ram_base             = ((uint64_t)ws[0] << 32) | ws[1];
-    hvf_snap.ram_size             = ((uint64_t)ws[2] << 32) | ws[3];
-    hvf_snap.ram_off              = ((uint64_t)ws[4] << 32) | ws[5];
-    hvf_snap.args[hvf_snap.nargs] = 0;
-    hvf_snap.ncpus                = ws[i++];
-    bad                           = hvf_snap.ncpus > HVF_MAX_CPUS || i + 4 * (u64)hvf_snap.ncpus != n;
+    ram_size = ((uint64_t)ws[2] << 32) | ws[3];
+    ram_off  = ((uint64_t)ws[4] << 32) | ws[5];
+    ncpus    = ws[i++];
+    // RAM maps from the file at ram_off: page-aligned, and all of it there
+    // (a short file would fault the VMM on the first touch past its end)
+    bad = ncpus > HVF_MAX_CPUS || i + 4 * (u64)ncpus != n || nw % 4 != 0 || ram_size == 0
+      || ram_size > HVF_SNAP_MAX_OFF || ram_off > HVF_SNAP_MAX_OFF || ram_off % 16384 != 0
+      || fstat(hvf_snap_rfd, &st) != 0 || (uint64_t)st.st_size < ram_off + ram_size;
   }
-  for (uint32_t c = 0; !bad && c < hvf_snap.ncpus; c++) {
+  for (uint32_t c = 0; !bad && c < ncpus; c++) {
     uint64_t len = 0;
-    bad              = hvf_snap_part(ws, n, &i, &hvf_snap.cpu[c], &len);
-    hvf_snap.ncpu[c] = (size_t)len;
+    bad          = hvf_snap_part(ws, n, &i, &cpu[c], &len);
+    ncpu[c]      = (size_t)len;
     if (!bad && len == 0) {
-      free(hvf_snap.cpu[c]);
-      hvf_snap.cpu[c] = NULL;
+      free(cpu[c]);
+      cpu[c] = NULL;
     }
   }
-  free(ws);
   if (bad) {
+    free(ws);
+    free(args);
+    free(words);
+    free(gic);
+    for (uint32_t c = 0; c < HVF_MAX_CPUS; c++) {
+      free(cpu[c]);
+    }
     return (Term)(u32)EINVAL;
   }
+  hvf_snap.ram_base = ((uint64_t)ws[0] << 32) | ws[1];
+  hvf_snap.ram_size = ram_size;
+  hvf_snap.ram_off  = ram_off;
+  free(ws);
+  args[nargs]       = 0;
+  hvf_snap.args     = (char*)args;
+  hvf_snap.nargs    = nargs;
+  hvf_snap.words    = (uint32_t*)words;
+  hvf_snap.nwords   = nw / 4;
+  hvf_snap.gic      = gic;
+  hvf_snap.ngic     = (size_t)ngic;
+  hvf_snap.ncpus    = ncpus;
+  memcpy(hvf_snap.cpu, cpu, sizeof cpu);
+  memcpy(hvf_snap.ncpu, ncpu, sizeof ncpu);
+  hvf_snap.fd     = hvf_snap_rfd;
+  hvf_snap_rfd    = -1;
   hvf_snap.active = 1;
 #ifdef __APPLE__
   hvf_restore_now = mach_absolute_time();
@@ -3910,7 +3955,9 @@ static Term hvf_ctl_accept(Env e, IoWork* w) {
   return hvf_ctl_line(e, w);
 }
 
-// Reads one line from the client into w->data.
+// Reads one line from the client into w->data after its status byte: 0, or
+// 1 when HVF_CTL_LINE bytes came with no end of line.
+#define HVF_CTL_LINE 1024
 static Term hvf_ctl_line(Env e, IoWork* w) {
   char ch;
   for (;;) {
@@ -3923,23 +3970,31 @@ static Term hvf_ctl_line(Env e, IoWork* w) {
       }
       return io_wait_on(w, hvf_ctl_client, POLLIN, hvf_ctl_deadline, hvf_ctl_line);
     }
-    if (k <= 0 || ch == '\n' || w->made >= 1023) {
+    if (k <= 0 || ch == '\n') {
       break;
     }
-    w->data[w->made++] = ch;
+    if (w->made >= HVF_CTL_LINE) {
+      w->data[0] = 1;
+      break;
+    }
+    w->data[1 + w->made++] = ch;
   }
-  Term t = io_list(e, w->data, (u64)w->made);
+  Term t = io_list(e, w->data, 1 + (u64)w->made);
   free(w->data);
   return t;
 }
 
 // Hvf.ctl_next() -> List<U32>: parks until a client connects and sends a
-// line; the line's bytes. The client stays open for Hvf.ctl_reply.
+// line; [0, the line's bytes...], [1, ...] for a line cut at HVF_CTL_LINE
+// bytes, or [2] with no control socket (src/vmm/control.bend, Ctl.frame).
+// The client stays open for Hvf.ctl_reply.
 Term hvf_ctl_next_run(Env e, Term* f, IoWork* w) {
   if (hvf_ctl_fd < 0) {
-    return term_pak(CID(Nil), 0);
+    uint32_t none = 2;
+    return hvf_words(e, &none, 1);
   }
-  w->data = io_mem(malloc(1024));
+  w->data    = io_mem(malloc(1 + HVF_CTL_LINE));
+  w->data[0] = 0;
   return hvf_ctl_accept(e, w);
 }
 
@@ -4445,6 +4500,26 @@ typedef struct {
   u32  cap;
 } HvfWinQueue;
 
+// The window view's event queue, once its layout is checked against
+// HvfWinQueue (the ivar's type encoding names the fields); NULL, said once
+// on stderr, when this Bend's window keeps its events otherwise: the window
+// then takes no keys or pointer (screendump, type and pointer still work).
+static Ivar hvf_win_queue(NSView* view) {
+  static int checked, ok;
+  Ivar       iv = class_getInstanceVariable([view class], "q");
+  if (!checked) {
+    const char* enc    = iv ? ivar_getTypeEncoding(iv) : NULL;
+    const char* expect = "{?=\"evs\"^I\"n\"I\"cap\"I";
+    ok                 = enc && strncmp(enc, expect, strlen(expect)) == 0;
+    checked            = 1;
+    if (!ok) {
+      fprintf(stderr, "bend-vmm: this Bend's window keeps its events in a form the host does not know (%s);"
+                      " the window takes no input\n", enc ? enc : "no queue");
+    }
+  }
+  return ok ? iv : NULL;
+}
+
 static Term hvf_event(Env e, const u32* ev) {
   if (ev[0] == CID(Text)) {
     const char* s = (const char*)(ev + 1);
@@ -4512,7 +4587,7 @@ Term hvf_fb_present_run(Env e, Term* f, IoWork* w) {
         [cb commit];
       }
     }
-    Ivar iv = class_getInstanceVariable([view class], "q");
+    Ivar iv = hvf_win_queue(view);
     if (iv == NULL) {
       list = term_pak(CID(Nil), 0);
     } else {
