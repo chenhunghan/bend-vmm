@@ -51,7 +51,7 @@ sockets and guest memory where Bend tells it to.
 Hosts: macOS 15+ on Apple Silicon, or Linux on arm64 with `/dev/kvm`
 (kernel 6.7+). Tagged releases publish binaries for both (see Releases below).
 
-To build: Bend 2.0.39 (`curl -fsSL https://bend-lang.com/install.sh | sh`),
+To build: Bend 2.0.40 (`curl -fsSL https://bend-lang.com/install.sh | sh`),
 and Xcode Command Line Tools on macOS or clang (plus `libx11-dev` for
 `--display`) on Linux.
 

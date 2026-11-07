@@ -33,3 +33,5 @@ import ./laws/pflash.bend as Laws_pflash
 import ./laws/qcow2.bend as Laws_qcow2
 import ./laws/escape.bend as Laws_escape
 import ./laws/addr.bend as Laws_addr
+import ./laws/snapfile.bend as Laws_snapfile
+import ./laws/control.bend as Laws_control

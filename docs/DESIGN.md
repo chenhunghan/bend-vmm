@@ -184,6 +184,11 @@ floor (`Csum.small`, `Tcp.small`).
 - A vCPU waiting on another's interrupt pays Hypervisor.framework's ~80 µs
   WFI wake (a disk request from vCPU 1: ~100 µs against ~21 µs on vCPU 0).
 - No sandbox: the VMM runs with the user's rights.
-- Less C: the host layer's remaining decisions (the console's escape keys,
-  the control protocol, address mapping, the snapshot file layout) can move
-  into Bend, leaving C as system calls.
+- Less C: the snapshot file's layout (src/vmm/snapfile.bend: the host
+  writes and reads byte ranges where it says) and the control protocol
+  (src/vmm/control.bend) are pure Bend with laws now; the escape keys and
+  address mapping already were. Still decided in C: the NAT's host-side
+  send buffers (caps, stall and linger timers, the UDP flow table), which
+  run on socket readiness inside the event loop (moving them must not add an
+  effect round trip per send), and the vCPU register and vGIC blobs
+  (opaque, per hypervisor).

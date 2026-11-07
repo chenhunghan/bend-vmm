@@ -22,7 +22,8 @@ import ../disk/qcow2.bend as Qc
 # and the format version 4 (2 added the UEFI flash state, 3 the NAT's flow
 # control, 4 vsock's host-held data counts); lists and strings are length-prefixed; a sum type
 # writes its constructor's index first. The host stores this next to guest
-# RAM, vCPU registers and the GIC state (host/hvf.c, "Snapshots").
+# RAM, vCPU registers and the GIC state, as src/vmm/snapfile.bend lays the
+# file out.
 
 def Snap.magic() -> U32:
   1112428109

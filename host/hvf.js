@@ -61,8 +61,12 @@ io_eff(CID(Hvf.fs), () => ({ $: CID(Con), head: 1, tail: { $: CID(Con), head: 78
 io_eff(CID(Hvf.pause), hvf_unavailable);
 io_eff(CID(Hvf.resume), hvf_unavailable);
 io_eff(CID(Hvf.pause_state), () => ({ $: CID(Nil) }));
-io_eff(CID(Hvf.snap_write), hvf_unavailable);
-io_eff(CID(Hvf.snap_open), hvf_unavailable);
+io_eff(CID(Hvf.snap_save), () => ({ $: CID(Nil) }));
+io_eff(CID(Hvf.snap_commit), hvf_unavailable);
+io_eff(CID(Hvf.snap_drop), hvf_unavailable);
+io_eff(CID(Hvf.snap_peek), () => ({ $: CID(Nil) }));
+io_eff(CID(Hvf.snap_load), hvf_unavailable);
+io_eff(CID(Hvf.snap_open), () => ({ $: CID(Con), head: 4294967295, tail: { $: CID(Nil) } }));
 io_eff(CID(Hvf.snap_info), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.snap_args), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.snap_machine), () => ({ $: CID(Nil) }));

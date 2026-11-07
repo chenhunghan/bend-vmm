@@ -5,6 +5,8 @@ import ../src/vmm/abi.bend as V
 import ../src/vmm/layout.bend as L
 import ../src/vmm/machine.bend as M
 import ../src/vmm/snapshot.bend as Snap
+import ../src/vmm/snapfile.bend as Sf
+import ../src/vmm/control.bend as Ctl
 import ../src/net/nat.bend as Nt
 import ../src/arm64/psci.bend as Ps
 import ../src/virtio/device.bend as D
@@ -611,13 +613,25 @@ def resume_if(was_running: Bool) -> IO(Unit):
     case False{}:
       IO.pure(Unit, Unit{})
 
+# Writes what Hvf.snap_save holds as src/vmm/snapfile.bend lays it out;
+# EFBIG (27) when a loader would refuse the file.
+def snap.commit(path: String, plan: Maybe<&2, +List<Sf.Piece>>) -> IO(U32):
+  match plan:
+    case None{}:
+      do IO<U32>:
+        _ : U32 <- H.Hvf.snap_drop()
+        return 27
+    case Some{ps}:
+      H.Hvf.snap_commit(path, Sf.Snapf.pieces.wire(ps))
+
 # Pauses (if running), writes the snapshot while holding the machine, and
 # resumes if it was running. Answers 0 or an errno.
 @unsafe def snapshot(+mc: Chan(M.Machine), path: String) -> IO(U32):
   do IO<U32>:
     +was : U32 <- pause_vm()
     +m : M.Machine <- take(mc)
-    rc : U32 <- H.Hvf.snap_write(path, Snap.Snap.encode(m))
+    +sizes : +List<U32> <- H.Hvf.snap_save(Snap.Snap.encode(m))
+    rc : U32 <- snap.commit(path, Sf.Snapf.plan_of(sizes))
     put(mc, m)
     resume_if(U32.is_zero(was))
     return rc
@@ -647,114 +661,58 @@ def reply_rc(+rc: U32, ok: String) -> String:
 @unsafe def power_button(+mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
   type_keys(mc, done, [In.HidKey{116, True{}}, In.HidKey{116, False{}}])
 
-@unsafe def command.dump(is_dump: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +verb: String, arg: String) -> IO(String):
-  match is_dump:
-    case True{}:
-      do IO<String>:
-        +rc : U32 <- H.Hvf.fb_dump(arg)
-        return reply_rc(rc, "saved")
-    case False{}:
-      command.run(String.eq(verb, "pause"), String.eq(verb, "resume"), String.eq(verb, "snapshot"), String.eq(verb, "status"), String.eq(verb, "quit"), mc, done, arg)
+# One command line (src/vmm/control.bend says which), carried out.
+@unsafe def command(+mc: Chan(M.Machine), +done: Chan(U32), line: String) -> IO(String):
+  command.run(Ctl.Ctl.parse(line), mc, done)
 
-@unsafe def command.run(is_pause: Bool, is_resume: Bool, is_snap: Bool, is_status: Bool, is_quit: Bool, +mc: Chan(M.Machine), +done: Chan(U32), arg: String) -> IO(String):
-  match is_pause is_resume is_snap is_status is_quit:
-    case True{} _ _ _ _:
+@unsafe def command.run(c: Ctl.Cmd, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(String):
+  match c:
+    case Ctl.CPause{}:
       do IO<String>:
         _ : U32 <- pause_vm()
         return "paused"
-    case False{} True{} _ _ _:
+    case Ctl.CResume{}:
       do IO<String>:
         _ : U32 <- H.Hvf.resume()
         return "running"
-    case False{} False{} True{} _ _:
+    case Ctl.CSnapshot{path}:
       do IO<String>:
-        +rc : U32 <- snapshot(mc, arg)
+        +rc : U32 <- snapshot(mc, path)
         return reply_rc(rc, "saved")
-    case False{} False{} False{} True{} _:
+    case Ctl.CStatus{}:
       do IO<String>:
         +st : +List<U32> <- H.Hvf.pause_state()
         return Bool.pick(String, U32.is_zero(H.Host.first(st)), "running", "paused")
-    case False{} False{} False{} False{} True{}:
+    case Ctl.CQuit{}:
       do IO<String>:
         _ : Result<&1, &1, U32, Unit> <- Chan.send(U32, done, 0)
         return "bye"
-    case False{} False{} False{} False{} False{}:
-      IO.pure(String, "unknown command (pause, resume, snapshot PATH, screendump PATH, type TEXT, pointer X Y, powerdown, net, status, quit)")
-
-# The tablet report of "X Y" (0..32767 each): a move.
-def pointer_of.mk(x: Maybe<&2, U32>, y: Maybe<&2, U32>) -> Maybe<&2, In.Hid>:
-  match x y:
-    case Some{a} Some{b}:
-      Some{In.HidMove{a, b}}
-    case _ _:
-      None{}
-
-def pointer_of.go(ws: List<&2, String>) -> Maybe<&2, In.Hid>:
-  match ws:
-    case Con{x, Con{y, Nil{}}}:
-      pointer_of.mk(U32.read(x), U32.read(y))
-    case _:
-      None{}
-
-def pointer_of(arg: String) -> Maybe<&2, In.Hid>:
-  pointer_of.go(String.split(arg, ' '))
-
-@unsafe def command.pointer.go(ev: Maybe<&2, In.Hid>, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(String):
-  match ev:
-    case None{}:
-      IO.pure(String, "usage: pointer X Y (0..32767)")
-    case Some{h}:
+    case Ctl.CScreendump{path}:
       do IO<String>:
-        display.hid(mc, done, h)
+        +rc : U32 <- H.Hvf.fb_dump(path)
+        return reply_rc(rc, "saved")
+    case Ctl.CPointer{x, y}:
+      do IO<String>:
+        display.hid(mc, done, In.HidMove{x, y})
         return "moved"
-
-# pointer X Y: moves the virtio tablet to (X, Y) on its 0..32767 scale.
-@unsafe def command.pointer(is_pointer: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +verb: String, arg: String) -> IO(String):
-  match is_pointer:
-    case True{}:
-      command.pointer.go(pointer_of(arg), mc, done)
-    case False{}:
-      command.dump(String.eq(verb, "screendump"), mc, done, verb, arg)
-
-# type TEXT: types TEXT on the virtio keyboard (Km.Keymap.typing; \n is
-# Return).
-@unsafe def command.type(is_type: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +verb: String, arg: String) -> IO(String):
-  match is_type:
-    case True{}:
+    case Ctl.CPointerUsage{}:
+      IO.pure(String, Ctl.Ctl.pointer_usage())
+    case Ctl.CType{text}:
       do IO<String>:
-        type_keys(mc, done, Km.Keymap.typing(B.Bytes.of_string(arg), False{}))
+        type_keys(mc, done, Km.Keymap.typing(B.Bytes.of_string(text), False{}))
         return "typed"
-    case False{}:
-      command.pointer(String.eq(verb, "pointer"), mc, done, verb, arg)
-
-# net: the NAT's connections and flow state, and the frames pending.
-@unsafe def command.net(is_net: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +verb: String, arg: String) -> IO(String):
-  match is_net:
-    case True{}:
+    case Ctl.CNet{}:
       do IO<String>:
         +m : M.Machine <- take(mc)
         put(mc, m)
         holds : +List<U32> <- H.Hvf.net_holds()
         return M.Machine.net_show(m) ++ "\nheld on the host [conn, bytes, parked]...: " ++ List.show(~&2, ~U32, ~U32.show, holds)
-    case False{}:
-      command.type(String.eq(verb, "type"), mc, done, verb, arg)
-
-# powerdown: presses the guest's power button.
-@unsafe def command.powerdown(is_power: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +verb: String, arg: String) -> IO(String):
-  match is_power:
-    case True{}:
+    case Ctl.CPowerdown{}:
       do IO<String>:
         power_button(mc, done)
         return "powering down"
-    case False{}:
-      command.net(String.eq(verb, "net"), mc, done, verb, arg)
-
-# One command line: a verb and an optional argument.
-@unsafe def command(+mc: Chan(M.Machine), +done: Chan(U32), +line: String) -> IO(String):
-  +parts = String.split(String.trim(line), ' ')
-  +verb = Maybe.default(&2, String, List.head(&2, String, parts), "")
-  +arg = String.join(List.drop(&2, String, parts, 1n), " ")
-  command.powerdown(String.eq(verb, "powerdown"), mc, done, verb, arg)
+    case Ctl.CUnknown{}:
+      IO.pure(String, Ctl.Ctl.usage())
 
 @unsafe def ctl_loop.got(stop: Bool, +mc: Chan(M.Machine), +done: Chan(U32), bs: +List<U32>) -> IO(Unit):
   match stop:
@@ -934,6 +892,17 @@ def pointer_of(arg: String) -> Maybe<&2, In.Hid>:
 def display.scale(+v: U32, +size: U32) -> U32:
   ((v * 32767 : U32) / Bool.pick(U32, U32.is_lt(size, 2), 1, (size - 1 : U32)) : U32)
 
+# A pointer's position (pixels from the window's top left, past its edge
+# while a button holds it) as a window coordinate, 0..size-1.
+def display.coord(+v: F32, +size: U32) -> U32:
+  +p = Bool.pick(U32, F32.is_lt(v, 0.0), 0, F32.to_u32(v))
+  Bool.pick(U32, U32.is_lt(p, size), p, Bool.pick(U32, U32.is_zero(size), 0, (size - 1 : U32)))
+
+# A W3C button (0 main, 1 middle, 2 right, 3 back, 4 forward) as the
+# tablet's (0 left, 1 right, 2 middle, 3 side, 4 extra: BTN_LEFT + b).
+def display.button(+b: U32) -> U32:
+  Bool.pick(U32, U32.is_eq(b, 1), 2, Bool.pick(U32, U32.is_eq(b, 2), 1, b))
+
 @unsafe def display.events(+mc: Chan(M.Machine), +done: Chan(U32), +w: U32, +h: U32, evs: List<Event>) -> IO(Bool):
   match evs:
     case Nil{}:
@@ -948,14 +917,14 @@ def display.scale(+v: U32, +size: U32) -> U32:
           do IO<Bool>:
             display.hid(mc, done, In.HidKey{Km.Keymap.linux(code), down})
             display.events(mc, done, w, h, rest)
-        case Mouse{x, y, b, down}:
+        case Press{id, tool, x, y, time, b, down}:
           do IO<Bool>:
-            display.hid(mc, done, In.HidMove{display.scale(x, w), display.scale(y, h)})
-            display.hid(mc, done, In.HidButton{b, down})
+            display.hid(mc, done, In.HidMove{display.scale(display.coord(x, w), w), display.scale(display.coord(y, h), h)})
+            display.hid(mc, done, In.HidButton{display.button(b), down})
             display.events(mc, done, w, h, rest)
-        case Move{x, y}:
+        case Move{id, tool, x, y, time}:
           do IO<Bool>:
-            display.hid(mc, done, In.HidMove{display.scale(x, w), display.scale(y, h)})
+            display.hid(mc, done, In.HidMove{display.scale(display.coord(x, w), w), display.scale(display.coord(y, h), h)})
             display.events(mc, done, w, h, rest)
         case _:
           display.events(mc, done, w, h, rest)
@@ -1770,10 +1739,60 @@ def words_eq(a: +List<U32>, b: +List<U32>) -> Bool:
     case _ _:
       False{}
 
+# Reading a snapshot's layout (src/vmm/snapfile.bend): the header, then
+# each length prefix where Snapf.need says, then the parts the layout names.
+def snap.bad() -> IO(Sf.Layout):
+  IO.die(Sf.Layout, 1, "bend-vmm: cannot read the snapshot (22)")
+
+def snap.load(fits: Bool, +l: Sf.Layout) -> IO(Sf.Layout):
+  match fits:
+    case False{}:
+      snap.bad()
+    case True{}:
+      do IO<Sf.Layout>:
+        +rc : U32 <- H.Hvf.snap_load(Sf.Snapf.load.wire(l))
+        die_if(U32.is_ne(rc, 0), "cannot read the snapshot (" ++ U32.show(rc) ++ ")")
+        return l
+
+# The next step once a length prefix is read: a short read is a bad file.
+def snap.next(full: Bool, +h: Sf.Head, +lens: +List<U.U64>) -> Sf.Need:
+  match full:
+    case False{}:
+      Sf.NBad{}
+    case True{}:
+      Sf.Snapf.need(h, lens)
+
+# fuel: the header's length prefixes (words, GIC, at most 64 vCPUs) and one
+# more step. One def, recursing on fuel only: no @unsafe, no forward calls.
+def snap.walk(fuel: Nat, need: Sf.Need, +h: Sf.Head, +lens: +List<U.U64>, +size: U.U64) -> IO(Sf.Layout):
+  match fuel:
+    case 0n:
+      snap.bad()
+    case 1n+p:
+      match need:
+        case Sf.NBad{}:
+          snap.bad()
+        case Sf.NDone{+l}:
+          snap.load(Sf.Snapf.fits(l, size), l)
+        case Sf.NRead{U.U64{hi, lo}}:
+          do IO<Sf.Layout>:
+            +b : +List<U32> <- H.Hvf.snap_peek(hi, lo, 8)
+            +more : +List<U.U64> = List.append(&2, U.U64, lens, [B.Bytes.read_le64(b)])
+            snap.walk(p, snap.next(U32.is_eq(U32.from_nat(List.length(&2, U32, b)), 8), h, more), h, more, size)
+
+def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
+  match h:
+    case None{}:
+      snap.bad()
+    case Some{+h}:
+      snap.walk(67n, Sf.Snapf.need(h, []), h, [], size)
+
 @unsafe def restore(path: String, +now: Opts) -> IO(Unit):
   do IO<Unit>:
-    +rc : U32 <- H.Hvf.snap_open(path)
-    die_if(U32.is_ne(rc, 0), "cannot read the snapshot (" ++ U32.show(rc) ++ ")")
+    +st : +List<U32> <- H.Hvf.snap_open(path)
+    die_if(U32.is_ne(H.Host.first(st), 0), "cannot read the snapshot (" ++ U32.show(H.Host.first(st)) ++ ")")
+    hb : +List<U32> <- H.Hvf.snap_peek(0, 0, 40)
+    _ : Sf.Layout <- snap.start(Sf.Snapf.head(Sf.Snapf.word(st, 1n), hb), Sf.Snapf.u64_at(st, 2n))
     saved : List<String> <- H.Hvf.snap_args()
     +o : Opts = restore.opts(saved, now)
     +why : String = restore.differs(o, now)

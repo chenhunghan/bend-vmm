@@ -34,3 +34,5 @@ import ./proofs/pflash.bend as Proofs_pflash
 import ./proofs/qcow2.bend as Proofs_qcow2
 import ./proofs/escape.bend as Proofs_escape
 import ./proofs/addr.bend as Proofs_addr
+import ./proofs/snapfile.bend as Proofs_snapfile
+import ./proofs/control.bend as Proofs_control

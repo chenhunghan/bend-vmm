@@ -51,7 +51,7 @@ reference only: we do not follow its design or API.
    a list, independent devices. Use a parallel let (`a b = f(x) g(y)`) and
    keep both sides about the same size.
 
-## Bend facts that bite (2.0.39)
+## Bend facts that bite (2.0.40)
 
 - No hex literals: write decimal and put the hex in a comment.
 - No U64 and no U8: use `U.U64` (src/lib/u64.bend) and byte lists
@@ -70,7 +70,10 @@ reference only: we do not follow its design or API.
   any Base def with its signature.
 - Operators need a type: `(a + b : U32)`, `(x .&. 255 : U32)`, `(x >> 8n : U32)`.
 - A pair is `A & B`, built `(a, b)`; destructure it in a helper's `match`.
-- Parallel lets run on real threads only in native builds, and Bend 2.0.39's
+  A pair is a `Type`, not `Data`, and a type argument takes it in parens
+  (`List<(A & B)>`): for a reusable list of pairs, declare a small `is Data`
+  type instead (src/vmm/snapfile.bend's `Part`).
+- Parallel lets run on real threads only in native builds, and Bend's
   native runtime can fail on some of them ("frontier drained without a
   result") while `bend file.bend` (the sequential JS lane) passes. Bind every
   argument of a parallel call to a variable first (`+st = status(s)`, then

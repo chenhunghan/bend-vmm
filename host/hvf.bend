@@ -248,11 +248,27 @@ def Hvf.pause_state() -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.snap_write(path: String, words: +List<U32>) -> IO(U32):
+def Hvf.snap_save(words: +List<U32>) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.snap_open(path: String) -> IO(U32):
+def Hvf.snap_commit(path: String, plan: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.snap_drop() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.snap_peek(off_hi: U32, off_lo: U32, len: U32) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.snap_load(layout: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.snap_open(path: String) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 

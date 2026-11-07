@@ -26,14 +26,14 @@ permissions:
   contents: read
 
 env:
-  BEND_VERSION: 2.0.39
+  BEND_VERSION: 2.0.40
   BEND_NO_TELEMETRY: "1"
 
 jobs:
   macos:
     runs-on: macos-15
     env:
-      BEND_SHA: d4aaef68de545727429ce83b9e88ff3273bf068df599e3542e446755b5f3d83a
+      BEND_SHA: b2be003b041eb6cfc65326be18f79eb2e0bae2189be79a18c507e661b4b6900b
       MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
       MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
       APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
@@ -68,7 +68,7 @@ jobs:
   linux:
     runs-on: ubuntu-24.04-arm
     env:
-      BEND_SHA: 71b43e1bb9313dd14ac2b0553b854e41c39d65ecaa47040796ebff4a46f54a97
+      BEND_SHA: 2f42a6fa34ecdaa71ae105e5fa734f9a07e129d333e45448ab6d2ff03a837570
     steps:
       - uses: actions/checkout@v4
       - name: Install Bend and the toolchain
