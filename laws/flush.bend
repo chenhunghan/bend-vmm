@@ -83,3 +83,13 @@ law flush.at_hard_limit:
 
 law flush.over_wall:
   {F.Flush.over(w(1000), w(100663297), lim()) == True{} : Bool}
+
+# Proposed: what a close does (at most 64 closes linger by default).
+law flush.close_now:
+  {F.Flush.close(False{}, 64, lim()) == F.CNow{} : F.Close}
+
+law flush.close_lingers:
+  {F.Flush.close(True{}, 63, lim()) == F.CLinger{} : F.Close}
+
+law flush.close_too_many:
+  {F.Flush.close(True{}, 64, lim()) == F.CReset{} : F.Close}

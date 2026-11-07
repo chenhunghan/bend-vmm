@@ -3,6 +3,7 @@ import ../src/lib/u64.bend as U
 import ../src/lib/bytes.bend as B
 import ../src/vmm/abi.bend as V
 import ../src/boot/image.bend as I
+import ../src/vmm/loggate.bend as Lg
 import ../src/net/flush.bend as Fl
 import ../src/net/limits.bend as Lm
 
@@ -61,9 +62,35 @@ def Hvf.out_flush() -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.log_gate() -> IO(U32):
+def Hvf.fd_limit() -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
+
+def Hvf.fd_room(n: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.log_state() -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.log_put(tokens: U32, last_hi: U32, last_lo: U32, dropped: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.log_gate.put(o: Lg.GateOut) -> IO(U32):
+  match o:
+    case Lg.GateOut{Lg.Gate{t, U.U64{h, l}, d}, v}:
+      do IO<U32>:
+        _ : U32 <- Hvf.log_put(t, h, l, d)
+        return v
+
+# Whether a VMM message may go to stderr (src/vmm/loggate.bend decides): 0
+# drops it; otherwise 1 + the messages dropped since the last one printed.
+def Hvf.log_gate() -> IO(U32):
+  do IO<U32>:
+    +ws : +List<U32> <- Hvf.log_state()
+    Hvf.log_gate.put(Lg.Gate.step(Lg.Gate.wire(ws), Lg.Gate.now(ws)))
 
 def Hvf.stdin(max: U32) -> IO(+List<U32>):
   import "./hvf.c"
@@ -251,7 +278,11 @@ def Hvf.tcp_shutdown(conn: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.tcp_close(conn: U32) -> IO(U32):
+def Hvf.tcp_close_facts(conn: U32) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.tcp_close(conn: U32, how: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -372,7 +403,7 @@ def Hvf.ctl_listen(path: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.ctl_next() -> IO(+List<U32>):
+def Hvf.ctl_next(deadline_ms: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -394,7 +425,11 @@ def Hvf.vsock_base() -> IO(String):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.vsock_accept() -> IO(+List<U32>):
+def Hvf.vsock_file(ok: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.vsock_accept(deadline_ms: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -654,3 +689,9 @@ def Host.tcp_send_staged(+conn: U32, slot: U32) -> IO(U32):
   do IO<U32>:
     ws : +List<U32> <- Hvf.tcp_send_staged(conn, slot)
     Host.sent(conn, ws)
+
+# A close the NAT asked for: Flush.close decides from the host's facts.
+def Host.tcp_close(+conn: U32) -> IO(U32):
+  do IO<U32>:
+    +ws : +List<U32> <- Hvf.tcp_close_facts(conn)
+    Hvf.tcp_close(conn, Fl.Flush.close.code(Fl.Flush.close(U32.is_ne(Fl.Flush.word(ws, 0n), 0), Fl.Flush.word(ws, 1n), Lm.Lim.default())))

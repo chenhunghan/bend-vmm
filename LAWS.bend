@@ -45,3 +45,6 @@ import ./laws/flush.bend as Laws_flush
 import ./laws/udpflow.bend as Laws_udpflow
 import ./laws/quota.bend as Laws_quota
 import ./laws/conlog.bend as Laws_conlog
+import ./laws/loggate.bend as Laws_loggate
+import ./laws/fds.bend as Laws_fds
+import ./laws/clients.bend as Laws_clients

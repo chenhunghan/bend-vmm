@@ -132,3 +132,23 @@ law cli.find_last:
 
 law cli.find_none:
   {C.Cli.find(["--kernel", "a"], "--console-log") == "" : String}
+
+# Proposed: --forward [ADDR:]HOSTPORT:GUESTPORT[,...].
+
+law cli.fwd_default_addr:
+  {C.Fwd.parse("2222:22") == Some{C.Fwd{"127.0.0.1", 2222, 22}} : Maybe<&2, C.Fwd>}
+
+law cli.fwd_addr:
+  {C.Fwd.parse("0.0.0.0:6443:6443") == Some{C.Fwd{"0.0.0.0", 6443, 6443}} : Maybe<&2, C.Fwd>}
+
+law cli.fwd_port_zero:
+  {C.Fwd.parse("0:22") == None{} : Maybe<&2, C.Fwd>}
+
+law cli.fwd_port_past:
+  {C.Fwd.parse("65536:22") == None{} : Maybe<&2, C.Fwd>}
+
+law cli.fwd_specs:
+  {C.Fwd.specs("2222:22,8080:80") == ["2222:22", "8080:80"] : List<&2, String>}
+
+law cli.fwd_checked:
+  {C.Cli.check(["--forward", "2222:22,80"]) == "--forward takes [ADDR:]HOSTPORT:GUESTPORT[,...] (ports 1 to 65535) (not 2222:22,80)" : String}

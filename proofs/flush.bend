@@ -63,3 +63,11 @@ def L.flush.at_hard_limit():
 
 def L.flush.over_wall():
   {==}
+def L.flush.close_now():
+  {==}
+
+def L.flush.close_lingers():
+  {==}
+
+def L.flush.close_too_many():
+  {==}

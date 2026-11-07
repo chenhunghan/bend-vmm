@@ -124,3 +124,21 @@ def L.cli.find_last():
 def L.cli.find_none():
   {==}
 
+def L.cli.fwd_default_addr():
+  {==}
+
+def L.cli.fwd_addr():
+  {==}
+
+def L.cli.fwd_port_zero():
+  {==}
+
+def L.cli.fwd_port_past():
+  {==}
+
+def L.cli.fwd_specs():
+  {==}
+
+def L.cli.fwd_checked():
+  {==}
+

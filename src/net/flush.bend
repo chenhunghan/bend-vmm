@@ -84,6 +84,28 @@ def Flush.over(+pending: U.U64, +total: U.U64, l: N.Limits) -> Bool:
     case N.Limits{c, +hard, s, k, b, +wall, lg, lm, um, ui}:
       U.U64.is_lt(hard, pending) || U.U64.is_lt(wall, total)
 
+# What a close the NAT asks for does (V.TcpClose): with nothing pending the
+# socket closes now; with data pending it lingers (sends it, up to the
+# linger time) unless the most closes already linger, when it resets.
+type Close is Data:
+  CNow{}
+  CLinger{}
+  CReset{}
+
+def Flush.close(+pending: Bool, +lingering: U32, l: N.Limits) -> Close:
+  match l:
+    case N.Limits{c, h, s, k, b, w, lg, +most, um, ui}:
+      Bool.pick(Close, Bool.not(pending), CNow{}, Bool.pick(Close, U32.is_le(most, lingering), CReset{}, CLinger{}))
+
+def Flush.close.code(c: Close) -> U32:
+  match c:
+    case CNow{}:
+      0
+    case CLinger{}:
+      1
+    case CReset{}:
+      2
+
 # The facts as the host answers them (Hvf.tcp_flush): [err, over, pending,
 # total, idle (each hi, lo), closing, overdue, shut]; None for [] (the
 # socket is gone) or a malformed answer.

@@ -1675,27 +1675,26 @@ Term hvf_out_run(Env e, Term* f, IoWork* w) {
   return (Term)0;
 }
 
-// Hvf.log_gate() -> U32: whether a VMM message may go to stderr, so a guest
-// that traps in a loop (an unmapped access, an unknown register) cannot
-// flood it: up to 200 at once, then 20 a second. 0 drops the message;
-// otherwise 1 + the messages dropped since the last one printed.
-Term hvf_log_gate_run(Env e, Term* f, IoWork* w) {
-  static double   tokens = 200, last;
-  static uint64_t dropped;
+// The VMM log gate's bucket (src/vmm/loggate.bend decides): kept here
+// between messages, with the monotonic clock in ms.
+static uint32_t hvf_lg[4] = {200000, 0, 0, 0};
+
+// Hvf.log_state() -> List<U32>: [tokens, last ms (hi, lo), dropped, now ms
+// (hi, lo)].
+Term hvf_log_state_run(Env e, Term* f, IoWork* w) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
-  double now = (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
-  tokens     = last == 0 ? tokens : tokens + (now - last) * 20;
-  tokens     = tokens > 200 ? 200 : tokens;
-  last       = now;
-  if (tokens < 1) {
-    dropped++;
-    return (Term)0;
+  uint64_t now   = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+  uint32_t ws[6] = {hvf_lg[0], hvf_lg[1], hvf_lg[2], hvf_lg[3], (uint32_t)(now >> 32), (uint32_t)now};
+  return hvf_words(e, ws, 6);
+}
+
+// Hvf.log_put(tokens, last_hi, last_lo, dropped) -> U32: keeps the bucket. 0.
+Term hvf_log_put_run(Env e, Term* f, IoWork* w) {
+  for (int i = 0; i < 4; i++) {
+    hvf_lg[i] = (u32)f[i];
   }
-  tokens -= 1;
-  uint64_t d = dropped;
-  dropped    = 0;
-  return (Term)(u32)(d + 1 > 0xFFFFFFFFull ? 0xFFFFFFFFull : d + 1);
+  return (Term)0;
 }
 
 // Hvf.out_flush() -> U32: writes the queued console output now, so a
@@ -2358,7 +2357,7 @@ Term hvf_dns_run(Env e, Term* f, IoWork* w) {
 // limit is min(hard, FD_SETSIZE), raised or lowered to it, and the kernel
 // never hands out a larger descriptor. Either way the socket table (NAT
 // connections and flows, vsock) holds at most hvf_fd_room descriptors: the
-// rest (HVF_FD_SPARE, or half of a small limit) stays for disks, the control
+// rest (src/net/fds.bend: 128, or half of a small limit) stays for disks, the control
 // socket, shares, pipes and the runtime. A new guest flow past hvf_fd_room
 // is refused (a RST, or a dropped datagram) before socket() could fail with
 // EMFILE. A NAT connection counts 3 (its socket and the wake pipe
@@ -2368,9 +2367,10 @@ Term hvf_dns_run(Env e, Term* f, IoWork* w) {
 #else
 #define HVF_FD_TOP 65536
 #endif
-#define HVF_FD_SPARE 128
-
-static int hvf_fd_room = 1024 - HVF_FD_SPARE;
+// The budget is Bend's (src/net/fds.bend, from Hvf.fd_limit): none until
+// Hvf.fd_room hands it over at startup.
+static int hvf_fd_limit = 1024;
+static int hvf_fd_room;
 static int hvf_fd_used;
 
 static void __attribute__((constructor)) hvf_nofile(void) {
@@ -2393,7 +2393,20 @@ static void __attribute__((constructor)) hvf_nofile(void) {
     // higher (the table, HVF_MAX_SOCKS, bounds it below that anyway).
     lim = r.rlim_cur != RLIM_INFINITY && r.rlim_cur < HVF_FD_TOP ? r.rlim_cur : HVF_FD_TOP;
   }
-  hvf_fd_room = (int)lim - ((int)lim / 2 < HVF_FD_SPARE ? (int)lim / 2 : HVF_FD_SPARE);
+  hvf_fd_limit = (int)lim;
+}
+
+// Hvf.fd_limit() -> U32: the descriptors this process may hold (at most
+// HVF_FD_TOP).
+Term hvf_fd_limit_run(Env e, Term* f, IoWork* w) {
+  return (Term)(u32)hvf_fd_limit;
+}
+
+// Hvf.fd_room(n) -> U32: guest flows may hold n descriptors (Fds.room). 0.
+Term hvf_fd_room_run(Env e, Term* f, IoWork* w) {
+  u32 n       = (u32)f[0];
+  hvf_fd_room = n > (u32)hvf_fd_limit ? hvf_fd_limit : (int)n;
+  return (Term)0;
 }
 
 // Whether the socket table may take n more descriptors.
@@ -2999,25 +3012,34 @@ static int hvf_wlingering(void) {
   return n;
 }
 
-// Hvf.tcp_close(conn) -> U32: closes now, or once what is pending is out
-// (the flusher closes it; reading stops at once), within HVF_WLINGER; with
-// HVF_WLINGER_MAX closes already waiting so, it resets at once.
+// Hvf.tcp_close_facts(conn) -> List<U32>: [1 when guest data is still
+// pending (and not to be dropped), closes already lingering]; src/net/flush.bend
+// (Flush.close) decides what Hvf.tcp_close does.
+Term hvf_tcp_close_facts_run(Env e, Term* f, IoWork* w) {
+  HvfSock* k     = hvf_sock((u32)f[0], 0);
+  uint32_t ws[2] = {(uint32_t)(k && hvf_wpend(k) && !k->wreset), (uint32_t)hvf_wlingering()};
+  return hvf_words(e, ws, 2);
+}
+
+// Hvf.tcp_close(conn, how) -> U32: 0 closes now; 1 closes once what is
+// pending is out (the flusher closes it; reading stops at once), within
+// HVF_WLINGER; 2 resets it. 0.
 Term hvf_tcp_close_run(Env e, Term* f, IoWork* w) {
-  HvfSock* k = hvf_sock((u32)f[0], 0);
-  if (k && hvf_wpend(k) && !k->wreset && hvf_wlingering() >= HVF_WLINGER_MAX) {
-    hvf_tcp_reset(k);
+  HvfSock* k   = hvf_sock((u32)f[0], 0);
+  u32      how = (u32)f[1];
+  if (!k) {
     return (Term)0;
   }
-  if (k && hvf_wpend(k) && !k->wreset) {
+  if (how == 2) {
+    hvf_tcp_reset(k);
+  } else if (how == 1 && hvf_wpend(k)) {
     k->wclose = 1;
     k->wdead  = io_tick() + HVF_WLINGER;
     shutdown(k->fd, SHUT_RD);
     if (k->wake[1] >= 0) {
       (void)!write(k->wake[1], "x", 1);
     }
-    return (Term)0;
-  }
-  if (k) {
+  } else {
     hvf_sock_free(k);
   }
   return (Term)0;
@@ -4284,6 +4306,7 @@ static Term hvf_ctl_line(Env e, IoWork* w);
 // One client at a time: one that sends no full line within 5 s is dropped,
 // so it cannot hold the control socket from the next.
 static uint64_t hvf_ctl_deadline;
+static uint64_t hvf_ctl_wait_ns = 5000000000ull; // Hvf.ctl_next's deadline (Clients.deadline_ms)
 
 static int hvf_accept_full(int err) {
   return err == EMFILE || err == ENFILE || err == ENOBUFS || err == ENOMEM;
@@ -4299,7 +4322,7 @@ static Term hvf_ctl_accept(Env e, IoWork* w) {
   fcntl(c, F_SETFD, FD_CLOEXEC);
   fcntl(c, F_SETFL, O_NONBLOCK);
   hvf_ctl_client   = c;
-  hvf_ctl_deadline = io_tick() + 5000000000ull;
+  hvf_ctl_deadline = io_tick() + hvf_ctl_wait_ns;
   w->made          = 0;
   return hvf_ctl_line(e, w);
 }
@@ -4338,6 +4361,7 @@ static Term hvf_ctl_line(Env e, IoWork* w) {
 // bytes, or [2] with no control socket (src/vmm/control.bend, Ctl.frame).
 // The client stays open for Hvf.ctl_reply.
 Term hvf_ctl_next_run(Env e, Term* f, IoWork* w) {
+  hvf_ctl_wait_ns = (uint64_t)(u32)f[0] * 1000000ull;
   if (hvf_ctl_fd < 0) {
     uint32_t none = 2;
     return hvf_words(e, &none, 1);
@@ -4463,6 +4487,7 @@ Term hvf_vsock_listen_run(Env e, Term* f, IoWork* w) {
 static Term hvf_vs_line(Env e, IoWork* w);
 
 static uint64_t hvf_vs_deadline;
+static uint64_t hvf_vs_wait_ns = 5000000000ull; // Hvf.vsock_accept's deadline (Clients.deadline_ms)
 
 static Term hvf_vs_accept(Env e, IoWork* w) {
   int c = accept(hvf_vs_fd, NULL, NULL);
@@ -4479,20 +4504,23 @@ static Term hvf_vs_accept(Env e, IoWork* w) {
   hvf_unix_buf(c);
   w->hand         = c;
   w->made         = 0;
-  hvf_vs_deadline = io_tick() + 5000000000ull;
+  hvf_vs_deadline = io_tick() + hvf_vs_wait_ns;
   return hvf_vs_line(e, w);
 }
 
-// Reads the client's "CONNECT <port>\n"; files the socket and answers
-// [conn, port] (a bad line closes the client and waits for the next).
+// A client whose line Bend is reading (Hvf.vsock_file files or closes it).
+static int hvf_vs_client = -1;
+
+// Reads the client's one line: [1, its bytes...] (src/vmm/clients.bend
+// reads the port it names).
 static Term hvf_vs_line(Env e, IoWork* w) {
   int  c = (int)w->hand;
   char ch;
   for (;;) {
     ssize_t k = read(c, &ch, 1);
     if (k < 0 && errno == EAGAIN) {
-      // a client that names no port within 5 s is dropped (as on the
-      // control socket), so it cannot hold the listener
+      // a client that sends no line within the deadline is dropped (as on
+      // the control socket), so it cannot hold the listener
       if (io_tick() >= hvf_vs_deadline) {
         close(c);
         w->made = 0;
@@ -4503,34 +4531,41 @@ static Term hvf_vs_line(Env e, IoWork* w) {
     if (k <= 0 || ch == '\n' || w->made >= 63) {
       break;
     }
-    w->data[w->made++] = ch;
+    w->data[1 + w->made++] = ch;
   }
-  w->data[w->made] = 0;
-  unsigned port;
-  if (sscanf(w->data, "CONNECT %u", &port) != 1) {
-    close(c);
-    w->made = 0;
-    return hvf_vs_accept(e, w);
-  }
-  uint32_t conn = hvf_vs_next++;
-  if (!hvf_sock_new(conn ^ 0x40000000u, 0, c, 1)) {
-    close(c);
-    w->made = 0;
-    return hvf_vs_accept(e, w);
-  }
+  hvf_vs_client = c;
+  w->data[0]    = 1;
+  Term t        = io_list(e, w->data, 1 + (u64)w->made);
   free(w->data);
-  uint32_t ws[2] = {conn, port};
-  return hvf_words(e, ws, 2);
+  return t;
 }
 
-// Hvf.vsock_accept() -> List<U32>: parks until a host client asks for a
-// guest port; [conn, port] ([] without a listener).
+// Hvf.vsock_file(port_ok) -> U32: files the client whose line was read as a
+// new vsock connection (its number), or closes it (0xFFFFFFFF).
+Term hvf_vsock_file_run(Env e, Term* f, IoWork* w) {
+  int c         = hvf_vs_client;
+  hvf_vs_client = -1;
+  if (c < 0) {
+    return (Term)HVF_ERR;
+  }
+  uint32_t conn = hvf_vs_next++;
+  if (!(u32)f[0] || !hvf_sock_new(conn ^ 0x40000000u, 0, c, 1)) {
+    close(c);
+    return (Term)HVF_ERR;
+  }
+  return (Term)conn;
+}
+
+// Hvf.vsock_accept(deadline_ms) -> List<U32>: parks until a host client
+// sends its line (within deadline_ms of connecting): [1, the line's
+// bytes...]; [] without a listener.
 Term hvf_vsock_accept_run(Env e, Term* f, IoWork* w) {
   if (hvf_vs_fd < 0) {
     return term_pak(CID(Nil), 0);
   }
-  w->data = io_mem(malloc(64));
-  w->made = 0;
+  hvf_vs_wait_ns = (uint64_t)(u32)f[0] * 1000000ull;
+  w->data        = io_mem(malloc(65));
+  w->made        = 0;
   return hvf_vs_accept(e, w);
 }
 
@@ -5301,8 +5336,23 @@ static void __attribute__((constructor)) hvf_use(void) {
 #ifdef CID(Hvf.signal_wait)
   io_eff(CID(Hvf.signal_wait), hvf_signal_wait_run);
 #endif
-#ifdef CID(Hvf.log_gate)
-  io_eff(CID(Hvf.log_gate), hvf_log_gate_run);
+#ifdef CID(Hvf.vsock_file)
+  io_eff(CID(Hvf.vsock_file), hvf_vsock_file_run);
+#endif
+#ifdef CID(Hvf.tcp_close_facts)
+  io_eff(CID(Hvf.tcp_close_facts), hvf_tcp_close_facts_run);
+#endif
+#ifdef CID(Hvf.fd_limit)
+  io_eff(CID(Hvf.fd_limit), hvf_fd_limit_run);
+#endif
+#ifdef CID(Hvf.fd_room)
+  io_eff(CID(Hvf.fd_room), hvf_fd_room_run);
+#endif
+#ifdef CID(Hvf.log_state)
+  io_eff(CID(Hvf.log_state), hvf_log_state_run);
+#endif
+#ifdef CID(Hvf.log_put)
+  io_eff(CID(Hvf.log_put), hvf_log_put_run);
 #endif
 #ifdef CID(Hvf.disk_status)
   io_eff(CID(Hvf.disk_status), hvf_disk_status_run);

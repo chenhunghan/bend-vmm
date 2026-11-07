@@ -46,3 +46,6 @@ import ./proofs/flush.bend as Proofs_flush
 import ./proofs/udpflow.bend as Proofs_udpflow
 import ./proofs/quota.bend as Proofs_quota
 import ./proofs/conlog.bend as Proofs_conlog
+import ./proofs/loggate.bend as Proofs_loggate
+import ./proofs/fds.bend as Proofs_fds
+import ./proofs/clients.bend as Proofs_clients

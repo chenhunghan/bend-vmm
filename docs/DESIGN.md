@@ -209,11 +209,20 @@ floor (`Csum.small`, `Tcp.small`).
   what the host reports on each wake; Flush.over: whether a send left a
   connection past the hard limit or all of them past the wall), and so do
   the UDP flows (src/net/udpflow.bend: which one closes past the most, and
-  when an idle one closes). Still in C: the mechanisms (sockets, the send
-  buffers, parking, finding a datagram's flow) and the vCPU register and
-  vGIC blobs (opaque, per hypervisor). A send past the limits is queued
-  before Bend's verdict drops it: the wall can be passed by the sends in
-  flight (one segment each) before their verdicts.
+  when an idle one closes). Also in Bend: what a close does
+  (Flush.close: now, linger, or reset past the most lingering), the
+  descriptor budget (src/net/fds.bend), the stderr log gate
+  (src/vmm/loggate.bend), the control and vsock clients' deadline and the
+  vsock CONNECT line (src/vmm/clients.bend), --forward specs (Fwd in
+  src/vmm/cli.bend), the share quota (src/fs/quota.bend) and the console
+  log's rotation (src/dev/conlog.bend). Still in C: the mechanisms
+  (sockets, the send buffers, parking, finding a datagram's flow), the
+  share's path containment (realpath, the security boundary) and its
+  listing order (sorted once per listing: moving it would pass every entry
+  through Bend on each call), KVM's exit synthesis, and the vCPU register
+  and vGIC blobs (opaque, per hypervisor). A send past the limits is
+  queued before Bend's verdict drops it: the wall can be passed by the
+  sends in flight (one segment each) before their verdicts.
   Moving anything: A/B scripts/bench.sh interleaved, since Bend compiles
   the program as one state machine and even a changed signature on the
   restore path (restore.machine) slowed every exit by ~0.3 us.

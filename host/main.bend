@@ -9,11 +9,13 @@ import ../src/vmm/snapfile.bend as Sf
 import ../src/vmm/control.bend as Ctl
 import ../src/dev/pointer.bend as Ptr
 import ../src/vmm/cli.bend as Cli
+import ../src/vmm/clients.bend as Ck
 import ../src/dev/conlog.bend as Cl
 import ../src/vmm/opts.bend as Op
 import ../src/disk/access.bend as Acc
 import ../src/net/limits.bend as Lim
 import ../src/net/flush.bend as Fl
+import ../src/net/fds.bend as Fds
 import ../src/net/udpflow.bend as Uf
 import ../src/net/nat.bend as Nt
 import ../src/arm64/psci.bend as Ps
@@ -348,7 +350,7 @@ def net_room(+m: M.Machine, udp: Bool, +conn: U32) -> Bool:
         tcp_reader(mc, done, conn)
     case False{}:
       do IO<Unit>:
-        _ : U32 <- H.Hvf.tcp_close(conn)
+        _ : U32 <- H.Host.tcp_close(conn)
         net_deliver(mc, done, V.TcpRefused{conn})
 
 @unsafe def tcp_task(+mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
@@ -501,7 +503,7 @@ def net_cmd.evict(m: Maybe<&2, U32>) -> IO(Unit):
         return Unit{}
     case V.TcpClose{conn}:
       do IO<Unit>:
-        _ : U32 <- H.Hvf.tcp_close(conn)
+        _ : U32 <- H.Host.tcp_close(conn)
         return Unit{}
     case V.TcpAbort{conn}:
       do IO<Unit>:
@@ -700,7 +702,7 @@ def reply_rc(+rc: U32, ok: String) -> String:
 
 @unsafe def ctl_loop(+mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
   do IO<Unit>:
-    bs : +List<U32> <- H.Hvf.ctl_next()
+    bs : +List<U32> <- H.Hvf.ctl_next(Ck.Clients.deadline_ms())
     ctl_loop.got(Ctl.Ctl.frame(bs), mc, done)
 
 # A console escape: p toggles pause, s snapshots to ./bend-vmm.snap, h
@@ -767,7 +769,7 @@ def reply_rc(+rc: U32, ok: String) -> String:
         vs_reader(mc, done, conn)
     case False{}:
       do IO<Unit>:
-        _ : U32 <- H.Hvf.tcp_close(vkey(conn))
+        _ : U32 <- H.Host.tcp_close(vkey(conn))
         vs_deliver(mc, done, V.VsRefused{conn})
 
 @unsafe def vs_task(+mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
@@ -879,7 +881,7 @@ def reply_rc(+rc: U32, ok: String) -> String:
         return Unit{}
     case V.VsClose{conn}:
       do IO<Unit>:
-        _ : U32 <- H.Hvf.tcp_close(vkey(conn))
+        _ : U32 <- H.Host.tcp_close(vkey(conn))
         return Unit{}
     case V.VsAccepted{+conn, port}:
       do IO<Unit>:
@@ -888,18 +890,38 @@ def reply_rc(+rc: U32, ok: String) -> String:
         IO.spawn(Unit, vs_reader(mc, done, conn))
 
 # Host clients asking for guest ports.
+# The client asked for a guest port (src/vmm/clients.bend reads its line):
+# filed as a connection, which the guest is offered; a bad line closes it.
+@unsafe def vs_accept_loop.port(p: Maybe<&2, U32>, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+  match p:
+    case None{}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.vsock_file(0)
+        vs_accept_loop(mc, done)
+    case Some{+port}:
+      do IO<Unit>:
+        +conn : U32 <- H.Hvf.vsock_file(1)
+        vs_accept_loop.filed(U32.is_eq(conn, err()), mc, done, conn, port)
+
+@unsafe def vs_accept_loop.filed(failed: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32, +port: U32) -> IO(Unit):
+  match failed:
+    case True{}:
+      vs_accept_loop(mc, done)
+    case False{}:
+      do IO<Unit>:
+        IO.spawn(Unit, vs_deliver(mc, done, V.VsIncoming{conn, port}))
+        vs_accept_loop(mc, done)
+
 @unsafe def vs_accept_loop.got(stop: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +ws: +List<U32>) -> IO(Unit):
   match stop:
     case True{}:
       IO.pure(Unit, Unit{})
     case False{}:
-      do IO<Unit>:
-        IO.spawn(Unit, vs_deliver(mc, done, V.VsIncoming{H.Host.first(ws), H.Host.first(List.drop(&2, U32, ws, 1n))}))
-        vs_accept_loop(mc, done)
+      vs_accept_loop.port(Ck.Clients.connect_port(List.drop(&2, U32, ws, 1n)), mc, done)
 
 @unsafe def vs_accept_loop(+mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
   do IO<Unit>:
-    +ws : +List<U32> <- H.Hvf.vsock_accept()
+    +ws : +List<U32> <- H.Hvf.vsock_accept(Ck.Clients.deadline_ms())
     vs_accept_loop.got(List.is_empty(&2, U32, ws), mc, done, ws)
 
 # The display: Bend's Window shows the guest's framebuffer (host/hvf.c,
@@ -1435,48 +1457,6 @@ def stopped(+code: U32) -> IO(Unit):
 # guest a SYN from 10.0.2.2, and the host reads the client's socket once the
 # guest accepts (V.TcpAccepted).
 
-type Fwd is Data:
-  Fwd{addr: String, hport: U32, gport: U32}
-
-def fwd_port.ok(m: Maybe<&2, U32>) -> Maybe<&2, U32>:
-  match m:
-    case None{}:
-      None{}
-    case Some{+p}:
-      Bool.pick(Maybe<&2, U32>, U32.is_ne(p, 0) && U32.is_le(p, 65535), Some{p}, None{})
-
-# A port: 1 to 65535.
-def fwd_port(s: String) -> Maybe<&2, U32>:
-  fwd_port.ok(U32.read(s))
-
-def fwd_mk(addr: String, h: Maybe<&2, U32>, g: Maybe<&2, U32>) -> Maybe<&2, Fwd>:
-  match h g:
-    case Some{hp} Some{gp}:
-      Some{Fwd{addr, hp, gp}}
-    case _ _:
-      None{}
-
-def fwd_parse.parts(parts: List<&2, String>) -> Maybe<&2, Fwd>:
-  match parts:
-    case Con{h, Con{g, Nil{}}}:
-      fwd_mk("127.0.0.1", fwd_port(h), fwd_port(g))
-    case Con{a, Con{h, Con{g, Nil{}}}}:
-      fwd_mk(a, fwd_port(h), fwd_port(g))
-    case _:
-      None{}
-
-# "[ADDR:]HOSTPORT:GUESTPORT" as a forward; None for anything malformed.
-def fwd_parse(spec: String) -> Maybe<&2, Fwd>:
-  fwd_parse.parts(String.split(spec, ':'))
-
-def fwd_specs(s: String) -> List<&2, String>:
-  +s = s
-  Bool.pick(List<&2, String>, String.is_empty(s), [], String.split(s, ','))
-
-# The most forwards (host/hvf.c, HVF_MAX_FWDS).
-def fwd_max() -> U32:
-  16
-
 # A forwarded client's SYN timer: every 2 s, while the guest has not
 # answered the NAT's SYN, the NAT is told (it sends the SYN again, and gives
 # up on the third time).
@@ -1526,13 +1506,13 @@ def fwd_max() -> U32:
     die_if(U32.is_ne(rc, 0), "--forward: cannot listen on " ++ addr ++ ":" ++ U32.show(hport) ++ ": " ++ why)
     IO.spawn(Unit, fwd_loop(idx, gport, mc, done))
 
-@unsafe def forwards.one(m: Maybe<&2, Fwd>, +idx: U32, spec: String, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+@unsafe def forwards.one(m: Maybe<&2, Cli.Fwd>, +idx: U32, spec: String, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
   match m:
     case None{}:
       IO.die(Unit, 1, "bend-vmm: --forward " ++ spec ++ ": want [ADDR:]HOSTPORT:GUESTPORT (an IPv4 address, ports 1 to 65535)")
-    case Some{Fwd{+addr, +hport, +gport}}:
+    case Some{Cli.Fwd{+addr, +hport, +gport}}:
       do IO<Unit>:
-        die_if(U32.is_le(fwd_max(), idx), "--forward: at most " ++ U32.show(fwd_max()) ++ " forwards")
+        die_if(U32.is_le(Cli.Fwd.max(), idx), "--forward: at most " ++ U32.show(Cli.Fwd.max()) ++ " forwards")
         +rc : U32 <- H.Hvf.fwd_listen(idx, addr, hport)
         forwards.listened(rc, idx, addr, hport, gport, mc, done)
 
@@ -1544,7 +1524,7 @@ def fwd_max() -> U32:
       IO.pure(Unit, Unit{})
     case Con{+spec, rest}:
       do IO<Unit>:
-        forwards.one(fwd_parse(spec), idx, spec, mc, done)
+        forwards.one(Cli.Fwd.parse(spec), idx, spec, mc, done)
         forwards((idx + 1 : U32), rest, mc, done)
 
 # SIGTERM and SIGHUP press the guest's power button and give it
@@ -1615,7 +1595,7 @@ def resolver() -> IO(Unit):
 @unsafe def run_machine(+mc: Chan(M.Machine), +done: Chan(U32), +ctl: String, disp: String, fwd: String, cpus: +List<U32>) -> IO(Unit):
   do IO<Unit>:
     resolver()
-    forwards(0, fwd_specs(fwd), mc, done)
+    forwards(0, Cli.Fwd.specs(fwd), mc, done)
     spawn_cpus(mc, done, cpus)
     display.start(display_window(disp), mc, done)
     IO.spawn(Unit, input_start(mc, done))
@@ -1943,6 +1923,8 @@ def args_bytes(args: List<String>) -> +List<U32>:
     _ : U32 <- H.Hvf.set_args(List.append(&2, U32, args_bytes(prog), args_bytes(flags)))
     _ : U32 <- H.Hvf.set_prog(U32.from_nat(List.length(&1, String, prog)))
     _ : U32 <- H.Hvf.net_limits(Lim.Lim.wire(Lim.Lim.default()))
+    +fdl : U32 <- H.Hvf.fd_limit()
+    _ : U32 <- H.Hvf.fd_room(Fds.Fds.room(fdl))
     main.go(main.info(flags), flags)
 
 @unsafe def main() -> IO(Unit):

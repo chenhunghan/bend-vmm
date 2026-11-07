@@ -336,6 +336,67 @@ def Cli.find(args: List<String>, +flag: String) -> String:
           +later = Cli.find(more, flag)
           Bool.pick(String, String.is_empty(later) && String.eq(f, flag), v, later)
 
+# --forward [ADDR:]HOSTPORT:GUESTPORT[,...]: the host listens on ADDR
+# (127.0.0.1 when not given) port HOSTPORT, and each client becomes a NAT
+# connection to the guest's GUESTPORT.
+
+type Fwd is Data:
+  Fwd{addr: String, hport: U32, gport: U32}
+
+def Fwd.port.ok(m: Maybe<&2, U32>) -> Maybe<&2, U32>:
+  match m:
+    case None{}:
+      None{}
+    case Some{+p}:
+      Bool.pick(Maybe<&2, U32>, U32.is_ne(p, 0) && U32.is_le(p, 65535), Some{p}, None{})
+
+# A port: 1 to 65535.
+def Fwd.port(s: String) -> Maybe<&2, U32>:
+  Fwd.port.ok(U32.read(s))
+
+def Fwd.mk(addr: String, h: Maybe<&2, U32>, g: Maybe<&2, U32>) -> Maybe<&2, Fwd>:
+  match h g:
+    case Some{hp} Some{gp}:
+      Some{Fwd{addr, hp, gp}}
+    case _ _:
+      None{}
+
+def Fwd.parse.parts(parts: List<&2, String>) -> Maybe<&2, Fwd>:
+  match parts:
+    case Con{h, Con{g, Nil{}}}:
+      Fwd.mk("127.0.0.1", Fwd.port(h), Fwd.port(g))
+    case Con{a, Con{h, Con{g, Nil{}}}}:
+      Fwd.mk(a, Fwd.port(h), Fwd.port(g))
+    case _:
+      None{}
+
+# "[ADDR:]HOSTPORT:GUESTPORT" as a forward; None for anything malformed.
+def Fwd.parse(spec: String) -> Maybe<&2, Fwd>:
+  Fwd.parse.parts(String.split(spec, ':'))
+
+def Fwd.specs(s: String) -> List<&2, String>:
+  +s = s
+  Bool.pick(List<&2, String>, String.is_empty(s), [], String.split(s, ','))
+
+# The most forwards (the host keeps as many listeners).
+def Fwd.max() -> U32:
+  16
+
+def Fwd.ok(m: Maybe<&2, Fwd>) -> Bool:
+  match m:
+    case None{}:
+      False{}
+    case Some{f}:
+      True{}
+
+# Every spec of one --forward value parses.
+def Fwd.all_ok(ss: List<&2, String>) -> Bool:
+  match ss:
+    case Nil{}:
+      True{}
+    case Con{x, rest}:
+      Fwd.ok(Fwd.parse(x)) && Fwd.all_ok(rest)
+
 # What is wrong with one flag and its value ("" when nothing): an unknown
 # flag; --mem other than 1..1048576 MiB (1 TiB, what a snapshot holds);
 # --cpus other than 1..64; a malformed --display.
@@ -347,7 +408,8 @@ def Cli.why(+flag: String, +v: String) -> String:
   Bool.pick(String, String.eq(flag, "--lan") && Bool.not(Cli.lan_ok(Cli.lan(v))), "--lan takes DIR,ip=A.B.C.D/N and/or mac=xx:xx:xx:xx:xx:xx (not " ++ v ++ ")",
   Bool.pick(String, String.eq(flag, "--share") && Bool.not(Cli.share_ok(Cli.share(v))), "--share takes DIR or DIR,quota=SIZE (bytes, or K, M, G) (not " ++ v ++ ")",
   Bool.pick(String, String.eq(flag, "--console-log") && Bool.not(Cli.conlog_ok(Cli.conlog(v))), "--console-log takes PATH,max=SIZE[,keep=N] (N up to 99) (not " ++ v ++ ")",
-  "")))))))
+  Bool.pick(String, String.eq(flag, "--forward") && Bool.not(Fwd.all_ok(Fwd.specs(v))), "--forward takes [ADDR:]HOSTPORT:GUESTPORT[,...] (ports 1 to 65535) (not " ++ v ++ ")",
+  ""))))))))
 
 # The first thing wrong with the arguments (flag and value pairs), or "".
 def Cli.check(args: List<String>) -> String:
