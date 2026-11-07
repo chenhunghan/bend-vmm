@@ -9,6 +9,7 @@ import ../src/vmm/snapfile.bend as Sf
 import ../src/vmm/control.bend as Ctl
 import ../src/dev/pointer.bend as Ptr
 import ../src/vmm/cli.bend as Cli
+import ../src/dev/conlog.bend as Cl
 import ../src/vmm/opts.bend as Op
 import ../src/disk/access.bend as Acc
 import ../src/net/limits.bend as Lim
@@ -1230,15 +1231,25 @@ def path_under(+dir: String, +name: String) -> String:
     case False{}:
       devices.disks(String.split(disk, ','))
 
-def devices.share(none: Bool, dir: String) -> IO(+List<D.DevKind>):
+# --share DIR[,quota=SIZE] (src/vmm/cli.bend; Cli.check refused a
+# malformed one): writes past the quota fail (src/fs/quota.bend).
+def devices.share.go(spec: Maybe<&2, Cli.ShareSpec>) -> IO(+List<D.DevKind>):
+  match spec:
+    case None{}:
+      IO.pure(+List<D.DevKind>, [])
+    case Some{Cli.ShareSpec{dir, U.U64{qh, ql}}}:
+      do IO<+List<D.DevKind>>:
+        +sh : U32 <- H.Hvf.share_open(dir)
+        die_if(U32.is_eq(sh, err()), "cannot open the shared directory")
+        _ : U32 <- H.Hvf.share_quota(sh, qh, ql)
+        return [D.P9Kind{sh, "share"}]
+
+def devices.share(none: Bool, spec: String) -> IO(+List<D.DevKind>):
   match none:
     case True{}:
       IO.pure(+List<D.DevKind>, [])
     case False{}:
-      do IO<+List<D.DevKind>>:
-        +sh : U32 <- H.Hvf.share_open(dir)
-        die_if(U32.is_eq(sh, err()), "cannot open the shared directory")
-        return [D.P9Kind{sh, "share"}]
+      devices.share.go(Cli.Cli.share(spec))
 
 # --vsock PATH: a virtio-vsock device (guest CID 3) whose host side is
 # Unix sockets under PATH.
@@ -1854,7 +1865,8 @@ def usage() -> String:
     "usage: bend-vmm --kernel Image [--initrd FILE] [--cmdline \"...\"] [--mem MiB] [--cpus N]",
     "                [--disk IMG[:ro],...] [--share DIR] [--vsock PATH] [--control PATH]",
     "                [--display WxH[,headless]] [--forward [ADDR:]HOSTPORT:GUESTPORT,...]",
-    "                [--lan DIR,ip=A.B.C.D/N[,mac=xx:xx:xx:xx:xx:xx]]",
+    "                [--lan DIR,ip=A.B.C.D/N[,mac=xx:xx:xx:xx:xx:xx]] [--share DIR,quota=SIZE]",
+    "                [--console-log PATH,max=SIZE[,keep=N]]",
     "       bend-vmm --firmware CODE.fd --vars VARS.fd [--disk IMG] ...   (UEFI)",
     "       bend-vmm --restore SNAPSHOT [--disk, --share, ... as taken] [--control PATH] [--forward ...]",
     "       bend-vmm --payload FILE.bin                                   (bare metal)",
@@ -1872,6 +1884,35 @@ def main.info(args: List<String>) -> Maybe<&2, String>:
     case first <> rest:
       main.info.pick(first)
 
+# --console-log PATH,max=SIZE[,keep=N]: the guest's console goes to PATH,
+# which rotates once it holds max bytes (src/dev/conlog.bend decides,
+# looking every 250 ms: it may pass max by what the guest prints meanwhile).
+@unsafe def console_log.loop(+max: U.U64, +keep: U32) -> IO(Unit):
+  do IO<Unit>:
+    IO.sleep(250)
+    +ws : +List<U32> <- H.Hvf.console_size()
+    console_log.rotate(Cl.Log.rotate(U.U64{H.Host.first(ws), H.Host.first(List.drop(&2, U32, ws, 1n))}, max), keep)
+    console_log.loop(max, keep)
+
+def console_log.rotate(go: Bool, keep: U32) -> IO(Unit):
+  match go:
+    case True{}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.console_rotate(keep)
+        return Unit{}
+    case False{}:
+      IO.pure(Unit, Unit{})
+
+@unsafe def console_log(spec: Maybe<&2, Cli.ConLog>) -> IO(Unit):
+  match spec:
+    case None{}:
+      IO.pure(Unit, Unit{})
+    case Some{Cli.ConLog{+path, max, keep}}:
+      do IO<Unit>:
+        +rc : U32 <- H.Hvf.console_log(path)
+        die_if(U32.is_ne(rc, 0), "cannot open the console log " ++ path ++ " (" ++ U32.show(rc) ++ ")")
+        IO.spawn(Unit, console_log.loop(max, keep))
+
 @unsafe def main.go(info: Maybe<&2, String>, +args: List<String>) -> IO(Unit):
   match info:
     case Some{text}:
@@ -1880,6 +1921,7 @@ def main.info(args: List<String>) -> Maybe<&2, String>:
       do IO<Unit>:
         +why : String = Cli.Cli.check(args)
         die_if(Bool.not(String.is_empty(why)), why ++ " (bend-vmm --help)")
+        console_log(Cli.Cli.conlog(Cli.Cli.find(args, "--console-log")))
         +o : Op.Opts = Op.Opts.parse(args, Op.Opts.default())
         main.mode(String.is_empty(Op.Opts.restore(o)), o)
 

@@ -3188,6 +3188,37 @@ static char* hvf_shares[HVF_MAX_SHARES];
 static int   hvf_nshares;
 
 // Hvf.share_open(path) -> U32: a share index, or 0xFFFFFFFF.
+// A share's quota (0: none) and the bytes its files hold, approximately:
+// summed once by Hvf.share_quota, then moved by the size each write,
+// truncate, remove and rename changes. src/fs/quota.bend decides from them
+// (Hvf.share_usage) whether a write may go on.
+static uint64_t hvf_share_quota_b[HVF_MAX_SHARES];
+static int64_t  hvf_share_used_b[HVF_MAX_SHARES];
+static int64_t  hvf_walk_sum;
+
+#include <ftw.h>
+static int hvf_walk_one(const char* p, const struct stat* st, int flag, struct FTW* ftw) {
+  if (flag == FTW_F && S_ISREG(st->st_mode)) {
+    hvf_walk_sum += st->st_size;
+  }
+  return 0;
+}
+
+// The size of the regular file at path (0 for anything else, or none).
+static int64_t hvf_lsize(const char* path) {
+  struct stat st;
+  return path && lstat(path, &st) == 0 && S_ISREG(st.st_mode) ? (int64_t)st.st_size : 0;
+}
+
+static void hvf_share_add(u32 sh, int64_t d) {
+  if (sh < HVF_MAX_SHARES && hvf_share_quota_b[sh]) {
+    hvf_share_used_b[sh] += d;
+    if (hvf_share_used_b[sh] < 0) {
+      hvf_share_used_b[sh] = 0;
+    }
+  }
+}
+
 Term hvf_share_open_run(Env e, Term* f, IoWork* w) {
   u64   n;
   char* path = io_cstr(e, f[0], &n);
@@ -3463,7 +3494,12 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
       }
       free(buf);
     } else {
-      ssize_t k = bytes ? pwrite(fd, bytes, nb, (off_t)a) : -1;
+      struct stat b0, b1;
+      int         acc = hvf_share_quota_b[sh] && fstat(fd, &b0) == 0;
+      ssize_t     k   = bytes ? pwrite(fd, bytes, nb, (off_t)a) : -1;
+      if (acc && fstat(fd, &b1) == 0) {
+        hvf_share_add(sh, (int64_t)b1.st_size - (int64_t)b0.st_size);
+      }
       if (k < 0) {
         res = hvf_fs_err(e, bytes ? errno : EINVAL);
       } else {
@@ -3478,7 +3514,12 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
     if (n < 0) {
       res = hvf_fs_err(e, EFAULT);
     } else {
-      int64_t k = hvf_iov_io(fd, op == 14, (off_t)a, hva, len, n, 0);
+      struct stat b0, b1;
+      int         acc = op == 14 && hvf_share_quota_b[sh] && fstat(fd, &b0) == 0;
+      int64_t     k   = hvf_iov_io(fd, op == 14, (off_t)a, hva, len, n, 0);
+      if (acc && fstat(fd, &b1) == 0) {
+        hvf_share_add(sh, (int64_t)b1.st_size - (int64_t)b0.st_size);
+      }
       if (hvf_trace & 8) {
         fprintf(stderr, "[trace] 9p %s %s at %llu: %lld bytes in %d pieces\n", op == 14 ? "write" : "read", rel,
                 (unsigned long long)a, (long long)k, n);
@@ -3496,12 +3537,15 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
   } else if (op == 5) {
     res = mkdir(path, b & 0777) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
   } else if (op == 6) {
-    res = (b ? rmdir(path) : unlink(path)) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+    int64_t was = b ? 0 : hvf_lsize(path);
+    res         = (b ? rmdir(path) : unlink(path)) != 0 ? hvf_fs_err(e, errno) : (hvf_share_add(sh, -was), hvf_fs_ok(e));
   } else if (op == 7) {
-    res = rename(path, path2) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+    int64_t over = hvf_lsize(path2);
+    res          = rename(path, path2) != 0 ? hvf_fs_err(e, errno) : (hvf_share_add(sh, -over), hvf_fs_ok(e));
   } else if (op == 8) {
     int t = open(path, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
-    res   = t < 0 || ftruncate(t, (off_t)a) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+    int64_t was = hvf_lsize(path);
+    res         = t < 0 || ftruncate(t, (off_t)a) != 0 ? hvf_fs_err(e, errno) : (hvf_share_add(sh, (int64_t)a - was), hvf_fs_ok(e));
     if (t >= 0) {
       close(t);
     }
@@ -4906,6 +4950,94 @@ Term hvf_fb_present_run(Env e, Term* f, IoWork* w) {
 
 #endif
 
+// The console log and share quotas (Hvf.console_log, Hvf.share_quota):
+// placed after the hot paths.
+
+// The console log (--console-log): stdout becomes the log file (dup2), so
+// console output takes the same path as ever.
+static char* hvf_clog_path;
+
+static int hvf_clog_open(int trunc) {
+  int fd = open(hvf_clog_path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC | (trunc ? O_TRUNC : 0), 0600);
+  if (fd < 0) {
+    return errno;
+  }
+  pthread_mutex_lock(&hvf_out_wmu);
+  int r = dup2(fd, 1) < 0 ? errno : 0;
+  pthread_mutex_unlock(&hvf_out_wmu);
+  close(fd);
+  return r;
+}
+
+// Hvf.console_log(path) -> U32: console output goes to the file at path
+// (appended; never through a symlink; this user's alone) instead of
+// stdout. 0, or an errno.
+Term hvf_console_log_run(Env e, Term* f, IoWork* w) {
+  u64 n;
+  free(hvf_clog_path);
+  hvf_clog_path = io_cstr(e, f[0], &n);
+  return (Term)(u32)hvf_clog_open(0);
+}
+
+// Hvf.console_size() -> List<U32>: the bytes the console log holds (hi,
+// lo); src/dev/conlog.bend decides when it rotates.
+Term hvf_console_size_run(Env e, Term* f, IoWork* w) {
+  struct stat st;
+  uint64_t    n     = hvf_clog_path && fstat(1, &st) == 0 ? (uint64_t)st.st_size : 0;
+  uint32_t    ws[2] = {(uint32_t)(n >> 32), (uint32_t)n};
+  return hvf_words(e, ws, 2);
+}
+
+// Hvf.console_rotate(keep) -> U32: PATH.(keep-1) .. PATH.1 move up one,
+// PATH becomes PATH.1 (with keep 0 it is dropped) and a new PATH starts.
+// 0, or an errno.
+Term hvf_console_rotate_run(Env e, Term* f, IoWork* w) {
+  u32 keep = (u32)f[0];
+  if (!hvf_clog_path) {
+    return (Term)0;
+  }
+  size_t n = strlen(hvf_clog_path) + 16;
+  char * a = io_mem(malloc(n)), *b = io_mem(malloc(n));
+  for (u32 i = keep; i > 1; i--) {
+    snprintf(a, n, "%s.%u", hvf_clog_path, i - 1);
+    snprintf(b, n, "%s.%u", hvf_clog_path, i);
+    rename(a, b);
+  }
+  if (keep >= 1) {
+    snprintf(b, n, "%s.1", hvf_clog_path);
+    rename(hvf_clog_path, b);
+  }
+  free(a);
+  free(b);
+  return (Term)(u32)hvf_clog_open(1);
+}
+
+// Hvf.share_quota(share, hi, lo) -> U32: the share's quota in bytes (0:
+// none); with one, what its files hold now is summed. 0.
+Term hvf_share_quota_run(Env e, Term* f, IoWork* w) {
+  u32 sh = (u32)f[0];
+  if (sh >= (u32)hvf_nshares) {
+    return (Term)HVF_ERR;
+  }
+  hvf_share_quota_b[sh] = hvf_u64(f[1], f[2]);
+  hvf_walk_sum          = 0;
+  if (hvf_share_quota_b[sh]) {
+    nftw(hvf_shares[sh], hvf_walk_one, 32, FTW_PHYS);
+  }
+  hvf_share_used_b[sh] = hvf_walk_sum;
+  return (Term)0;
+}
+
+// Hvf.share_usage(share) -> List<U32>: [bytes its files hold, its quota]
+// (each hi, lo).
+Term hvf_share_usage_run(Env e, Term* f, IoWork* w) {
+  u32      sh = (u32)f[0];
+  uint64_t u  = sh < HVF_MAX_SHARES ? (uint64_t)hvf_share_used_b[sh] : 0;
+  uint64_t q  = sh < HVF_MAX_SHARES ? hvf_share_quota_b[sh] : 0;
+  uint32_t ws[4] = {(uint32_t)(u >> 32), (uint32_t)u, (uint32_t)(q >> 32), (uint32_t)q};
+  return hvf_words(e, ws, 4);
+}
+
 // Effects the program never calls have no id; register only the used ones.
 // The VMM's pure work per exit is microseconds, so extra runtime worker
 // threads only add contention: default the runtime to one (BENDRTS wins).
@@ -4967,6 +5099,21 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.tcp_flush)
   io_eff(CID(Hvf.tcp_flush), hvf_tcp_flush_run);
+#endif
+#ifdef CID(Hvf.console_log)
+  io_eff(CID(Hvf.console_log), hvf_console_log_run);
+#endif
+#ifdef CID(Hvf.console_size)
+  io_eff(CID(Hvf.console_size), hvf_console_size_run);
+#endif
+#ifdef CID(Hvf.console_rotate)
+  io_eff(CID(Hvf.console_rotate), hvf_console_rotate_run);
+#endif
+#ifdef CID(Hvf.share_quota)
+  io_eff(CID(Hvf.share_quota), hvf_share_quota_run);
+#endif
+#ifdef CID(Hvf.share_usage)
+  io_eff(CID(Hvf.share_usage), hvf_share_usage_run);
 #endif
 #ifdef CID(Hvf.udp_ages)
   io_eff(CID(Hvf.udp_ages), hvf_udp_ages_run);

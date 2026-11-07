@@ -1,5 +1,6 @@
 import Base
 import ../src/boot/dtb.bend as T
+import ../src/lib/u64.bend as U
 import ../src/vmm/cli.bend as C
 
 # Spec for src/vmm/cli.bend: which command lines are valid, and --display.
@@ -86,3 +87,48 @@ law cli.lan_no_dir:
 
 law cli.lan_checked:
   {C.Cli.check(["--lan", "lan"]) == "--lan takes DIR,ip=A.B.C.D/N and/or mac=xx:xx:xx:xx:xx:xx (not lan)" : String}
+
+# Proposed: sizes, --share DIR[,quota=SIZE], --console-log PATH,max=SIZE[,keep=N],
+# and finding a flag's value (bend-vk8s F6).
+
+law cli.size_bytes:
+  {C.Cli.size("4096") == Some{U.U64{0, 4096}} : Maybe<&2, U.U64>}
+
+law cli.size_mib:
+  {C.Cli.size("256M") == Some{U.U64{0, 268435456}} : Maybe<&2, U.U64>}
+
+law cli.size_gib:
+  {C.Cli.size("8G") == Some{U.U64{2, 0}} : Maybe<&2, U.U64>}
+
+law cli.size_word:
+  {C.Cli.size("lots") == None{} : Maybe<&2, U.U64>}
+
+law cli.size_empty:
+  {C.Cli.size("") == None{} : Maybe<&2, U.U64>}
+
+law cli.share_plain:
+  {C.Cli.share("/srv/share") == Some{C.ShareSpec{"/srv/share", U.U64{0, 0}}} : Maybe<&2, C.ShareSpec>}
+
+law cli.share_quota:
+  {C.Cli.share("/srv/share,quota=256M") == Some{C.ShareSpec{"/srv/share", U.U64{0, 268435456}}} : Maybe<&2, C.ShareSpec>}
+
+law cli.share_bad:
+  {C.Cli.check(["--share", "/srv/share,ro=x"]) == "--share takes DIR or DIR,quota=SIZE (bytes, or K, M, G) (not /srv/share,ro=x)" : String}
+
+law cli.conlog:
+  {C.Cli.conlog("console.log,max=64M,keep=2") == Some{C.ConLog{"console.log", U.U64{0, 67108864}, 2}} : Maybe<&2, C.ConLog>}
+
+law cli.conlog_keep_default:
+  {C.Cli.conlog("console.log,max=1048576") == Some{C.ConLog{"console.log", U.U64{0, 1048576}, 1}} : Maybe<&2, C.ConLog>}
+
+law cli.conlog_no_max:
+  {C.Cli.conlog("console.log,keep=2") == None{} : Maybe<&2, C.ConLog>}
+
+law cli.conlog_zero_max:
+  {C.Cli.conlog("console.log,max=0") == None{} : Maybe<&2, C.ConLog>}
+
+law cli.find_last:
+  {C.Cli.find(["--kernel", "a", "--console-log", "x,max=1M", "--console-log", "y,max=2M"], "--console-log") == "y,max=2M" : String}
+
+law cli.find_none:
+  {C.Cli.find(["--kernel", "a"], "--console-log") == "" : String}

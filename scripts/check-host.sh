@@ -234,6 +234,22 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5c. limits on what a guest writes to the host: share quota, console log"
+  # a 1 MiB quota with 100 KiB already there: 300 KiB fits, 700 KiB stops
+  # at the quota (ENOSPC), and room freed by rm is usable again; the console
+  # goes to a log that rotates at 16 KiB, not to stdout
+  t=$(mktemp -d); mkdir "$t/sh"; dd if=/dev/zero of="$t/sh/existing" bs=1k count=100 2>/dev/null
+  # (the console goes to the log, so the input is timed rather than driven)
+  ( (slp 6; printf 'cd /mnt/share; dd if=/dev/zero of=a bs=1k count=300 2>/dev/null; dd if=/dev/zero of=b bs=1k count=700 2>&1 | grep -c "No space left"; rm a; dd if=/dev/zero of=c bs=1k count=200 2>/dev/null && echo C-OK; i=0; while [ $i -lt 400 ]; do echo line-$i-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; i=$((i+1)); done; sleep 1; echo LIM-DONE\n'; slp 10; printf 'poweroff -f\n'; slp 2) \
+    | alarm 60 ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --share "$t/sh,quota=1M" --console-log "$t/console.log,max=16K,keep=2" --cmdline "console=ttyAMA0 quiet" > "$t/stdout" 2>&1 )
+  out=$(cat "$t/stdout")
+  b=$(stat -f %z "$t/sh/b" 2>/dev/null || stat -c %s "$t/sh/b"); c=$(stat -f %z "$t/sh/c" 2>/dev/null || stat -c %s "$t/sh/c")
+  [ "$b" -lt 716800 ] && [ "$b" -gt 524288 ] && [ "$c" = 204800 ] && [ -f "$t/console.log.1" ] && ! grep -q "LIM-DONE" <<<"$out" && cat "$t"/console.log* | grep -aq "LIM-DONE" \
+    && grn "ok: share quota stops a write at 1 MiB (b: $b bytes) and frees with rm; the console log rotates" || { red "failed: limits (b $b, c $c)"; ls -la "$t"; tail -3 <<<"$out"; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 6. display: framebuffer, virtio keyboard and tablet"
   t=$(mktemp -d); sock=$t/vm.sock
   ( (slp 40) | alarm 40 ./out/bend-vmm --mem 512 --cpus 2 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --control "$sock" --display 640x480,headless --cmdline "console=ttyAMA0 quiet" > "$t/run.log" 2>&1 & )

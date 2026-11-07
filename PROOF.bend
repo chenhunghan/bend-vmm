@@ -44,3 +44,5 @@ import ./proofs/lan.bend as Proofs_lan
 import ./proofs/opts.bend as Proofs_opts
 import ./proofs/flush.bend as Proofs_flush
 import ./proofs/udpflow.bend as Proofs_udpflow
+import ./proofs/quota.bend as Proofs_quota
+import ./proofs/conlog.bend as Proofs_conlog

@@ -207,6 +207,26 @@ def Hvf.nat_send(conn: U32, bytes: +List<U32>) -> IO(+List<U32>):
 # A NAT connection's flusher: sends its pending data as the socket takes it.
 # 0: TcpUnblocked, then again; 3: TcpBlocked, then again; 2: TcpReset; 1:
 # done.
+def Hvf.console_log(path: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.console_size() -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.console_rotate(keep: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.share_quota(share: U32, hi: U32, lo: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.share_usage(share: U32) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.udp_ages() -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"

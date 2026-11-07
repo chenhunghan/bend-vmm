@@ -2,6 +2,7 @@ import Base
 import ../src/lib/u64.bend as U
 import ../src/vmm/abi.bend as V
 import ./hvf.bend as H
+import ../src/fs/quota.bend as Qt
 
 # Shared directories: V.FsOp on the host (host/hvf.c, "Shared directories").
 
@@ -63,7 +64,7 @@ def Fs.call(sh: U32, op: U32, p: String, p2: String, a: U.U64, b: U32, bytes: +L
         +ws : +List<U32> <- H.Hvf.fs(sh, op, p, p2, ah, al, b, bytes)
         return Fs.decode(ws)
 
-def Host.fs(sh: U32, op: V.FsOp) -> IO(V.FsResult):
+def Host.fs.do(sh: U32, op: V.FsOp) -> IO(V.FsResult):
   match op:
     case V.FsStat{p}:
       Fs.call(sh, 0, p, "", U.U64.zero(), 0, [])
@@ -95,3 +96,25 @@ def Host.fs(sh: U32, op: V.FsOp) -> IO(V.FsResult):
       Fs.call(sh, 13, p, "", off, 0, H.Host.iovs(iovs))
     case V.FsWriteRam{p, off, iovs}:
       Fs.call(sh, 14, p, "", off, 0, H.Host.iovs(iovs))
+
+# A write past the share's quota (src/fs/quota.bend) fails with ENOSPC
+# before it happens.
+def Host.fs.quota(ok: Bool, sh: U32, op: V.FsOp) -> IO(V.FsResult):
+  match ok:
+    case True{}:
+      Host.fs.do(sh, op)
+    case False{}:
+      IO.pure(V.FsResult, V.FsErr{Qt.Quota.enospc()})
+
+def Host.fs.grows(none: Bool, +growth: U.U64, +sh: U32, op: V.FsOp) -> IO(V.FsResult):
+  match none:
+    case True{}:
+      Host.fs.do(sh, op)
+    case False{}:
+      do IO<V.FsResult>:
+        +ws : +List<U32> <- H.Hvf.share_usage(sh)
+        Host.fs.quota(Qt.Quota.allows(Fs.w64(ws, 0n), growth, Fs.w64(ws, 2n)), sh, op)
+
+def Host.fs(+sh: U32, +op: V.FsOp) -> IO(V.FsResult):
+  +g = Qt.Quota.growth(op)
+  Host.fs.grows(U.U64.is_zero(g), g, sh, op)

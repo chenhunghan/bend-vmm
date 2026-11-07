@@ -82,3 +82,45 @@ def L.cli.lan_no_dir():
 def L.cli.lan_checked():
   {==}
 
+def L.cli.size_bytes():
+  {==}
+
+def L.cli.size_mib():
+  {==}
+
+def L.cli.size_gib():
+  {==}
+
+def L.cli.size_word():
+  {==}
+
+def L.cli.size_empty():
+  {==}
+
+def L.cli.share_plain():
+  {==}
+
+def L.cli.share_quota():
+  {==}
+
+def L.cli.share_bad():
+  {==}
+
+def L.cli.conlog():
+  {==}
+
+def L.cli.conlog_keep_default():
+  {==}
+
+def L.cli.conlog_no_max():
+  {==}
+
+def L.cli.conlog_zero_max():
+  {==}
+
+def L.cli.find_last():
+  {==}
+
+def L.cli.find_none():
+  {==}
+

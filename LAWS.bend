@@ -43,3 +43,5 @@ import ./laws/lan.bend as Laws_lan
 import ./laws/opts.bend as Laws_opts
 import ./laws/flush.bend as Laws_flush
 import ./laws/udpflow.bend as Laws_udpflow
+import ./laws/quota.bend as Laws_quota
+import ./laws/conlog.bend as Laws_conlog

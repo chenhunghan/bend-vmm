@@ -85,7 +85,8 @@ Options:
 | `--mem MiB` | guest RAM (default 512) |
 | `--cpus N` | vCPUs (default 1) |
 | `--disk A[,B:ro…]` | disk images (raw, or qcow2 by its header) as virtio-blk (`/dev/vda`, `/dev/vdb`, …); `:ro` attaches one read-only, and so is an image you may not write (said on stderr) |
-| `--share DIR` | a host directory over virtio-9p (`mount -t 9p -o trans=virtio,version=9p2000.L share /mnt`) |
+| `--share DIR[,quota=SIZE]` | a host directory over virtio-9p (`mount -t 9p -o trans=virtio,version=9p2000.L share /mnt`); with a quota (bytes, or K, M, G) the guest's writes past it fail with ENOSPC (its files' sizes are counted, approximately) |
+| `--console-log PATH,max=SIZE[,keep=N]` | the guest's console goes to PATH instead of stdout and rotates at about SIZE (PATH.1 … PATH.N, N 1 by default), so a guest cannot fill the host's disk with it |
 | `--payload FILE` | a bare-metal binary entered at the start of RAM |
 | `--vsock PATH` | virtio-vsock (guest CID 3) bridged to Unix sockets under PATH |
 | `--lan DIR,ip=A.B.C.D/N[,mac=…]` | a second NIC (`eth1`) on a LAN with every other VM given the same DIR (this user's, mode 0700): the VMM answers its guest's DHCP with that address (a lease that never ends; no router, so the NAT NIC keeps the default route); without `mac=` the MAC is 52:54:01 and the address's last three bytes |
