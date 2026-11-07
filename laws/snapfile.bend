@@ -152,20 +152,27 @@ law snapfile.plan_of_stray_word:
 law snapfile.plan_of_none_cpus:
   {S.Snapf.plan_of([1, 0, 1073741824, 0, 536870912, 0, 2, 0, 10, 0, 64, 0]) == S.Snapf.plan(1, w(1073741824), w(536870912), w(2), w(10), w(64), []) : Maybe<&2, +List<S.Piece>>}
 
-# Proposed: the header must describe the machine the snapshot's command
-# line makes (review of a6fba53).
+# Proposed: a restore makes the header's machine, at a base this host
+# uses, from whole MiB of RAM (review of a6fba53).
 
 law snapfile.agrees:
-  {S.Snapf.agrees(layout(), w(1073741824), 512, 2) == True{} : Bool}
-
-law snapfile.agrees_fewer_cpus_started:
-  {S.Snapf.agrees(layout(), w(1073741824), 512, 4) == True{} : Bool}
-
-law snapfile.agrees_too_many_cpus:
-  {S.Snapf.agrees(layout(), w(1073741824), 512, 1) == False{} : Bool}
-
-law snapfile.agrees_other_ram:
-  {S.Snapf.agrees(layout(), w(1073741824), 1024, 2) == False{} : Bool}
+  {S.Snapf.agrees(layout(), w(1073741824)) == True{} : Bool}
 
 law snapfile.agrees_other_base:
-  {S.Snapf.agrees(layout(), w(0), 512, 2) == False{} : Bool}
+  {S.Snapf.agrees(layout(), w(0)) == False{} : Bool}
+
+law snapfile.agrees_part_mib:
+  {S.Snapf.agrees(S.Layout{S.Head{1, 2, w(1073741824), w(536871424), w(2)}, w(40), w(50), w(10), w(98), w(64), [], w(16384)}, w(1073741824)) == False{} : Bool}
+
+law snapfile.mem_mib:
+  {S.Snapf.mem_mib(layout()) == 512 : U32}
+
+law snapfile.cpus_header:
+  {S.Snapf.cpus(layout(), 1) == 2 : U32}
+
+law snapfile.cpus_asked:
+  {S.Snapf.cpus(layout(), 4) == 4 : U32}
+
+# Proposed: a snapshot is written next to its path, then renamed over it.
+law snapfile.tmp:
+  {S.Snapf.tmp("out/vm.snap") == "out/vm.snap.bend-vmm-tmp" : String}

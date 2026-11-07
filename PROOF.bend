@@ -37,3 +37,6 @@ import ./proofs/addr.bend as Proofs_addr
 import ./proofs/snapfile.bend as Proofs_snapfile
 import ./proofs/control.bend as Proofs_control
 import ./proofs/pointer.bend as Proofs_pointer
+import ./proofs/cli.bend as Proofs_cli
+import ./proofs/access.bend as Proofs_access
+import ./proofs/limits.bend as Proofs_limits

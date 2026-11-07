@@ -149,6 +149,24 @@ static Term hvf_words(Env e, const uint32_t* w, u64 n) {
   return xs;
 }
 
+// A Bend list of U32 words as an array (malloc'ed); its length in *n.
+static uint32_t* hvf_u32s(Env e, Term t, u64* n) {
+  u64       cap = 1024, k = 0;
+  uint32_t* ws  = io_mem(malloc(cap * 4));
+  while (term_aux(t) == CID(Con)) {
+    Term fb[2];
+    spare_free(e, cls_fit(2), ctr_take(e, t, 2, fb));
+    if (k == cap) {
+      cap *= 2;
+      ws = io_mem(realloc(ws, cap * 4));
+    }
+    ws[k++] = (uint32_t)fb[0];
+    t       = fb[1];
+  }
+  *n = k;
+  return ws;
+}
+
 // vCPU threads
 // ============
 
@@ -1831,23 +1849,24 @@ Term hvf_stdin_wait_run(Env e, Term* f, IoWork* w) {
 static int hvf_disks[HVF_MAX_DISKS];
 static int hvf_ndisks;
 
-// Opens a disk image for the guest, read-write (read-only when ro, or when
-// the file allows no more), and locks it the way its use needs: a writer
+// Opens a disk image for the guest, read-write (read-only when ro; a
+// read-write open the host refuses is Bend's to retry read-only,
+// src/disk/access.bend, from Hvf.disk_err), and locks it the way its use needs: a writer
 // alone, readers together, so a second bend-vmm cannot write an image this
 // one reads or writes (two writers corrupt a qcow2 image at once). Its index,
 // or 0xFFFFFFFF.
+static int hvf_disk_last_err;
+
 static Term hvf_disk_open_as(Env e, Term path_t, int kind) {
   int   ro = kind != 0;
   u64   n;
   char* path = io_cstr(e, path_t, &n);
   int   fd   = -1;
+  errno      = EMFILE;
   if (hvf_ndisks < HVF_MAX_DISKS) {
-    fd = ro ? -1 : open(path, O_RDWR | O_CLOEXEC);
-    if (fd < 0 && (ro || errno == EACCES || errno == EROFS || errno == EPERM)) {
-      fd = open(path, O_RDONLY | O_CLOEXEC); // a read-only file (a qcow2 backing image)
-      ro = 1;
-    }
+    fd = open(path, (ro ? O_RDONLY : O_RDWR) | O_CLOEXEC);
   }
+  hvf_disk_last_err = fd < 0 ? errno : 0;
   // a backing file named inside an image is a regular file, never a device
   // or a FIFO
   struct stat st;
@@ -1868,6 +1887,11 @@ static Term hvf_disk_open_as(Env e, Term path_t, int kind) {
   }
   hvf_disks[hvf_ndisks] = fd;
   return (Term)(u32)hvf_ndisks++;
+}
+
+// Hvf.disk_err() -> U32: why the last disk open failed (an errno), or 0.
+Term hvf_disk_err_run(Env e, Term* f, IoWork* w) {
+  return (Term)(u32)hvf_disk_last_err;
 }
 
 // Hvf.disk_open(path) -> U32: a disk image the guest may write.
@@ -2213,33 +2237,56 @@ Term hvf_inflate_disk_run(Env e, Term* f, IoWork* w) {
 #define HVF_NOSIG 0 // macOS: SO_NOSIGPIPE on the socket
 #endif
 
-// Pending guest data per TCP connection: past HVF_WCAP the NAT stops taking
-// the guest's data (TcpBlocked) until it drains to half; past HVF_WHARD (the
-// guest sent on regardless), or with no byte taken for HVF_WSTALL ns, the
-// connection is reset. The flusher looks again every HVF_WTICK ns.
-#define HVF_WCAP   (4ull << 20)
-#define HVF_WHARD  (32ull << 20)
-#define HVF_WSTALL (60ull * 1000000000ull)
-#define HVF_WTICK  (100ull * 1000000ull)
+// The NAT's host-side limits are Bend's (src/net/limits.bend, which says
+// what each one means), handed over once at startup by Hvf.net_limits;
+// these are the same numbers until then. Per TCP connection: HVF_WCAP
+// pending bytes block the guest, HVF_WHARD or HVF_WSTALL ns with no byte
+// taken reset it, the flusher looks every HVF_WTICK ns. Over all
+// connections: HVF_WBUDGET blocks, HVF_WALL resets. A close with data
+// pending lingers HVF_WLINGER ns, at most HVF_WLINGER_MAX at once. UDP: at
+// most HVF_UDP_MAX flows, each closed after HVF_UDP_IDLE ns idle.
+static struct {
+  u64 wcap, whard, wstall, wtick, wbudget, wall, wlinger, wlinger_max, udp_max, udp_idle;
+} hvf_lim = {4ull << 20, 32ull << 20, 60000000000ull, 100000000ull, 64ull << 20, 96ull << 20, 30000000000ull, 64, 128,
+             60000000000ull};
+#define HVF_WCAP        hvf_lim.wcap
+#define HVF_WHARD       hvf_lim.whard
+#define HVF_WSTALL      hvf_lim.wstall
+#define HVF_WTICK       hvf_lim.wtick
+#define HVF_WBUDGET     hvf_lim.wbudget
+#define HVF_WALL        hvf_lim.wall
+#define HVF_WLINGER     hvf_lim.wlinger
+#define HVF_WLINGER_MAX hvf_lim.wlinger_max
+#define HVF_UDP_MAX     hvf_lim.udp_max
+#define HVF_UDP_IDLE    hvf_lim.udp_idle
 
-// Pending guest data over all connections: past HVF_WBUDGET the flusher of
-// each connection that holds some tells the NAT TcpBlocked; a send that
-// would take the total past HVF_WALL resets its connection instead, so the
-// pending bytes never pass HVF_WALL.
-#define HVF_WBUDGET (64ull << 20)
-#define HVF_WALL    (96ull << 20)
-
-// A close (V.TcpClose) with data still pending sends it for at most
-// HVF_WLINGER ns, and at most HVF_WLINGER_MAX connections do so at once:
-// past either the socket is reset. A guest RST (V.TcpAbort) resets it at
-// once.
-#define HVF_WLINGER     (30ull * 1000000000ull)
-#define HVF_WLINGER_MAX 64
-
-// UDP flows: at most HVF_UDP_MAX (the least recently used goes first), each
-// closed after HVF_UDP_IDLE ns without a datagram either way.
-#define HVF_UDP_MAX  128
-#define HVF_UDP_IDLE (60ull * 1000000000ull)
+// Hvf.net_limits(words) -> U32: takes the limits (Lim.wire: seven 64-bit
+// values as hi, lo, two counts, one more 64-bit value). 0, or EINVAL for a
+// list of another length.
+Term hvf_net_limits_run(Env e, Term* f, IoWork* w) {
+  u64       n;
+  uint32_t* ws = hvf_u32s(e, f[0], &n);
+  if (n != 18) {
+    free(ws);
+    return (Term)(u32)EINVAL;
+  }
+  u64 v[7];
+  for (int i = 0; i < 7; i++) {
+    v[i] = ((u64)ws[2 * i] << 32) | ws[2 * i + 1];
+  }
+  hvf_lim.wcap        = v[0];
+  hvf_lim.whard       = v[1];
+  hvf_lim.wstall      = v[2];
+  hvf_lim.wtick       = v[3];
+  hvf_lim.wbudget     = v[4];
+  hvf_lim.wall        = v[5];
+  hvf_lim.wlinger     = v[6];
+  hvf_lim.wlinger_max = ws[14];
+  hvf_lim.udp_max     = ws[15];
+  hvf_lim.udp_idle    = ((u64)ws[16] << 32) | ws[17];
+  free(ws);
+  return (Term)0;
+}
 
 typedef struct {
   int      used;
@@ -3543,23 +3590,6 @@ static int hvf_put_ram(int fd, off_t at) {
   return ftruncate(fd, at + (off_t)hvf_ram_size);
 }
 
-// A Bend list of U32 words as an array (malloc'ed); its length in *n.
-static uint32_t* hvf_u32s(Env e, Term t, u64* n) {
-  u64       cap = 1024, k = 0;
-  uint32_t* ws  = io_mem(malloc(cap * 4));
-  while (term_aux(t) == CID(Con)) {
-    Term fb[2];
-    spare_free(e, cls_fit(2), ctr_take(e, t, 2, fb));
-    if (k == cap) {
-      cap *= 2;
-      ws = io_mem(realloc(ws, cap * 4));
-    }
-    ws[k++] = (uint32_t)fb[0];
-    t       = fb[1];
-  }
-  *n = k;
-  return ws;
-}
 
 // What a snapshot being written holds between Hvf.snap_save and
 // Hvf.snap_commit: the machine words and the GIC state (each vCPU keeps its
@@ -3683,42 +3713,51 @@ static int hvf_snap_piece(int fd, const uint32_t* p, u64 n, u64* i) {
 }
 
 // Hvf.snap_commit(path, plan) -> U32: writes what Hvf.snap_save held
-// where the plan (src/vmm/snapfile.bend) puts each part, then frees it. 0,
-// or an errno.
+// where the plan (src/vmm/snapfile.bend) puts each part, into a new file at
+// path (Bend's temporary name, Snapf.tmp; Hvf.rename then puts it in
+// place), then frees it. A failed write removes the file. 0, or an errno.
 Term hvf_snap_commit_run(Env e, Term* f, IoWork* w) {
-  u64         n;
-  char*       path = io_cstr(e, f[0], &n);
-  u64         np;
-  uint32_t*   plan = hvf_u32s(e, f[1], &np);
-  struct stat dst, src;
-  int         err  = 0;
-  // guest RAM is mapped from the snapshot this VM was restored from: writing
-  // over that file would pull the RAM from under the guest
-  if (hvf_snap.active && stat(path, &dst) == 0 && fstat(hvf_snap.fd, &src) == 0 && dst.st_dev == src.st_dev
-      && dst.st_ino == src.st_ino) {
-    err = EBUSY;
+  u64       n;
+  char*     path = io_cstr(e, f[0], &n);
+  u64       np;
+  uint32_t* plan = hvf_u32s(e, f[1], &np);
+  int       err  = 0;
+  // the guest's whole RAM: readable by this user alone, and never written
+  // through a symlink planted at the path
+  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+  if (fd < 0) {
+    err = errno;
   } else {
-    // the guest's whole RAM: readable by this user alone, and never written
-    // through a symlink planted at the path
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
-    if (fd < 0) {
+    errno = 0;
+    for (u64 i = 0; !err && i < np;) {
+      if (hvf_snap_piece(fd, plan, np, &i) != 0) {
+        err = errno ? errno : EIO;
+      }
+    }
+    if (fsync(fd) != 0 && !err) {
       err = errno;
-    } else {
-      errno = 0;
-      for (u64 i = 0; !err && i < np;) {
-        if (hvf_snap_piece(fd, plan, np, &i) != 0) {
-          err = errno ? errno : EIO;
-        }
-      }
-      if (fsync(fd) != 0 && !err) {
-        err = errno;
-      }
-      close(fd);
+    }
+    close(fd);
+    if (err) {
+      unlink(path);
     }
   }
   free(path);
   free(plan);
   hvf_snapw_free();
+  return (Term)(u32)err;
+}
+
+// Hvf.rename(from, to) -> U32: 0, or an errno. A rename replaces a symlink
+// at to rather than following it, and a file mapped (a restored snapshot's
+// RAM) keeps its old contents.
+Term hvf_rename_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* from = io_cstr(e, f[0], &n);
+  char* to   = io_cstr(e, f[1], &n);
+  int   err  = rename(from, to) == 0 ? 0 : errno;
+  free(from);
+  free(to);
   return (Term)(u32)err;
 }
 
@@ -4624,6 +4663,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #ifdef CID(Hvf.vcpu_queue)
   io_eff(CID(Hvf.vcpu_queue), hvf_vcpu_queue_run);
 #endif
+#ifdef CID(Hvf.net_limits)
+  io_eff(CID(Hvf.net_limits), hvf_net_limits_run);
+#endif
 #ifdef CID(Hvf.tcp_connect)
   io_eff(CID(Hvf.tcp_connect), hvf_tcp_connect_run);
 #endif
@@ -4701,6 +4743,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.snap_commit)
   io_eff(CID(Hvf.snap_commit), hvf_snap_commit_run);
+#endif
+#ifdef CID(Hvf.rename)
+  io_eff(CID(Hvf.rename), hvf_rename_run);
 #endif
 #ifdef CID(Hvf.snap_drop)
   io_eff(CID(Hvf.snap_drop), hvf_snap_drop_run);
@@ -4818,6 +4863,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.disk_open_backing)
   io_eff(CID(Hvf.disk_open_backing), hvf_disk_open_backing_run);
+#endif
+#ifdef CID(Hvf.disk_err)
+  io_eff(CID(Hvf.disk_err), hvf_disk_err_run);
 #endif
 #ifdef CID(Hvf.disk_open_ro)
   io_eff(CID(Hvf.disk_open_ro), hvf_disk_open_ro_run);

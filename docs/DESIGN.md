@@ -185,20 +185,21 @@ floor (`Csum.small`, `Tcp.small`).
 - A vCPU waiting on another's interrupt pays Hypervisor.framework's ~80 µs
   WFI wake (a disk request from vCPU 1: ~100 µs against ~21 µs on vCPU 0).
 - No sandbox: the VMM runs with the user's rights.
-- Less C: the snapshot file's layout (src/vmm/snapfile.bend: the host
-  writes and reads byte ranges where it says, with its own memory-safety
-  caps), the control protocol and its framing (src/vmm/control.bend) and
-  the display window's input (src/dev/pointer.bend) are pure Bend with
-  laws now; the escape keys and address mapping already were. Still
-  decided in C: the NAT's host-side send buffers (caps, stall and linger
-  timers, the UDP flow table), which run on socket readiness inside the
-  event loop (moving them must not add an effect round trip per send), the
-  read-only fallback of a disk the user cannot write (host/hvf.c opens it
-  read-only, Bend still offers it writable), and the vCPU register and vGIC
-  blobs (opaque, per hypervisor). Unproven Bend in host/main.bend: option
-  parsing (an unknown flag or a bad number is ignored), --forward specs,
-  restore policy. Snapshots are written in place (a failed write loses the
-  file it replaces). Moving any of it: A/B scripts/bench.sh interleaved,
-  since Bend compiles the program as one state machine and even a changed
-  signature on the restore path (restore.machine) slowed every exit by
-  ~0.3 us.
+- Less C: decided in pure Bend with laws now: the snapshot file's layout
+  and where it is written (src/vmm/snapfile.bend: the host writes and reads
+  byte ranges where it says, with memory-safety caps of its own, then
+  renames a new file into place), the control protocol and its framing
+  (src/vmm/control.bend), the display window's input (src/dev/pointer.bend),
+  which command lines are valid (src/vmm/cli.bend), when a disk the host
+  will not open for writing is attached read-only (src/disk/access.bend),
+  the NAT's host-side limits (src/net/limits.bend, handed over at startup)
+  and whether firmware fits its flash bank (Layout.flash_fits); the escape
+  keys and address mapping already were. Still in C: the mechanisms those
+  limits drive (the send buffers, the flusher, the UDP flow table), which
+  run on socket readiness inside the event loop (moving their per-step
+  decisions would add work per send), gzip detection of a kernel, and the
+  vCPU register and vGIC blobs (opaque, per hypervisor). host/main.bend
+  still fills its options record and runs the restore policy unproven.
+  Moving anything: A/B scripts/bench.sh interleaved, since Bend compiles
+  the program as one state machine and even a changed signature on the
+  restore path (restore.machine) slowed every exit by ~0.3 us.

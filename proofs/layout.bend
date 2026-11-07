@@ -39,3 +39,12 @@ def L.layout.wraps():
 
 def L.layout.find_empty(a):
   {==}
+
+def L.layout.flash_fits_most():
+  {==}
+
+def L.layout.flash_too_big():
+  {==}
+
+def L.layout.flash_unsized():
+  {==}

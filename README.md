@@ -77,7 +77,7 @@ Options:
 | `--cmdline "…"` | kernel command line (default `console=ttyAMA0 earlycon=pl011,0x9000000`) |
 | `--mem MiB` | guest RAM (default 512) |
 | `--cpus N` | vCPUs (default 1) |
-| `--disk A[,B:ro…]` | disk images (raw, or qcow2 by its header) as virtio-blk (`/dev/vda`, `/dev/vdb`, …); `:ro` attaches one read-only |
+| `--disk A[,B:ro…]` | disk images (raw, or qcow2 by its header) as virtio-blk (`/dev/vda`, `/dev/vdb`, …); `:ro` attaches one read-only, and so is an image you may not write (said on stderr) |
 | `--share DIR` | a host directory over virtio-9p (`mount -t 9p -o trans=virtio,version=9p2000.L share /mnt`) |
 | `--payload FILE` | a bare-metal binary entered at the start of RAM |
 | `--vsock PATH` | virtio-vsock (guest CID 3) bridged to Unix sockets under PATH |
@@ -121,8 +121,10 @@ with `--display`, `screendump PATH` writes the
 screen as a PPM, `type TEXT` types on the virtio keyboard (`\n` is Return),
 `pointer X Y` moves the tablet on its 0..32767 scale). A snapshot holds guest RAM (sparse), every vCPU's
 registers, the GIC, and the whole device state; `--restore` maps the RAM
-copy-on-write, so restoring is immediate. TCP connections through the NAT do
-not survive a restore.
+copy-on-write, so restoring is immediate. A snapshot is written to a file
+of its own next to PATH and renamed over it, so a failed write keeps what
+PATH held, and a restored VM may snapshot over the file it came from. TCP
+connections through the NAT do not survive a restore.
 
 Stopping: `SIGTERM` (or `SIGHUP`) presses the guest's power button, the
 `KEY_POWER` key of a virtio keyboard every machine has, and gives the guest
@@ -210,7 +212,10 @@ elsewhere. What holds today:
   setgid or sticky bits.
 - Snapshots: `--restore` opens only the host files the command line names
   (and refuses a snapshot taken with others); the devices it decodes must be
-  the ones opened. Snapshots, screendumps and the control and vsock sockets
+  the ones opened; its header must describe a machine this host makes
+  (RAM at its base, whole MiB), and a malformed file is refused
+  (src/vmm/snapfile.bend bounds every part before the host reads it).
+  Snapshots, screendumps and the control and vsock sockets
   are this user's alone (mode 0600), and never written through a symlink.
 - Disk images: locked while in use; `:ro` disks and qcow2 backing files open
   read-only, and a backing file must be a regular file. A guest cannot

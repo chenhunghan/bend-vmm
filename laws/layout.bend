@@ -53,3 +53,13 @@ law layout.wraps:
 law layout.find_empty:
   for a: U.U64
   {L.Bus.find([], a) == None{} : Maybe<&2, L.Hit>}
+
+# Proposed: a firmware or variable store file must fit its 64 MiB flash bank.
+law layout.flash_fits_most:
+  {L.Layout.flash_fits(67108864) == True{} : Bool}
+
+law layout.flash_too_big:
+  {L.Layout.flash_fits(67108865) == False{} : Bool}
+
+law layout.flash_unsized:
+  {L.Layout.flash_fits(4294967295) == False{} : Bool}

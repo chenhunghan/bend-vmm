@@ -62,6 +62,12 @@ def Layout.flash1_base() -> U.U64:
 def Layout.flash_size() -> U32:
   67108864
 
+# A firmware or variable store file of size bytes fits its flash bank (a
+# larger one would be cut short; 4294967295 is a file the host could not
+# size).
+def Layout.flash_fits(+size: U32) -> Bool:
+  U32.is_le(size, Layout.flash_size()) && U32.is_ne(size, 4294967295)
+
 def Layout.virtio_base() -> U.U64:
   U.U64{0, 167772160}
 

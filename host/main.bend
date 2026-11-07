@@ -8,6 +8,9 @@ import ../src/vmm/snapshot.bend as Snap
 import ../src/vmm/snapfile.bend as Sf
 import ../src/vmm/control.bend as Ctl
 import ../src/dev/pointer.bend as Ptr
+import ../src/vmm/cli.bend as Cli
+import ../src/disk/access.bend as Acc
+import ../src/net/limits.bend as Lim
 import ../src/net/nat.bend as Nt
 import ../src/arm64/psci.bend as Ps
 import ../src/virtio/device.bend as D
@@ -119,31 +122,9 @@ def Opts.display(o: Opts) -> String:
     case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
       dp
 
-# "WxH" as a display; None for anything malformed.
-def display_of.mk(w: Maybe<&2, U32>, h: Maybe<&2, U32>) -> Maybe<&2, T.Display>:
-  match w h:
-    case Some{x} Some{y}:
-      Some{T.Display{x, y}}
-    case _ _:
-      None{}
-
-def display_of.go(ws: List<&2, String>) -> Maybe<&2, T.Display>:
-  match ws:
-    case Con{w, Con{h, Nil{}}}:
-      display_of.mk(U32.read(w), U32.read(h))
-    case _:
-      None{}
-
-def display_of.size(parts: List<&2, String>) -> Maybe<&2, T.Display>:
-  match parts:
-    case Con{size, rest}:
-      display_of.go(String.split(size, 'x'))
-    case Nil{}:
-      None{}
-
-# "WxH" or "WxH,headless" as a display; None for "" or anything malformed.
+# "WxH" or "WxH,headless" as a display (src/vmm/cli.bend).
 def display_of(spec: String) -> Maybe<&2, T.Display>:
-  display_of.size(String.split(spec, ','))
+  Cli.Cli.display(spec)
 
 # The display to open a window for: none when headless ("WxH,headless": the
 # framebuffer and screendump only, no window to take the host's pointer).
@@ -626,6 +607,14 @@ def snap.commit(path: String, plan: Maybe<&2, +List<Sf.Piece>>) -> IO(U32):
     case Some{ps}:
       H.Hvf.snap_commit(path, Sf.Snapf.pieces.wire(ps))
 
+# A written snapshot (rc 0) renamed into place.
+def snap.place(ok: Bool, rc: U32, tmp: String, path: String) -> IO(U32):
+  match ok:
+    case True{}:
+      H.Hvf.rename(tmp, path)
+    case False{}:
+      IO.pure(U32, rc)
+
 # Pauses (if running), writes the snapshot while holding the machine, and
 # resumes if it was running. Answers 0 or an errno.
 @unsafe def snapshot(+mc: Chan(M.Machine), path: String) -> IO(U32):
@@ -633,7 +622,10 @@ def snap.commit(path: String, plan: Maybe<&2, +List<Sf.Piece>>) -> IO(U32):
     +was : U32 <- pause_vm()
     +m : M.Machine <- take(mc)
     +sizes : +List<U32> <- H.Hvf.snap_save(Snap.Snap.encode(m))
-    rc : U32 <- snap.commit(path, Sf.Snapf.plan_of(sizes))
+    +dst : String = path
+    +tmp : String = Sf.Snapf.tmp(dst)
+    +wrote : U32 <- snap.commit(tmp, Sf.Snapf.plan_of(sizes))
+    rc : U32 <- snap.place(U32.is_zero(wrote), wrote, tmp, dst)
     put(mc, m)
     resume_if(U32.is_zero(was))
     return rc
@@ -1174,12 +1166,25 @@ def path_under(+dir: String, +name: String) -> String:
     case False{}:
       H.Hvf.disk_open(path)
 
+# An image the host would not open for writing (src/disk/access.bend says
+# which refusals) is attached read-only, and said so.
+@unsafe def devices.retry(again: Bool, ro: Bool, +path: String, +id: U32) -> IO(D.DevKind):
+  match again:
+    case True{}:
+      do IO<D.DevKind>:
+        log_err("bend-vmm: " ++ path ++ " cannot be written: attached read-only")
+        rid : U32 <- H.Hvf.disk_open_ro(path)
+        devices.open(True{}, path, rid)
+    case False{}:
+      devices.open(ro, path, id)
+
 @unsafe def devices.one(+spec: String) -> IO(D.DevKind):
   +ro = String.ends_with(spec, ":ro")
   +path : String = Bool.pick(String, ro, String.take(spec, Nat.sub(String.length(spec), 3n)), spec)
   do IO<D.DevKind>:
-    id : U32 <- devices.open_as(ro, path)
-    devices.open(ro, path, id)
+    +id : U32 <- devices.open_as(ro, path)
+    +e : U32 <- H.Hvf.disk_err()
+    devices.retry(Bool.not(ro) && U32.is_eq(id, err()) && Acc.Access.fallback(e), ro, path, id)
 
 # --disk a.img,b.img:ro gives one virtio-blk per image, in order.
 @unsafe def devices.disks(specs: List<&2, String>) -> IO(+List<D.DevKind>):
@@ -1310,6 +1315,10 @@ def boot_uefi(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
   match o:
     case Opts{k, i, p, cmdline, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd}:
       do IO<U.U64 & U.U64>:
+        +csz : U32 <- H.Hvf.file_size(fw)
+        die_if(Bool.not(L.Layout.flash_fits(csz)), "the firmware " ++ fw ++ " is missing or larger than its 64 MiB flash bank")
+        +vsz : U32 <- H.Hvf.file_size(nv)
+        die_if(Bool.not(String.is_empty(nv)) && Bool.not(L.Layout.flash_fits(vsz)), "the variable store " ++ nv ++ " is missing or larger than its 64 MiB flash bank")
         +rc : U32 <- H.Hvf.fw_load(fw, nv)
         die_if(U32.is_ne(rc, 0), "cannot load the firmware (step " ++ U32.show(rc) ++ ")")
         cfg : T.DtbCfg = T.DtbCfg{U32.to_nat(cpus), ram_bytes(mem), cmdline, None{}, nslots, display_of(dp), True{}}
@@ -1651,6 +1660,12 @@ def Opts.with_forward(o: Opts, fd: String) -> Opts:
     case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, was}:
       Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}
 
+# o with the RAM and vCPUs a restore makes (the snapshot header's).
+def Opts.with_size(o: Opts, mem: U32, cpus: U32) -> Opts:
+  match o:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+      Opts{k, i, p, c, mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd}
+
 def restore.opts(saved: List<String>, now: Opts) -> Opts:
   match now:
     case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
@@ -1782,8 +1797,9 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     hb : +List<U32> <- H.Hvf.snap_peek(0, 0, 40)
     +l : Sf.Layout <- snap.start(Sf.Snapf.head(Sf.Snapf.word(st, 1n), hb), Sf.Snapf.u64_at(st, 2n))
     saved : List<String> <- H.Hvf.snap_args()
-    +o : Opts = restore.opts(saved, now)
-    die_if(Bool.not(Sf.Snapf.agrees(l, ram(), Opts.mem(o), Opts.cpus(o))), "the snapshot's header does not match the machine its command line makes")
+    +o0 : Opts = restore.opts(saved, now)
+    +o : Opts = Opts.with_size(o0, Sf.Snapf.mem_mib(l), Sf.Snapf.cpus(l, Opts.cpus(o0)))
+    die_if(Bool.not(Sf.Snapf.agrees(l, ram())), "the snapshot's header does not describe a machine this host makes")
     +why : String = restore.differs(o, now)
     die_if(Bool.not(String.is_empty(why)), why)
     +vm : U32 <- H.Host.vm_init(Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), ram(), Opts.cpus(o))
@@ -1837,12 +1853,14 @@ def main.info(args: List<String>) -> Maybe<&2, String>:
     case first <> rest:
       main.info.pick(first)
 
-@unsafe def main.go(info: Maybe<&2, String>, args: List<String>) -> IO(Unit):
+@unsafe def main.go(info: Maybe<&2, String>, +args: List<String>) -> IO(Unit):
   match info:
     case Some{text}:
       IO.print(text)
     case None{}:
       do IO<Unit>:
+        +why : String = Cli.Cli.check(args)
+        die_if(Bool.not(String.is_empty(why)), why ++ " (bend-vmm --help)")
         +o : Opts = Opts.parse(args, Opts.default())
         main.mode(String.is_empty(Opts.restore(o)), o)
 
@@ -1858,5 +1876,6 @@ def args_bytes(args: List<String>) -> +List<U32>:
   do IO<Unit>:
     +args : List<String> <- IO.args()
     _ : U32 <- H.Hvf.set_args(args_bytes(args))
+    _ : U32 <- H.Hvf.net_limits(Lim.Lim.wire(Lim.Lim.default()))
     +rest : List<String> = List.drop(&1, String, args, 1n)
     main.go(main.info(rest), rest)

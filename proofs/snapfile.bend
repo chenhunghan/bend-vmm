@@ -118,14 +118,20 @@ def L.snapfile.plan_of_none_cpus():
 def L.snapfile.agrees():
   {==}
 
-def L.snapfile.agrees_fewer_cpus_started():
-  {==}
-
-def L.snapfile.agrees_too_many_cpus():
-  {==}
-
-def L.snapfile.agrees_other_ram():
-  {==}
-
 def L.snapfile.agrees_other_base():
+  {==}
+
+def L.snapfile.tmp():
+  {==}
+
+def L.snapfile.agrees_part_mib():
+  {==}
+
+def L.snapfile.mem_mib():
+  {==}
+
+def L.snapfile.cpus_header():
+  {==}
+
+def L.snapfile.cpus_asked():
   {==}

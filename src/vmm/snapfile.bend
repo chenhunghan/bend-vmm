@@ -203,6 +203,13 @@ def Snapf.plan_of(+ws: +List<U32>) -> Maybe<&2, +List<Piece>>:
     && U32.is_eq(U32.from_nat(List.length(&2, U32, tail)), (2 * Snapf.word(ws, 11n) : U32))
   Snapf.plan_of.pick(ok, Snapf.plan(Snapf.word(ws, 0n), Snapf.u64_at(ws, 1n), Snapf.u64_at(ws, 3n), Snapf.u64_at(ws, 5n), Snapf.u64_at(ws, 7n), Snapf.u64_at(ws, 9n), cs))
 
+# A snapshot is written to a file of its own next to path, then renamed
+# over path: a failed write leaves what path held (the host removes its
+# file), and the snapshot a VM was restored from, whose RAM is mapped, can
+# be replaced.
+def Snapf.tmp(path: String) -> String:
+  path ++ ".bend-vmm-tmp"
+
 # Reading
 # =======
 
@@ -277,14 +284,26 @@ def Snapf.fits(l: Layout, +size: U.U64) -> Bool:
     case Layout{Head{v, n, b, r, a}, ao, wo, nw, go, ng, cs, ro}:
       U.U64.is_le(U.U64.add(ro, r), size)
 
-# The header describes the machine the snapshot's own command line makes:
-# its RAM at base, mem MiB of it, and at most cpus vCPUs (a vCPU never
-# started is not saved). A snapshot is a file from elsewhere: the host maps
-# RAM by the header, so it must agree.
-def Snapf.agrees(l: Layout, +base: U.U64, +mem: U32, +cpus: U32) -> Bool:
+# The machine a restore makes is the header's: its RAM (in MiB) and at
+# least its vCPUs (a snapshot of a restored VM saves the restore's command
+# line, which names neither), at the most the saved --cpus asked for.
+def Snapf.mem_mib(l: Layout) -> U32:
   match l:
     case Layout{Head{v, n, b, r, a}, ao, wo, nw, go, ng, cs, ro}:
-      U.U64.is_eq(b, base) && U.U64.is_eq(r, U.U64.shl(20n, U.U64{0, mem})) && U32.is_le(n, cpus)
+      U.U64.lo(U.U64.shr(20n, r))
+
+def Snapf.cpus(l: Layout, +asked: U32) -> U32:
+  match l:
+    case Layout{Head{v, +n, b, r, a}, ao, wo, nw, go, ng, cs, ro}:
+      Bool.pick(U32, U32.is_lt(asked, n), n, asked)
+
+# The header describes a machine this host makes: RAM at base, a whole
+# number of MiB below 2^40 (Snapf.head bounds it). A snapshot is a file from
+# elsewhere: the host maps RAM by the header.
+def Snapf.agrees(l: Layout, +base: U.U64) -> Bool:
+  match l:
+    case Layout{Head{v, n, b, +r, a}, ao, wo, nw, go, ng, cs, ro}:
+      U.U64.is_eq(b, base) && U.U64.is_zero(U.U64.and(r, U.U64{0, 1048575}))
 
 # Wire forms for the host
 # =======================

@@ -36,3 +36,6 @@ import ./laws/addr.bend as Laws_addr
 import ./laws/snapfile.bend as Laws_snapfile
 import ./laws/control.bend as Laws_control
 import ./laws/pointer.bend as Laws_pointer
+import ./laws/cli.bend as Laws_cli
+import ./laws/access.bend as Laws_access
+import ./laws/limits.bend as Laws_limits

@@ -82,6 +82,10 @@ def Hvf.disk_open(path: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.disk_err() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.disk_open_ro(path: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
@@ -253,6 +257,14 @@ def Hvf.snap_save(words: +List<U32>) -> IO(+List<U32>):
   import "./hvf.js"
 
 def Hvf.snap_commit(path: String, plan: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.net_limits(words: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.rename(from: String, to: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 

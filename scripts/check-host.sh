@@ -194,6 +194,15 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
     [ $code = 1 ] && grep -q "cannot read the snapshot (22)" <<<"$out" || { ok=0; echo "bad$b: exit $code: $(tail -1 <<<"$out")"; }
   done
   [ $ok = 1 ] && grn "ok: restore refuses malformed snapshots (cut header, RAM cut short, 65 vCPUs, 2^32 machine words)" || { red "failed: malformed snapshots"; fail=1; }
+  # a snapshot of a restored VM (its command line is the restore's: no
+  # --mem, no --cpus; the header says), written over the very file its RAM
+  # is mapped from (a new file renamed into place), restores again
+  ( (slp 30) | ./out/bend-vmm --restore "$t/vm.snap" --control "$t/c.sock" > "$t/c.log" 2>&1 & )
+  slp 4
+  r=$(echo "snapshot $t/vm.snap" | nc -U "$t/c.sock"); echo quit | nc -U "$t/c.sock" > /dev/null; slp 2
+  out=$(drive 40 "restored" 'echo CHAIN-$((6*7)) $(nproc)\n' "CHAIN-42" 'poweroff -f\n' -- ./out/bend-vmm --restore "$t/vm.snap" 2>&1)
+  [ "$r" = saved ] && grep -q "^CHAIN-42 2" <<<"$(tr -d '\r' <<<"$out")" && ! ls "$t"/*.bend-vmm-tmp > /dev/null 2>&1 \
+    && grn "ok: a restored VM snapshots over its own file, and that restores (2 vCPUs)" || { red "failed: snapshot of a restored VM ($r)"; tail -5 <<<"$out"; fail=1; }
   # SIGTERM, and the control socket's powerdown, press the guest's power
   # button (the virtio keyboard's KEY_POWER): the guest powers off
   for how in sigterm powerdown; do
