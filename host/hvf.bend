@@ -260,6 +260,14 @@ def Hvf.snap_commit(path: String, plan: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.set_prog(n: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.prog() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.net_limits(words: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"

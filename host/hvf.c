@@ -1397,6 +1397,20 @@ static char*    hvf_argbuf;
 static uint64_t hvf_arglen;
 
 // Hvf.set_args(bytes) -> U32: the arguments, each followed by a 0 byte.
+// Hvf.set_prog(n) -> U32: the first n arguments start the VMM (["bend-vmm"],
+// or a caller's ["vk8s", "vmm"], Vmm.run); Hvf.prog answers it, so a
+// restore knows where the saved options begin.
+static uint32_t hvf_prog = 1;
+
+Term hvf_set_prog_run(Env e, Term* f, IoWork* w) {
+  hvf_prog = (u32)f[0];
+  return (Term)0;
+}
+
+Term hvf_prog_run(Env e, Term* f, IoWork* w) {
+  return (Term)hvf_prog;
+}
+
 Term hvf_set_args_run(Env e, Term* f, IoWork* w) {
   u64   n;
   char* b = io_cbuf(e, f[0], &n, CID(Con));
@@ -4824,6 +4838,12 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.set_args)
   io_eff(CID(Hvf.set_args), hvf_set_args_run);
+#endif
+#ifdef CID(Hvf.set_prog)
+  io_eff(CID(Hvf.set_prog), hvf_set_prog_run);
+#endif
+#ifdef CID(Hvf.prog)
+  io_eff(CID(Hvf.prog), hvf_prog_run);
 #endif
 #ifdef CID(Hvf.reexec)
   io_eff(CID(Hvf.reexec), hvf_reexec_run);

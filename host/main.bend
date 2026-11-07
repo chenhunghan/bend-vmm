@@ -1797,7 +1797,8 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     hb : +List<U32> <- H.Hvf.snap_peek(0, 0, 40)
     +l : Sf.Layout <- snap.start(Sf.Snapf.head(Sf.Snapf.word(st, 1n), hb), Sf.Snapf.u64_at(st, 2n))
     saved : List<String> <- H.Hvf.snap_args()
-    +o0 : Opts = restore.opts(saved, now)
+    +prog : U32 <- H.Hvf.prog()
+    +o0 : Opts = restore.opts(List.drop(&1, String, saved, Nat.sub(U32.to_nat(prog), 1n)), now)
     +o : Opts = Opts.with_size(o0, Sf.Snapf.mem_mib(l), Sf.Snapf.cpus(l, Opts.cpus(o0)))
     die_if(Bool.not(Sf.Snapf.agrees(l, ram())), "the snapshot's header does not describe a machine this host makes")
     +why : String = restore.differs(o, now)
@@ -1872,10 +1873,19 @@ def args_bytes(args: List<String>) -> +List<U32>:
     case Con{a, rest}:
       List.append(&2, U32, B.Bytes.of_cstring(a), args_bytes(rest))
 
+# The VMM as a library (one VM per process: the host layer's state is the
+# process's). prog is how this program starts the VMM again, on a guest
+# reset (Hvf.reexec) and in a snapshot's saved command line: ["bend-vmm"],
+# or a caller's ["vk8s", "vmm"]. flags are the VMM's options, as on the
+# command line. Errors end the process (IO.die); so do quit and power off.
+@unsafe def Vmm.run(+prog: List<String>, +flags: List<String>) -> IO(Unit):
+  do IO<Unit>:
+    _ : U32 <- H.Hvf.set_args(List.append(&2, U32, args_bytes(prog), args_bytes(flags)))
+    _ : U32 <- H.Hvf.set_prog(U32.from_nat(List.length(&1, String, prog)))
+    _ : U32 <- H.Hvf.net_limits(Lim.Lim.wire(Lim.Lim.default()))
+    main.go(main.info(flags), flags)
+
 @unsafe def main() -> IO(Unit):
   do IO<Unit>:
     +args : List<String> <- IO.args()
-    _ : U32 <- H.Hvf.set_args(args_bytes(args))
-    _ : U32 <- H.Hvf.net_limits(Lim.Lim.wire(Lim.Lim.default()))
-    +rest : List<String> = List.drop(&1, String, args, 1n)
-    main.go(main.info(rest), rest)
+    Vmm.run(List.take(&1, String, args, 1n), List.drop(&1, String, args, 1n))

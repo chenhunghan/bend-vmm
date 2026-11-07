@@ -67,6 +67,8 @@ io_eff(CID(Hvf.snap_commit), hvf_unavailable);
 io_eff(CID(Hvf.snap_drop), hvf_unavailable);
 io_eff(CID(Hvf.rename), hvf_unavailable);
 io_eff(CID(Hvf.net_limits), () => 0);
+io_eff(CID(Hvf.set_prog), () => 0);
+io_eff(CID(Hvf.prog), () => 1);
 io_eff(CID(Hvf.snap_peek), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.snap_load), hvf_unavailable);
 io_eff(CID(Hvf.snap_open), () => ({ $: CID(Con), head: 4294967295, tail: { $: CID(Nil) } }));
