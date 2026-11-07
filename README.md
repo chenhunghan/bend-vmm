@@ -123,7 +123,7 @@ in 0.2 s and Alpine its login prompt in about 5 s.
 Management: on the console, `Ctrl-A p` pauses or resumes, `Ctrl-A s` writes
 `./bend-vmm.snap`, `Ctrl-A x` quits, `Ctrl-A h` lists the keys. Over
 `--control`: `echo pause | nc -U SOCK` (also `resume`, `status`,
-`snapshot PATH`, `net` (the NAT's connections and flow state),
+`snapshot PATH`, `status json` (`{"state":"running"}`), `net` (the NAT's connections and flow state),
 `powerdown` (presses the guest's power button), `quit`;
 with `--display`, `screendump PATH` writes the
 screen as a PPM, `type TEXT` types on the virtio keyboard (`\n` is Return),
@@ -153,8 +153,8 @@ and notarized) and Linux arm64 and publishes both on a GitHub release
 ## As a library
 
 `main.bend` at the repository's root is a BendHub package (MIT):
-`import 0xeedc51d20a9b77c2ac19c4d8f57d45a6/main.bend as V` (bend-vmm as of
-25ed585), then `V.Vmm.run(prog, flags)` runs the VMM inside another Bend
+`import 0x88887434395ee9936f9b6f658e234140/main.bend as V` (bend-vmm as of
+65d5b99; each publish of a change has a new hash), then `V.Vmm.run(prog, flags)` runs the VMM inside another Bend
 program: `prog` is how that program starts the VMM again (on a guest reset,
 and in a snapshot's saved command line), e.g. `["vk8s", "vmm"]`, and `flags`
 are the options above. One VM per process (the host layer's state is the
