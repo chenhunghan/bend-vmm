@@ -57,69 +57,74 @@ def log_gated(drop: Bool, +g: U32, msg: String) -> IO(Unit):
       log_err(Bool.pick(String, U32.is_eq(g, 1), "", "[vmm] (" ++ U32.show((g - 1 : U32)) ++ " messages dropped)\n") ++ "[vmm] " ++ msg)
 
 type Opts is Data:
-  Opts{kernel: String, initrd: String, payload: String, cmdline: String, mem: U32, cpus: U32, disk: String, share: String, restore: String, control: String, vsock: String, display: String, firmware: String, vars: String, forward: String}
+  Opts{kernel: String, initrd: String, payload: String, cmdline: String, mem: U32, cpus: U32, disk: String, share: String, restore: String, control: String, vsock: String, display: String, firmware: String, vars: String, forward: String, lan: String}
 
 def Opts.default() -> Opts:
-  Opts{"", "", "", "console=ttyAMA0 earlycon=pl011,0x9000000", 512, 1, "", "", "", "", "", "", "", "", ""}
+  Opts{"", "", "", "console=ttyAMA0 earlycon=pl011,0x9000000", 512, 1, "", "", "", "", "", "", "", "", "", ""}
 
 def Opts.mem(o: Opts) -> U32:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       m
 
 def Opts.disk(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       d
 
 def Opts.kernel(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       k
 
 def Opts.share(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       sh
 
 def Opts.restore(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       rs
 
 def Opts.control(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       ct
 
 def Opts.cpus(o: Opts) -> U32:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       n
 
 def Opts.vsock(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       vk
 
 def Opts.firmware(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       fw
 
 def Opts.vars(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       nv
 
 def Opts.forward(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       fd
+
+def Opts.lan(o: Opts) -> String:
+  match o:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
+      ln
 
 def Opts.display(o: Opts) -> String:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       dp
 
 # "WxH" or "WxH,headless" as a display (src/vmm/cli.bend).
@@ -136,7 +141,7 @@ def Opts.num(s: String, d: U32) -> U32:
 
 def Opts.set(+flag: String, +v: String, o: Opts) -> Opts:
   match o:
-    case Opts{k, i, p, c, +m, +n, d, sh, rs, ct, vk, dp, fw, nv, +fd}:
+    case Opts{k, i, p, c, +m, +n, d, sh, rs, ct, vk, dp, fw, nv, +fd, ln}:
       Opts{
         Bool.pick(String, String.eq(flag, "--kernel"), v, k),
         Bool.pick(String, String.eq(flag, "--initrd"), v, i),
@@ -153,7 +158,8 @@ def Opts.set(+flag: String, +v: String, o: Opts) -> Opts:
         Bool.pick(String, String.eq(flag, "--firmware"), v, fw),
         Bool.pick(String, String.eq(flag, "--vars"), v, nv),
         # --forward may be given more than once: the lists join
-        Bool.pick(String, String.eq(flag, "--forward"), Bool.pick(String, String.is_empty(fd), v, fd ++ "," ++ v), fd)
+        Bool.pick(String, String.eq(flag, "--forward"), Bool.pick(String, String.is_empty(fd), v, fd ++ "," ++ v), fd),
+        Bool.pick(String, String.eq(flag, "--lan"), v, ln)
       }
 
 def Opts.parse(args: List<String>, o: Opts) -> Opts:
@@ -295,6 +301,10 @@ def vkey(+conn: U32) -> U32:
     case V.VmZeroRam{iovs, next}:
       do IO<A>:
         _ : U32 <- H.Hvf.zero_ram(H.Host.iovs(iovs))
+        interp(cpu, mc, done, A, next)
+    case V.VmLanToRam{iovs, next}:
+      do IO<A>:
+        _ : U32 <- H.Hvf.lan_to_ram(H.Host.iovs(iovs))
         interp(cpu, mc, done, A, next)
     case V.VmDiskAlloc{d, len, k}:
       do IO<A>:
@@ -557,6 +567,14 @@ def net_room(+m: M.Machine, udp: Bool, +conn: U32) -> Bool:
         return Unit{}
     case V.TcpAccepted{+conn}:
       IO.spawn(Unit, tcp_reader(mc, done, conn))
+    case V.LanSend{dst, iovs}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.lan_send(dst, H.Host.iovs(iovs))
+        return Unit{}
+    case V.LanRelease{}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.lan_release()
+        return Unit{}
 
 # Management: pause, resume and snapshots, from the console escapes
 # (Ctrl-A p / s) and the control socket (--control PATH).
@@ -743,6 +761,17 @@ def reply_rc(+rc: U32, ok: String) -> String:
 
 # vsock: the device's commands run on Unix sockets (host/hvf.c); what the
 # sockets report comes back as VsockEvents, each delivered by its own task.
+# The LAN NIC's receiver: the host holds a frame another VM sent (once the
+# last one is released) and the device copies it into the guest's buffers
+# (VmLanToRam, then LanRelease). Without a LAN it parks for good.
+@unsafe def lan_loop(+mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+  do IO<Unit>:
+    len : U32 <- H.Hvf.lan_recv()
+    m0 : M.Machine <- take(mc)
+    m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.lan(m0, len))
+    put(mc, m1)
+    lan_loop(mc, done)
+
 @unsafe def vs_deliver(+mc: Chan(M.Machine), +done: Chan(U32), ev: V.VsockEvent) -> IO(Unit):
   do IO<Unit>:
     m0 : M.Machine <- take(mc)
@@ -1235,14 +1264,34 @@ def devices.input(none: Bool) -> +List<D.DevKind>:
     case False{}:
       [D.InputKind{False{}}, D.InputKind{True{}}]
 
+# --lan: the LAN NIC (src/vmm/cli.bend reads the spec; Cli.check refused a
+# malformed one), its socket bound in the LAN directory.
+@unsafe def devices.lan.go(spec: Maybe<&2, Cli.LanSpec>) -> IO(+List<D.DevKind>):
+  match spec:
+    case None{}:
+      IO.pure(+List<D.DevKind>, [])
+    case Some{Cli.LanSpec{+dir, +mac, ip, prefix}}:
+      do IO<+List<D.DevKind>>:
+        +rc : U32 <- H.Hvf.lan_open(dir, mac)
+        die_if(U32.is_ne(rc, 0), "cannot join the LAN in " ++ dir ++ " (" ++ U32.show(rc) ++ "; it must be this user's directory, mode 0700)")
+        return [D.LanKind{mac, ip, prefix}]
+
+@unsafe def devices.lan(none: Bool, spec: String) -> IO(+List<D.DevKind>):
+  match none:
+    case True{}:
+      IO.pure(+List<D.DevKind>, [])
+    case False{}:
+      devices.lan.go(Cli.Cli.lan(spec))
+
 @unsafe def devices(o: Opts) -> IO(+List<D.DevKind>):
   match o:
-    case Opts{k, i, p, c, m, n, +d, +sh, rs, ct, +vk, dp, fw, nv, fd}:
+    case Opts{k, i, p, c, m, n, +d, +sh, rs, ct, +vk, dp, fw, nv, fd, +ln}:
       do IO<+List<D.DevKind>>:
+        +lan : +List<D.DevKind> <- devices.lan(String.is_empty(ln), ln)
         +disks : +List<D.DevKind> <- devices.disk(String.is_empty(d), d)
         +shares : +List<D.DevKind> <- devices.share(String.is_empty(sh), sh)
         +socks : +List<D.DevKind> <- devices.vsock(String.is_empty(vk), vk)
-        return List.append(&2, D.DevKind, base_devices(), List.append(&2, D.DevKind, disks, List.append(&2, D.DevKind, shares, List.append(&2, D.DevKind, socks, devices.input(String.is_empty(dp))))))
+        return List.append(&2, D.DevKind, base_devices(), List.append(&2, D.DevKind, lan, List.append(&2, D.DevKind, disks, List.append(&2, D.DevKind, shares, List.append(&2, D.DevKind, socks, devices.input(String.is_empty(dp)))))))
 
 def initrd_of(present: Bool, start: U.U64, end: U.U64) -> Maybe<&2, T.Initrd>:
   match present:
@@ -1264,7 +1313,7 @@ def no_image() -> I.ImageInfo:
 # Writes the DTB and the initrd where the layout says; answers (entry, dtb).
 def boot_linux.lay(lay: I.Layout, o: Opts, +ilen: U32, nslots: Nat) -> IO(U.U64 & U.U64):
   match lay o:
-    case I.Layout{kernel, kend, +dtb, +rd, rd_end} Opts{k, initrd, p, cmdline, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case I.Layout{kernel, kend, +dtb, +rd, rd_end} Opts{k, initrd, p, cmdline, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       +has_rd = U32.is_ne(ilen, 0)
       do IO<U.U64 & U.U64>:
         cfg : T.DtbCfg = T.DtbCfg{U32.to_nat(cpus), ram_bytes(mem), cmdline, initrd_of(has_rd, rd, rd_end), nslots, display_of(dp), False{}}
@@ -1285,7 +1334,7 @@ def boot_linux.placed(placed: Maybe<&2, I.Layout>, o: Opts, ilen: U32, nslots: N
 # 3.17), then places the DTB and initrd after it.
 def boot_linux(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
   match o:
-    case Opts{kernel, +initrd, p, c, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{kernel, +initrd, p, c, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       do IO<U.U64 & U.U64>:
         +klen : U32 <- H.Host.load(kernel, ram())
         die_if(U32.is_eq(klen, err()), "cannot load the kernel")
@@ -1299,7 +1348,7 @@ def boot_linux(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
 # A bare-metal payload runs from the start of RAM, with the DTB 64 MiB in.
 def boot_payload(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
   match o:
-    case Opts{k, i, payload, cmdline, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{k, i, payload, cmdline, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       +dtb = U.U64.add_u32(ram(), 67108864)
       do IO<U.U64 & U.U64>:
         cfg : T.DtbCfg = T.DtbCfg{U32.to_nat(cpus), ram_bytes(mem), cmdline, None{}, nslots, display_of(dp), False{}}
@@ -1313,7 +1362,7 @@ def boot_payload(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
 # edk2's ArmVirtQemu expects of QEMU's virt machine.
 def boot_uefi(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
   match o:
-    case Opts{k, i, p, cmdline, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{k, i, p, cmdline, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       do IO<U.U64 & U.U64>:
         +csz : U32 <- H.Hvf.file_size(fw)
         die_if(Bool.not(L.Layout.flash_fits(csz)), "the firmware " ++ fw ++ " is missing or larger than its 64 MiB flash bank")
@@ -1564,6 +1613,7 @@ def resolver() -> IO(Unit):
     IO.spawn(Unit, input_start(mc, done))
     IO.spawn(Unit, signals(True{}, mc, done))
     IO.spawn(Unit, vs_accept_loop(mc, done))
+    IO.spawn(Unit, lan_loop(mc, done))
     control(String.is_empty(ctl), ctl, mc, done)
     got : Maybe<&1, U32> <- Chan.recv(U32, done)
     +code : U32 = Maybe.default(&1, U32, got, 2)
@@ -1590,7 +1640,7 @@ def resolver() -> IO(Unit):
 
 @unsafe def start(o: Opts, kinds: +List<D.DevKind>, entry: U.U64 & U.U64) -> IO(Unit):
   match o:
-    case Opts{k, i, p, c, m, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{k, i, p, c, m, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       match entry:
         case (pc, dtb):
           start.go(cpus, ct, dp, fd, kinds, pc, dtb)
@@ -1604,10 +1654,19 @@ def resolver() -> IO(Unit):
 # registers come back as they are created), restores the GIC, and runs the
 # vCPUs that PSCI had on. Host sockets are gone, so the NAT starts empty.
 
+def forget_lan(ds: +List<D.Dev>) -> +List<D.Dev>:
+  match ds:
+    case Nil{}:
+      []
+    case Con{d, rest}:
+      D.Dev.forget_lan(d) <> forget_lan(rest)
+
+# After a restore the host holds nothing: the NAT's connections and the LAN
+# frame it held are gone.
 def forget_net(m: M.Machine) -> M.Machine:
   match m:
     case M.Machine{ps, u, ui, ds, ls, r, ri, n, fl}:
-      M.Machine{ps, u, ui, ds, ls, r, ri, Nt.Slirp.new(), fl}
+      M.Machine{ps, u, ui, forget_lan(ds), ls, r, ri, Nt.Slirp.new(), fl}
 
 def psci_on(m: M.Machine) -> +List<Bool>:
   match m:
@@ -1657,18 +1716,18 @@ def psci_on(m: M.Machine) -> +List<Bool>:
 # from the command line that restores it).
 def Opts.with_forward(o: Opts, fd: String) -> Opts:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, was}:
-      Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, was, ln}:
+      Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}
 
 # o with the RAM and vCPUs a restore makes (the snapshot header's).
 def Opts.with_size(o: Opts, mem: U32, cpus: U32) -> Opts:
   match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
-      Opts{k, i, p, c, mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd}
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
+      Opts{k, i, p, c, mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}
 
 def restore.opts(saved: List<String>, now: Opts) -> Opts:
   match now:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       Opts.with_forward(Opts.set("--control", ct, Opts.parse(List.drop(&1, String, saved, 1n), Opts.default())), fd)
 
 # A UEFI guest's flash banks come back from the same firmware and variable
@@ -1679,7 +1738,7 @@ def restore.flash(none: Bool, +o: Opts) -> IO(Unit):
       IO.pure(Unit, Unit{})
     case False{}:
       match o:
-        case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd}:
+        case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
           do IO<Unit>:
             +rc : U32 <- H.Hvf.fw_load(fw, nv)
             die_if(U32.is_ne(rc, 0), "cannot load the firmware (step " ++ U32.show(rc) ++ ")")
@@ -1709,7 +1768,8 @@ def restore.differs(+was: Opts, +now: Opts) -> String:
     restore.differs.first(restore.differs.one("--share", Opts.share(was), Opts.share(now)),
       restore.differs.first(restore.differs.one("--vsock", Opts.vsock(was), Opts.vsock(now)),
         restore.differs.first(restore.differs.one("--firmware", Opts.firmware(was), Opts.firmware(now)),
-          restore.differs.one("--vars", Opts.vars(was), Opts.vars(now))))))
+          restore.differs.first(restore.differs.one("--vars", Opts.vars(was), Opts.vars(now)),
+            restore.differs.one("--lan", Opts.lan(was), Opts.lan(now)))))))
 
 # The devices of a machine, as their snapshot words (Snap's Enc.kind).
 def kinds_words(ks: +List<D.DevKind>) -> +List<U32>:
@@ -1837,6 +1897,7 @@ def usage() -> String:
     "usage: bend-vmm --kernel Image [--initrd FILE] [--cmdline \"...\"] [--mem MiB] [--cpus N]",
     "                [--disk IMG[:ro],...] [--share DIR] [--vsock PATH] [--control PATH]",
     "                [--display WxH[,headless]] [--forward [ADDR:]HOSTPORT:GUESTPORT,...]",
+    "                [--lan DIR,ip=A.B.C.D/N[,mac=xx:xx:xx:xx:xx:xx]]",
     "       bend-vmm --firmware CODE.fd --vars VARS.fd [--disk IMG] ...   (UEFI)",
     "       bend-vmm --restore SNAPSHOT [--disk, --share, ... as taken] [--control PATH] [--forward ...]",
     "       bend-vmm --payload FILE.bin                                   (bare metal)",

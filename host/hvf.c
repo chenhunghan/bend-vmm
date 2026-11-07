@@ -3942,6 +3942,219 @@ Term hvf_snap_gic_run(Env e, Term* f, IoWork* w) {
   return (Term)(vmb_gic_restore(hvf_snap.gic, hvf_snap.ngic) == 0 ? 0 : HVF_ERR);
 }
 
+// The LAN NIC (--lan DIR; src/virtio/lan.bend decides where each frame
+// goes)
+// =====================================================================
+//
+// Every VM on a LAN binds a Unix datagram socket DIR/<mac>.sock, one
+// Ethernet frame per datagram. A frame for one MAC is sent to that socket; a
+// frame for every VM to each socket in DIR but this VM's own. The host holds
+// at most one received frame for the guest until Bend releases it
+// (Hvf.lan_release). DIR is this user's alone (mode 0700): only this user's
+// VMs reach each other. No root, no entitlement.
+#include <dirent.h>
+#include <sys/un.h>
+
+#define HVF_LAN_FRAME 1514 // an Ethernet frame without FCS (MTU 1500)
+
+static struct {
+  int      fd;
+  int      wake[2];
+  char     dir[104];
+  char     self[32];
+  uint8_t  held[HVF_LAN_FRAME];
+  uint32_t held_len;
+} hvf_lan = {.fd = -1, .wake = {-1, -1}};
+
+static void hvf_lan_name(char* out, size_t room, const uint8_t* mac) {
+  snprintf(out, room, "%02x-%02x-%02x-%02x-%02x-%02x.sock", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+static int hvf_lan_addr(struct sockaddr_un* a, const char* name);
+
+// This VM's socket leaves the LAN when the VMM exits.
+static void hvf_lan_leave(void) {
+  struct sockaddr_un a;
+  if (hvf_lan.fd >= 0 && hvf_lan_addr(&a, hvf_lan.self) == 0) {
+    unlink(a.sun_path);
+  }
+}
+
+static int hvf_lan_addr(struct sockaddr_un* a, const char* name) {
+  memset(a, 0, sizeof *a);
+  a->sun_family = AF_UNIX;
+  int k         = snprintf(a->sun_path, sizeof a->sun_path, "%s/%s", hvf_lan.dir, name);
+  return k > 0 && k < (int)sizeof a->sun_path ? 0 : -1;
+}
+
+// Hvf.lan_open(dir, mac) -> U32: binds this VM's socket on the LAN in dir
+// (made, mode 0700, when missing; refused unless it is this user's directory
+// and no one else's). 0, or an errno.
+Term hvf_lan_open_run(Env e, Term* f, IoWork* w) {
+  u64      n;
+  char*    dir = io_cstr(e, f[0], &n);
+  u64      nm;
+  char*    mac = io_cbuf(e, f[1], &nm, CID(Con));
+  int      err = 0;
+  struct stat st;
+  if (!mac || nm != 6 || n == 0 || n >= sizeof hvf_lan.dir) {
+    err = EINVAL;
+  } else if (mkdir(dir, 0700) != 0 && errno != EEXIST) {
+    err = errno;
+  } else if (lstat(dir, &st) != 0) {
+    err = errno;
+  } else if (!S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 077) != 0) {
+    err = EACCES;
+  }
+  struct sockaddr_un a;
+  if (!err) {
+    memcpy(hvf_lan.dir, dir, n + 1);
+    hvf_lan_name(hvf_lan.self, sizeof hvf_lan.self, (const uint8_t*)mac);
+    if (hvf_lan_addr(&a, hvf_lan.self) != 0) {
+      err = ENAMETOOLONG;
+    }
+  }
+  if (!err) {
+    unlink(a.sun_path); // a VM that ended without removing its socket
+    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    int sz = 1 << 20;
+    if (fd < 0 || bind(fd, (struct sockaddr*)&a, sizeof a) != 0 || pipe(hvf_lan.wake) != 0) {
+      err = errno;
+      if (fd >= 0) {
+        close(fd);
+      }
+    } else {
+      chmod(a.sun_path, 0600);
+      setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sz, sizeof sz);
+      setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz);
+      fcntl(fd, F_SETFL, O_NONBLOCK);
+      fcntl(fd, F_SETFD, FD_CLOEXEC);
+      fcntl(hvf_lan.wake[0], F_SETFL, O_NONBLOCK);
+      fcntl(hvf_lan.wake[0], F_SETFD, FD_CLOEXEC);
+      fcntl(hvf_lan.wake[1], F_SETFD, FD_CLOEXEC);
+      hvf_lan.fd = fd;
+      atexit(hvf_lan_leave);
+    }
+  }
+  free(dir);
+  free(mac);
+  return (Term)(u32)err;
+}
+
+static void hvf_lan_sendto(const char* name, struct iovec* iov, int niov) {
+  struct sockaddr_un a;
+  if (hvf_lan_addr(&a, name) != 0) {
+    return;
+  }
+  struct msghdr m = {.msg_name = &a, .msg_namelen = sizeof a, .msg_iov = iov, .msg_iovlen = niov};
+  (void)sendmsg(hvf_lan.fd, &m, MSG_DONTWAIT); // a VM gone or full drops it, as a switch would
+}
+
+// Hvf.lan_send(dst, iovs) -> U32: sends the frame in the pieces of guest
+// memory to the VM whose MAC is dst (6 bytes), or to every other VM on the
+// LAN (dst []). A frame past 1514 bytes, or a piece outside RAM, is
+// dropped. 0.
+Term hvf_lan_send_run(Env e, Term* f, IoWork* w) {
+  u64      nd, nb;
+  char*    dst = io_cbuf(e, f[0], &nd, CID(Con));
+  char*    b   = io_cbuf(e, f[1], &nb, CID(Con));
+  uint8_t* hva[HVF_MAX_IOVS];
+  u64      len[HVF_MAX_IOVS];
+  int      k = hvf_lan.fd >= 0 ? hvf_iovs(b, nb, hva, len, HVF_MAX_IOVS) : -1;
+  struct iovec iov[HVF_MAX_IOVS];
+  u64          total = 0;
+  for (int i = 0; i < k; i++) {
+    iov[i].iov_base = hva[i];
+    iov[i].iov_len  = len[i];
+    total += len[i];
+  }
+  if (k > 0 && total <= HVF_LAN_FRAME) {
+    if (dst && nd == 6) {
+      char name[32];
+      hvf_lan_name(name, sizeof name, (const uint8_t*)dst);
+      hvf_lan_sendto(name, iov, k);
+    } else {
+      DIR* d = opendir(hvf_lan.dir);
+      for (struct dirent* de; d && (de = readdir(d)) != NULL;) {
+        size_t l = strlen(de->d_name);
+        if (l > 5 && strcmp(de->d_name + l - 5, ".sock") == 0 && strcmp(de->d_name, hvf_lan.self) != 0) {
+          hvf_lan_sendto(de->d_name, iov, k);
+        }
+      }
+      if (d) {
+        closedir(d);
+      }
+    }
+  }
+  free(dst);
+  free(b);
+  return (Term)0;
+}
+
+static Term hvf_lan_read(Env e, IoWork* w) {
+  ssize_t n = recv(hvf_lan.fd, hvf_lan.held, sizeof hvf_lan.held, MSG_DONTWAIT);
+  if (n <= 0) {
+    return io_wait_on(w, hvf_lan.fd, POLLIN, 0, hvf_lan_read);
+  }
+  hvf_lan.held_len = (uint32_t)n;
+  return (Term)(u32)n;
+}
+
+static Term hvf_lan_taken(Env e, IoWork* w) {
+  char b[64];
+  while (read(hvf_lan.wake[0], b, sizeof b) > 0) {
+  }
+  if (hvf_lan.held_len) {
+    return io_wait_on(w, hvf_lan.wake[0], POLLIN, 0, hvf_lan_taken);
+  }
+  return hvf_lan_read(e, w);
+}
+
+// Hvf.lan_recv() -> U32: once the frame held for the guest is released,
+// parks until another VM sends one and holds it: its length. Parks for
+// good without a LAN.
+static Term hvf_lan_never(Env e, IoWork* w) {
+  return io_wait_on(w, 0, 0, io_tick() + 3600000000000ull, hvf_lan_never);
+}
+
+Term hvf_lan_recv_run(Env e, Term* f, IoWork* w) {
+  if (hvf_lan.fd < 0) {
+    return hvf_lan_never(e, w);
+  }
+  return hvf_lan_taken(e, w);
+}
+
+// Hvf.lan_to_ram(iovs) -> U32: copies the held frame into the pieces of
+// guest memory, in order. 0, or 0xFFFFFFFF when a piece leaves RAM.
+Term hvf_lan_to_ram_run(Env e, Term* f, IoWork* w) {
+  u64      nb;
+  char*    b = io_cbuf(e, f[0], &nb, CID(Con));
+  uint8_t* hva[HVF_MAX_IOVS];
+  u64      len[HVF_MAX_IOVS];
+  int      k = hvf_iovs(b, nb, hva, len, HVF_MAX_IOVS);
+  free(b);
+  if (k < 0) {
+    return (Term)HVF_ERR;
+  }
+  u64 at = 0;
+  for (int i = 0; i < k && at < hvf_lan.held_len; i++) {
+    u64 n = len[i] < hvf_lan.held_len - at ? len[i] : hvf_lan.held_len - at;
+    memcpy(hva[i], hvf_lan.held + at, n);
+    at += n;
+  }
+  return (Term)0;
+}
+
+// Hvf.lan_release() -> U32: the held frame went to the guest (or was
+// dropped): Hvf.lan_recv takes the next.
+Term hvf_lan_release_run(Env e, Term* f, IoWork* w) {
+  if (hvf_lan.held_len) {
+    hvf_lan.held_len = 0;
+    (void)!write(hvf_lan.wake[1], "x", 1);
+  }
+  return (Term)0;
+}
+
 // The control socket
 // ==================
 //
@@ -4838,6 +5051,21 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.set_args)
   io_eff(CID(Hvf.set_args), hvf_set_args_run);
+#endif
+#ifdef CID(Hvf.lan_open)
+  io_eff(CID(Hvf.lan_open), hvf_lan_open_run);
+#endif
+#ifdef CID(Hvf.lan_send)
+  io_eff(CID(Hvf.lan_send), hvf_lan_send_run);
+#endif
+#ifdef CID(Hvf.lan_recv)
+  io_eff(CID(Hvf.lan_recv), hvf_lan_recv_run);
+#endif
+#ifdef CID(Hvf.lan_to_ram)
+  io_eff(CID(Hvf.lan_to_ram), hvf_lan_to_ram_run);
+#endif
+#ifdef CID(Hvf.lan_release)
+  io_eff(CID(Hvf.lan_release), hvf_lan_release_run);
 #endif
 #ifdef CID(Hvf.set_prog)
   io_eff(CID(Hvf.set_prog), hvf_set_prog_run);

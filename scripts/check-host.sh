@@ -217,6 +217,23 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5b. LAN: two VMs on one segment (--lan)"
+  # B listens on TCP 6443 and UDP 8472 (VXLAN's port); A takes its address
+  # by DHCP from its own VMM, pings B (ARP broadcast, then unicast), sends
+  # 16 MiB over TCP and a datagram over UDP. NAT egress (eth0) is unchanged.
+  t=$(mktemp -d); lan=$t/lan
+  ( (slp 4; printf 'ip link set eth1 up; udhcpc -i eth1 -n -q -t 5 >/dev/null 2>&1; nc -l -p 6443 > /tmp/got & nc -u -l -p 8472 > /tmp/u &\n'; slp 30; printf 'echo B-GOT $(wc -c < /tmp/got) $(cat /tmp/u)\n'; slp 3; printf 'poweroff -f\n'; slp 2) \
+    | ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --lan "$lan,ip=10.0.3.12/24" --cmdline "console=ttyAMA0 quiet" > "$t/b.log" 2>&1 & )
+  slp 2
+  out=$(drive 60 "busybox shell" 'ip link set eth1 up; udhcpc -i eth1 -n -q -t 5 2>&1 | grep -o "lease of [0-9.]*"; sleep 3; ping -c 2 10.0.3.12 | grep -o "2 packets received"; dd if=/dev/zero bs=1M count=16 2>/dev/null | nc -w 2 10.0.3.12 6443; echo vxlan-ok | nc -u -w1 10.0.3.12 8472; echo LAN-DONE\n' "LAN-DONE" 'poweroff -f\n' -- \
+    ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --lan "$lan,ip=10.0.3.11/24" --cmdline "console=ttyAMA0 quiet" 2>&1 | tr -d '\r')
+  for _ in $(seq $((60 * SLOW))); do grep -aq "stopped" "$t/b.log" 2>/dev/null && break; sleep 1; done
+  grep -q "lease of 10.0.3.11" <<<"$out" && grep -q "2 packets received" <<<"$out" && grep -aq "B-GOT 16777216 vxlan-ok" "$t/b.log" && [ -z "$(ls "$lan")" ] \
+    && grn "ok: two VMs on a LAN (DHCP from the VMM, ping, 16 MiB TCP, UDP 8472; sockets gone after)" || { red "failed: LAN"; tail -5 <<<"$out"; tr -d '\r' < "$t/b.log" | grep -a "B-GOT\|stopped" | tail -3; ls "$lan"; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 6. display: framebuffer, virtio keyboard and tablet"
   t=$(mktemp -d); sock=$t/vm.sock
   ( (slp 40) | alarm 40 ./out/bend-vmm --mem 512 --cpus 2 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --control "$sock" --display 640x480,headless --cmdline "console=ttyAMA0 quiet" > "$t/run.log" 2>&1 & )

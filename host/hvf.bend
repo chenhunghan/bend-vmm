@@ -260,6 +260,26 @@ def Hvf.snap_commit(path: String, plan: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.lan_open(dir: String, mac: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.lan_send(dst: +List<U32>, iovs: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.lan_recv() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.lan_to_ram(iovs: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.lan_release() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.set_prog(n: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"

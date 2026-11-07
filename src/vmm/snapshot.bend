@@ -15,6 +15,7 @@ import ../virtio/input.bend as In
 import ./machine.bend as Mc
 import ../disk/store.bend as St
 import ../disk/qcow2.bend as Qc
+import ../virtio/lan.bend as Ln
 
 # The machine's device state as a stream of 32-bit words, for snapshots.
 # Snap.encode and Snap.decode are inverses (laws/snapshot.bend). The stream
@@ -134,6 +135,8 @@ def Enc.kind(k: D.DevKind) -> +List<U32>:
       [7, Bool.to_u32(tablet)]
     case D.BlkStoreKind{st, s, ro}:
       List.append(&2, U32, [8, Bool.to_u32(ro)], List.append(&2, U32, X.Enc.u64(s), Enc.store(st)))
+    case D.LanKind{mac, ip, prefix}:
+      List.append(&2, U32, 9 <> X.Enc.bytes(mac), [ip, prefix])
 
 def Enc.fids(fs: +List<F.Fid>) -> +List<U32>:
   match fs:
@@ -154,6 +157,16 @@ def Enc.vsock(v: Vs.Vsock) -> +List<U32>:
     case Vs.Vsock{cid, +cs, nid, np, +out}:
       List.append(&2, U32, X.Enc.u64(cid), List.append(&2, U32, [nid, np, Enc.len(Vs.VConn, cs)], List.append(&2, U32, Enc.vconns(cs), Enc.len(+List<U32>, out) <> Enc.frames(out))))
 
+# What waits for a LAN NIC's guest: 0 and a frame, or 1 and a held length.
+def Enc.lanrx(xs: +List<Ln.LanRx>) -> +List<U32>:
+  match xs:
+    case Nil{}:
+      []
+    case Con{Ln.Local{f}, rest}:
+      List.append(&2, U32, 0 <> X.Enc.bytes(f), Enc.lanrx(rest))
+    case Con{Ln.Held{n}, rest}:
+      List.append(&2, U32, [1, n], Enc.lanrx(rest))
+
 def Enc.state(s: D.DevState) -> +List<U32>:
   match s:
     case D.NoState{}:
@@ -168,6 +181,8 @@ def Enc.state(s: D.DevState) -> +List<U32>:
       4 <> Enc.vsock(v)
     case D.InDev{In.InputState{sel, sub, +evs}}:
       List.append(&2, U32, [5, sel, sub, Enc.len(+List<U32>, evs)], Enc.frames(evs))
+    case D.LanDev{Ln.Lan{mac, ip, p, +rx}}:
+      List.append(&2, U32, 6 <> X.Enc.bytes(mac), List.append(&2, U32, [ip, p, Enc.len(Ln.LanRx, rx)], Enc.lanrx(rx)))
 
 def Enc.dev(d: D.Dev) -> +List<U32>:
   match d:
@@ -431,10 +446,24 @@ def Dec.kind.by(t0: Bool, t1: Bool, t2: Bool, t3: Bool, t4: Bool, t5: Bool, t6: 
     case False{} False{} False{} False{} False{} False{} False{} False{} False{}:
       X.Dec.fail(D.DevKind)
 
+def Dec.kind.lan() -> X.Dec<D.DevKind>:
+  do X.Dec<D.DevKind>:
+    mac : +List<U32> <- X.Dec.bytes()
+    ip : U32 <- X.Dec.u32()
+    prefix : U32 <- X.Dec.u32()
+    return D.LanKind{mac, ip, prefix}
+
+def Dec.kind.top(lan: Bool, +t: U32) -> X.Dec<D.DevKind>:
+  match lan:
+    case True{}:
+      Dec.kind.lan()
+    case False{}:
+      Dec.kind.by(U32.is_eq(t, 0), U32.is_eq(t, 1), U32.is_eq(t, 2), U32.is_eq(t, 3), U32.is_eq(t, 4), U32.is_eq(t, 5), U32.is_eq(t, 6), U32.is_eq(t, 7), U32.is_eq(t, 8))
+
 def Dec.kind() -> X.Dec<D.DevKind>:
   do X.Dec<D.DevKind>:
     +t : U32 <- X.Dec.u32()
-    Dec.kind.by(U32.is_eq(t, 0), U32.is_eq(t, 1), U32.is_eq(t, 2), U32.is_eq(t, 3), U32.is_eq(t, 4), U32.is_eq(t, 5), U32.is_eq(t, 6), U32.is_eq(t, 7), U32.is_eq(t, 8))
+    Dec.kind.top(U32.is_eq(t, 9), t)
 
 def Dec.fids(n: Nat) -> X.Dec<+List<F.Fid>>:
   match n:
@@ -522,10 +551,48 @@ def Dec.state.by(t0: Bool, t1: Bool, t2: Bool, t3: Bool, t4: Bool, t5: Bool) -> 
     case False{} False{} False{} False{} False{} False{}:
       X.Dec.fail(D.DevState)
 
+def Dec.lanrx.one(local: Bool) -> X.Dec<Ln.LanRx>:
+  match local:
+    case True{}:
+      do X.Dec<Ln.LanRx>:
+        f : +List<U32> <- X.Dec.bytes()
+        return Ln.Local{f}
+    case False{}:
+      do X.Dec<Ln.LanRx>:
+        n : U32 <- X.Dec.u32()
+        return Ln.Held{n}
+
+def Dec.lanrx(n: Nat) -> X.Dec<+List<Ln.LanRx>>:
+  match n:
+    case 0n:
+      X.Dec.pure(+List<Ln.LanRx>, [])
+    case 1n+p:
+      do X.Dec<+List<Ln.LanRx>>:
+        +t : U32 <- X.Dec.u32()
+        x : Ln.LanRx <- Dec.lanrx.one(U32.is_zero(t))
+        rest : +List<Ln.LanRx> <- Dec.lanrx(p)
+        return x <> rest
+
+def Dec.state.lan() -> X.Dec<D.DevState>:
+  do X.Dec<D.DevState>:
+    mac : +List<U32> <- X.Dec.bytes()
+    ip : U32 <- X.Dec.u32()
+    p : U32 <- X.Dec.u32()
+    n : Nat <- Dec.count()
+    rx : +List<Ln.LanRx> <- Dec.lanrx(n)
+    return D.LanDev{Ln.Lan{mac, ip, p, rx}}
+
+def Dec.state.top(lan: Bool, +t: U32) -> X.Dec<D.DevState>:
+  match lan:
+    case True{}:
+      Dec.state.lan()
+    case False{}:
+      Dec.state.by(U32.is_eq(t, 0), U32.is_eq(t, 1), U32.is_eq(t, 2), U32.is_eq(t, 3), U32.is_eq(t, 4), U32.is_eq(t, 5))
+
 def Dec.state() -> X.Dec<D.DevState>:
   do X.Dec<D.DevState>:
     +t : U32 <- X.Dec.u32()
-    Dec.state.by(U32.is_eq(t, 0), U32.is_eq(t, 1), U32.is_eq(t, 2), U32.is_eq(t, 3), U32.is_eq(t, 4), U32.is_eq(t, 5))
+    Dec.state.top(U32.is_eq(t, 6), t)
 
 def Dec.dev() -> X.Dec<D.Dev>:
   do X.Dec<D.Dev>:

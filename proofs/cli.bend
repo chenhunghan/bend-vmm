@@ -52,3 +52,33 @@ def L.cli.display_zero():
 def L.cli.display_none():
   {==}
 
+def L.cli.lan_ip():
+  {==}
+
+def L.cli.lan_mac():
+  {==}
+
+def L.cli.lan_mac_only():
+  {==}
+
+def L.cli.lan_neither():
+  {==}
+
+def L.cli.lan_multicast_mac():
+  {==}
+
+def L.cli.lan_bad_prefix():
+  {==}
+
+def L.cli.lan_no_prefix():
+  {==}
+
+def L.cli.lan_unknown_option():
+  {==}
+
+def L.cli.lan_no_dir():
+  {==}
+
+def L.cli.lan_checked():
+  {==}
+

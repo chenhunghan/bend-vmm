@@ -27,6 +27,13 @@ sockets and guest memory where Bend tells it to.
   10.0.2.2), and TCP port forwarding from the host into the guest
   (`--forward 2222:22`, like QEMU's `hostfwd`: `ssh -p 2222 127.0.0.1`
   reaches the guest's sshd).
+- VM-to-VM networking with no root or entitlements: `--lan DIR,ip=…` gives
+  a VM a second NIC on a LAN shared by every VM naming the same directory
+  (one Unix datagram socket per VM, named by its MAC; frames go from guest
+  memory to the peer's socket, broadcasts to all, no switch process). ARP,
+  any TCP or UDP port, VXLAN; each VM's own VMM answers its DHCP with the
+  address given, so it keeps it across restarts. The NAT NIC stays the
+  default route.
 - Host directory sharing over virtio-9p (9P2000.L).
 - virtio-vsock to Unix sockets on the host (`--vsock PATH`, Firecracker's
   convention: the guest's connection to host port P reaches `PATH_P`; a host
@@ -81,6 +88,7 @@ Options:
 | `--share DIR` | a host directory over virtio-9p (`mount -t 9p -o trans=virtio,version=9p2000.L share /mnt`) |
 | `--payload FILE` | a bare-metal binary entered at the start of RAM |
 | `--vsock PATH` | virtio-vsock (guest CID 3) bridged to Unix sockets under PATH |
+| `--lan DIR,ip=A.B.C.D/N[,mac=…]` | a second NIC (`eth1`) on a LAN with every other VM given the same DIR (this user's, mode 0700): the VMM answers its guest's DHCP with that address (a lease that never ends; no router, so the NAT NIC keeps the default route); without `mac=` the MAC is 52:54:01 and the address's last three bytes |
 | `--forward [ADDR:]HP:GP[,…]` | TCP port forwarding: the host listens on ADDR (default `127.0.0.1`; `0.0.0.0` for every interface) port HP, and each client is connected to the guest's port GP (from 10.0.2.2); repeatable, at most 16; a port already in use stops the VMM at startup |
 | `--firmware FILE` | UEFI firmware (`out/uefi/code.fd` from `scripts/uefi-assets.sh`) instead of `--kernel` |
 | `--vars FILE` | the UEFI variable store (copy `out/uefi/vars.fd` per VM); without it variables last one run |

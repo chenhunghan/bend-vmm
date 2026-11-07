@@ -12,6 +12,7 @@ import ./net.bend as N
 import ../fs/p9.bend as P
 import ./vsock.bend as Vs
 import ./input.bend as In
+import ./lan.bend as Ln
 
 # A virtio-mmio device: the transport register model plus the device logic
 # behind it, as the machine sees it.
@@ -71,6 +72,9 @@ type DevKind is Data:
   P9Kind{share: U32, tag: String}
   VsockKind{cid: U.U64}
   InputKind{tablet: Bool}
+  # virtio-net on a host LAN (src/virtio/lan.bend): its MAC, and the
+  # address its DHCP answers give (ip 0: none) with its prefix length.
+  LanKind{mac: +List<U32>, ip: U32, prefix: U32}
 
 # The per-kind state of a device.
 type DevState is Data:
@@ -82,6 +86,7 @@ type DevState is Data:
   P9Dev{p9: P.P9State}
   VsState{vs: Vs.Vsock}
   InDev{input: In.InputState}
+  LanDev{lan: Ln.Lan}
 
 type Dev is Data:
   Dev{kind: DevKind, mmio: M.VirtioMmio, queues: +List<Q.Vq>, state: DevState}
@@ -120,6 +125,8 @@ def Dev.mmio(kind: DevKind) -> M.VirtioMmio:
       M.VirtioMmio.new(19, Dev.features(), 3n, 256, Vs.Vs.config(cid))
     case InputKind{tablet}:
       M.VirtioMmio.new(18, Dev.features(), 2n, 256, In.Input.config(tablet, 0, 0))
+    case LanKind{mac, ip, prefix}:
+      M.VirtioMmio.new(1, Ln.Lan.features(), 2n, 256, Ln.Lan.config(mac))
 
 # The state of a fresh device of the given kind.
 def Dev.state(kind: DevKind) -> DevState:
@@ -142,6 +149,8 @@ def Dev.state(kind: DevKind) -> DevState:
       VsState{Vs.Vsock.new(cid)}
     case InputKind{tablet}:
       InDev{In.InputState.new()}
+    case LanKind{mac, ip, prefix}:
+      LanDev{Ln.Lan.new(mac, ip, prefix)}
 
 def Dev.new(kind: DevKind) -> Dev:
   +kind = kind
@@ -217,6 +226,8 @@ def Dev.process(-R: Type, k: DevKind, q: Q.Vq) -> V.Op<R, Q.Vq & Bool>:
       V.Op.pure(R, Q.Vq & Bool, (q, False{}))
     case InputKind{tablet}:
       V.Op.pure(R, Q.Vq & Bool, (q, False{}))
+    case LanKind{mac, ip, prefix}:
+      V.Op.pure(R, Q.Vq & Bool, (q, False{}))
 
 # The pending console input of a state (none for other kinds).
 def Dev.input_of(st: DevState) -> +List<U32>:
@@ -232,6 +243,8 @@ def Dev.input_of(st: DevState) -> +List<U32>:
     case VsState{v}:
       []
     case InDev{i}:
+      []
+    case LanDev{l}:
       []
 
 # The pending frames of a state (none for other kinds).
@@ -249,6 +262,8 @@ def Dev.frames_of(st: DevState) -> +List<+List<U32>>:
       []
     case InDev{i}:
       []
+    case LanDev{l}:
+      []
 
 # The 9p server state of a state (a fresh one for other kinds).
 def Dev.p9_of(st: DevState) -> P.P9State:
@@ -264,6 +279,8 @@ def Dev.p9_of(st: DevState) -> P.P9State:
     case VsState{v}:
       P.P9State.new()
     case InDev{i}:
+      P.P9State.new()
+    case LanDev{l}:
       P.P9State.new()
 
 # The last Dev.max_frames() frames.
@@ -344,6 +361,8 @@ def Dev.vs_of(st: DevState) -> Vs.Vsock:
       Vs.Vsock.new(U.U64{0, 3})
     case InDev{i}:
       Vs.Vsock.new(U.U64{0, 3})
+    case LanDev{l}:
+      Vs.Vsock.new(U.U64{0, 3})
 
 def Dev.pass.vs_tx(r: Vs.VsTx) -> Pass:
   match r:
@@ -401,6 +420,37 @@ def Dev.pass.input(-R: Type, ev: Bool, st: DevState, q: Q.Vq) -> V.Op<R, Pass>:
         r : Con.ConTx <- Con.Con.tx(R, q)
         return Dev.pass.in_status(st, r)
 
+# The LAN state of a state (a blank one for other kinds).
+def Dev.lan_of(st: DevState) -> Ln.Lan:
+  match st:
+    case LanDev{l}:
+      l
+    case _:
+      Ln.Lan.new([0, 0, 0, 0, 0, 0], 0, 0)
+
+def Dev.pass.lan_tx(r: Ln.LanTx) -> Pass:
+  match r:
+    case Ln.LanTx{q, l, used}:
+      Pass{q, LanDev{l}, [], [], [], used}
+
+def Dev.pass.lan_rx(l: Ln.Lan, r: Ln.LanRxOut) -> Pass:
+  match r:
+    case Ln.LanRxOut{q, left, used}:
+      Pass{q, LanDev{Ln.Lan.with_rx(l, left)}, [], [], [], used}
+
+# The LAN device's pass: transmit (queue 1) or receive (queue 0).
+def Dev.pass.lan(-R: Type, tx: Bool, st: DevState, q: Q.Vq) -> V.Op<R, Pass>:
+  match tx:
+    case True{}:
+      do V.Op<R, Pass>:
+        r : Ln.LanTx <- Ln.Lan.tx(R, Dev.lan_of(st), q)
+        return Dev.pass.lan_tx(r)
+    case False{}:
+      +l = Dev.lan_of(st)
+      do V.Op<R, Pass>:
+        r : Ln.LanRxOut <- Ln.Lan.rx(R, l, q)
+        return Dev.pass.lan_rx(l, r)
+
 # Runs the kind's pass on queue sel (q).
 def Dev.pass(-R: Type, k: DevKind, st: DevState, +sel: U32, q: Q.Vq) -> V.Op<R, Pass>:
   match k:
@@ -416,6 +466,8 @@ def Dev.pass(-R: Type, k: DevKind, st: DevState, +sel: U32, q: Q.Vq) -> V.Op<R, 
       Dev.pass.vsock(R, U32.is_eq(sel, 1), U32.is_eq(sel, 0), st, q)
     case InputKind{tablet}:
       Dev.pass.input(R, U32.is_eq(sel, 0), st, q)
+    case LanKind{mac, ip, prefix}:
+      Dev.pass.lan(R, U32.is_eq(sel, 1), st, q)
     case RngKind{}:
       do V.Op<R, Pass>:
         r : Q.Vq & Bool <- Dev.process(R, RngKind{}, q)
@@ -492,6 +544,13 @@ def Dev.is_vsock(k: DevKind) -> Bool:
     case _:
       False{}
 
+def Dev.is_lan(k: DevKind) -> Bool:
+  match k:
+    case LanKind{mac, ip, prefix}:
+      True{}
+    case _:
+      False{}
+
 def Dev.on_event(-R: Type, ev: M.MmioEvent, k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState) -> V.Op<R, DevOut>:
   match ev:
     case M.NoEvent{}:
@@ -506,7 +565,7 @@ def Dev.on_event(-R: Type, ev: M.MmioEvent, k: DevKind, m: M.VirtioMmio, qs: +Li
       +k = k
       do V.Op<R, DevOut>:
         o : DevOut <- Dev.notify(R, Dev.qget(qs, 0, q), k, m, qs, st, q)
-        Dev.after.vsock(R, Dev.is_vsock(k) && U32.is_eq(q, 1), o)
+        Dev.after.vsock(R, (Dev.is_vsock(k) || Dev.is_lan(k)) && U32.is_eq(q, 1), o)
 
 def Dev.write.fin(-R: Type, k: DevKind, qs: +List<Q.Vq>, st: DevState, r: M.VirtioMmio & M.MmioEvent) -> V.Op<R, DevOut>:
   match r:
@@ -564,6 +623,8 @@ def Dev.is_console(k: DevKind) -> Bool:
       False{}
     case InputKind{tablet}:
       False{}
+    case LanKind{mac, ip, prefix}:
+      False{}
 
 def Dev.is_net(k: DevKind) -> Bool:
   match k:
@@ -584,6 +645,8 @@ def Dev.is_net(k: DevKind) -> Bool:
     case VsockKind{cid}:
       False{}
     case InputKind{tablet}:
+      False{}
+    case LanKind{mac, ip, prefix}:
       False{}
 
 def Dev.input.go(-R: Type, console: Bool, k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState, bytes: +List<U32>) -> V.Op<R, Dev>:
@@ -688,3 +751,26 @@ def Dev.hid(-R: Type, d: Dev, ev: In.Hid) -> V.Op<R, Dev>:
   match d:
     case Dev{+k, m, qs, st}:
       Dev.hid.go(R, Dev.is_input(k), k, m, qs, st, ev)
+
+def Dev.lan_ready.go(-R: Type, lan: Bool, k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState, +len: U32) -> V.Op<R, Dev>:
+  match lan:
+    case True{}:
+      Dev.flush(R, k, m, qs, LanDev{Ln.Lan.ready(Dev.lan_of(st), len)})
+    case False{}:
+      V.Op.pure(R, Dev, Dev{k, m, qs, st})
+
+# The host holds a frame of len bytes for the LAN NIC: a LAN device queues
+# it and delivers what fits into its receive queue (raising interrupt
+# status bit 1 when it used a chain). Other kinds are unchanged.
+def Dev.lan_ready(-R: Type, d: Dev, +len: U32) -> V.Op<R, Dev>:
+  match d:
+    case Dev{+k, m, qs, st}:
+      Dev.lan_ready.go(R, Dev.is_lan(k), k, m, qs, st, len)
+
+# The LAN state of a device (forget_held after a restore).
+def Dev.forget_lan(d: Dev) -> Dev:
+  match d:
+    case Dev{k, m, qs, LanDev{l}}:
+      Dev{k, m, qs, LanDev{Ln.Lan.forget_held(l)}}
+    case Dev{k, m, qs, st}:
+      Dev{k, m, qs, st}

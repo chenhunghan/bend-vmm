@@ -46,6 +46,10 @@ def show_cmd(c: V.NetCmd) -> String:
       "release " ++ U32.show(id)
     case V.TcpAccepted{id}:
       "accepted " ++ U32.show(id)
+    case V.LanSend{dst, iovs}:
+      "lan send " ++ show(dst)
+    case V.LanRelease{}:
+      "lan release"
 
 def show_cmds(cs: +List<V.NetCmd>) -> String:
   List.show(~&2, ~V.NetCmd, ~show_cmd, cs)

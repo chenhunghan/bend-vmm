@@ -171,6 +171,14 @@ floor (`Csum.small`, `Tcp.small`).
   files the command line names; images are locked; a raw disk refuses a
   qcow2 header; a failed host disk operation is IOERR (VmDiskStatus); VMM
   logs are rate-limited; control and vsock clients have a 5 s deadline.
+- VM-to-VM: `--lan DIR` adds a virtio-net on a LAN with no switch process:
+  every VM binds a Unix datagram socket named by its MAC in DIR; the
+  device (src/virtio/lan.bend) reads 54 bytes of each frame to route it (one
+  MAC, or every socket for a broadcast) and answers its own guest's DHCP;
+  the frame goes from guest memory to the peer socket and from the host's
+  one held frame into guest memory (VmLanToRam, LanRelease), never through
+  Bend. No offloads (1514-byte frames: macOS's Unix datagrams top out at
+  2 KiB by default).
 - Lifecycle: SIGTERM presses a virtio power key (systemd guests shut down in
   a few seconds); `scripts/ubuntu-check.sh` boots Ubuntu 24.04's cloud image.
 

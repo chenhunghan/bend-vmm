@@ -54,3 +54,35 @@ law cli.display_zero:
 
 law cli.display_none:
   {C.Cli.display("") == None{} : Maybe<&2, T.Display>}
+
+# Proposed: --lan DIR[,ip=A.B.C.D/N][,mac=xx:xx:xx:xx:xx:xx].
+
+law cli.lan_ip:
+  {C.Cli.lan("/tmp/k8s-lan,ip=10.0.3.11/24") == Some{C.LanSpec{"/tmp/k8s-lan", [82, 84, 1, 0, 3, 11], 167772939, 24}} : Maybe<&2, C.LanSpec>}
+
+law cli.lan_mac:
+  {C.Cli.lan("lan,mac=52:54:00:Ab:cd:0f,ip=10.0.3.12/16") == Some{C.LanSpec{"lan", [82, 84, 0, 171, 205, 15], 167772940, 16}} : Maybe<&2, C.LanSpec>}
+
+law cli.lan_mac_only:
+  {C.Cli.lan("lan,mac=02:00:00:00:00:01") == Some{C.LanSpec{"lan", [2, 0, 0, 0, 0, 1], 0, 0}} : Maybe<&2, C.LanSpec>}
+
+law cli.lan_neither:
+  {C.Cli.lan("lan") == None{} : Maybe<&2, C.LanSpec>}
+
+law cli.lan_multicast_mac:
+  {C.Cli.lan("lan,mac=01:00:5e:00:00:01") == None{} : Maybe<&2, C.LanSpec>}
+
+law cli.lan_bad_prefix:
+  {C.Cli.lan("lan,ip=10.0.3.11/31") == None{} : Maybe<&2, C.LanSpec>}
+
+law cli.lan_no_prefix:
+  {C.Cli.lan("lan,ip=10.0.3.11") == None{} : Maybe<&2, C.LanSpec>}
+
+law cli.lan_unknown_option:
+  {C.Cli.lan("lan,ip=10.0.3.11/24,mtu=9000") == None{} : Maybe<&2, C.LanSpec>}
+
+law cli.lan_no_dir:
+  {C.Cli.lan(",ip=10.0.3.11/24") == None{} : Maybe<&2, C.LanSpec>}
+
+law cli.lan_checked:
+  {C.Cli.check(["--lan", "lan"]) == "--lan takes DIR,ip=A.B.C.D/N and/or mac=xx:xx:xx:xx:xx:xx (not lan)" : String}

@@ -811,3 +811,28 @@ def Machine.hid.go(-R: Type, m: Machine, ev: In.Hid) -> V.Op<R, Machine>:
 # a device access.
 def Machine.hid(m: Machine, ev: In.Hid) -> V.Vm<Machine>:
   V.Op.finish(Machine, Machine.hid.go(Machine, m, ev))
+
+# A frame of len bytes the host holds for the LAN NIC, to every device
+# (D.Dev.lan_ready: the LanKind device takes it).
+def Machine.devs_lan(-R: Type, devs: +List<D.Dev>, +len: U32) -> V.Op<R, +List<D.Dev>>:
+  match devs:
+    case Nil{}:
+      V.Op.pure(R, +List<D.Dev>, [])
+    case d <> t:
+      do V.Op<R, +List<D.Dev>>:
+        d : D.Dev <- D.Dev.lan_ready(R, d, len)
+        t : +List<D.Dev> <- Machine.devs_lan(R, t, len)
+        return d <> t
+
+def Machine.lan.go(-R: Type, m: Machine, len: U32) -> V.Op<R, Machine>:
+  match m:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      do V.Op<R, Machine>:
+        devs : +List<D.Dev> <- Machine.devs_lan(R, devs, len)
+        Machine.irqs(R, Machine{p, u, ui, devs, lines, rt, ri, nt, fl})
+
+# The host holds a LAN frame of len bytes for the guest (V.LanSend from
+# another VM): delivered to the LAN NIC's receive queue, then the interrupt
+# lines are updated as after a device access.
+def Machine.lan(m: Machine, len: U32) -> V.Vm<Machine>:
+  V.Op.finish(Machine, Machine.lan.go(Machine, m, len))

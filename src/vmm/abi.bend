@@ -56,6 +56,13 @@ type NetCmd is Data:
   # The guest accepted a forwarded connection (TcpIncoming): the host reads
   # its socket from now on.
   TcpAccepted{conn: U32}
+  # A frame the guest sends on its LAN NIC (src/virtio/lan.bend): the pieces
+  # of guest memory, to the VM whose MAC is dst, or to every VM on the LAN
+  # when dst is [].
+  LanSend{dst: +List<U32>, iovs: +List<Iov>}
+  # The frame the host held for the guest's LAN NIC went to the guest
+  # (VmLanToRam) or was dropped: the host may take the next.
+  LanRelease{}
 
 # What the host reports back to the NAT.
 type NetEvent is Data:
@@ -256,6 +263,9 @@ type Vm<-A: Type> is Type:
   VmVsToRam{conn: U32, off: U32, iovs: +List<Iov>, next: Vm<A>}
   # Disk images by layout (src/disk): zeros over the pieces of guest memory.
   VmZeroRam{iovs: +List<Iov>, next: Vm<A>}
+  # Copies the frame the host holds for the LAN NIC (V.LanRelease frees it)
+  # into the pieces of guest memory, in order.
+  VmLanToRam{iovs: +List<Iov>, next: Vm<A>}
   # Grows disk image `disk` by len zero bytes, starting at a multiple of
   # len past its end; continues with that start.
   VmDiskAlloc{disk: U32, len: U32, k: U.U64 -> Vm<A>}
@@ -339,6 +349,9 @@ def Op.net_to_ram(-R: Type, conn: U32, off: U32, iovs: +List<Iov>) -> Op<R, Unit
 
 def Op.vs_to_ram(-R: Type, conn: U32, off: U32, iovs: +List<Iov>) -> Op<R, Unit>:
   Op{k => VmVsToRam{conn, off, iovs, k(Unit{})}}
+
+def Op.lan_to_ram(-R: Type, iovs: +List<Iov>) -> Op<R, Unit>:
+  Op{k => VmLanToRam{iovs, k(Unit{})}}
 
 def Op.stage(-R: Type, iovs: +List<Iov>) -> Op<R, U32>:
   Op{k => VmStage{iovs, k}}

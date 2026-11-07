@@ -39,3 +39,4 @@ import ./laws/pointer.bend as Laws_pointer
 import ./laws/cli.bend as Laws_cli
 import ./laws/access.bend as Laws_access
 import ./laws/limits.bend as Laws_limits
+import ./laws/lan.bend as Laws_lan
