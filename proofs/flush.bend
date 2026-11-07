@@ -55,3 +55,11 @@ def L.flush.facts_wire():
 def L.flush.facts_gone():
   {==}
 
+def L.flush.over_hard_limit():
+  {==}
+
+def L.flush.at_hard_limit():
+  {==}
+
+def L.flush.over_wall():
+  {==}

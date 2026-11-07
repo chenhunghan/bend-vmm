@@ -3,6 +3,8 @@ import ../src/lib/u64.bend as U
 import ../src/lib/bytes.bend as B
 import ../src/vmm/abi.bend as V
 import ../src/boot/image.bend as I
+import ../src/net/flush.bend as Fl
+import ../src/net/limits.bend as Lm
 
 # Hypervisor.framework effects (host/hvf.c) and their typed wrappers.
 # Words cross the boundary as U32; 64-bit values as (hi, lo) pairs.
@@ -192,19 +194,31 @@ def Hvf.stage_drop(slot: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.tcp_send_staged(conn: U32, slot: U32) -> IO(U32):
+def Hvf.tcp_send_staged(conn: U32, slot: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
 # Guest data on a NAT connection, never waiting: 1 when a flusher must start
 # (Hvf.tcp_flush), else 0.
-def Hvf.nat_send(conn: U32, bytes: +List<U32>) -> IO(U32):
+def Hvf.nat_send(conn: U32, bytes: +List<U32>) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
 # A NAT connection's flusher: sends its pending data as the socket takes it.
 # 0: TcpUnblocked, then again; 3: TcpBlocked, then again; 2: TcpReset; 1:
 # done.
+def Hvf.udp_ages() -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.udp_close(flow: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.tcp_over(conn: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.tcp_flush(conn: U32, park: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
@@ -596,3 +610,27 @@ def Host.now() -> IO(U.U64):
   do IO<U.U64>:
     +ws : +List<U32> <- Hvf.now()
     return U.U64{Host.first(ws), Host.first(List.drop(&2, U32, ws, 1n))}
+
+# After a send (Hvf.nat_send, Hvf.tcp_send_staged answer [start, pending,
+# total]): past the limits (src/net/flush.bend, Flush.over) the host drops
+# what the connection holds and its flusher resets it. 1 when a flusher must
+# start, else 0.
+def Host.sent.over(over: Bool, +conn: U32, +start: U32) -> IO(U32):
+  match over:
+    case True{}:
+      Hvf.tcp_over(conn)
+    case False{}:
+      IO.pure(U32, start)
+
+def Host.sent(+conn: U32, +ws: +List<U32>) -> IO(U32):
+  Host.sent.over(Fl.Flush.over(U.U64{Fl.Flush.word(ws, 1n), Fl.Flush.word(ws, 2n)}, U.U64{Fl.Flush.word(ws, 3n), Fl.Flush.word(ws, 4n)}, Lm.Lim.default()), conn, Fl.Flush.word(ws, 0n))
+
+def Host.nat_send(+conn: U32, bytes: +List<U32>) -> IO(U32):
+  do IO<U32>:
+    ws : +List<U32> <- Hvf.nat_send(conn, bytes)
+    Host.sent(conn, ws)
+
+def Host.tcp_send_staged(+conn: U32, slot: U32) -> IO(U32):
+  do IO<U32>:
+    ws : +List<U32> <- Hvf.tcp_send_staged(conn, slot)
+    Host.sent(conn, ws)

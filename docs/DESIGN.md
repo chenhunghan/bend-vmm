@@ -206,11 +206,14 @@ floor (`Csum.small`, `Tcp.small`).
   the restore policy (src/vmm/opts.bend); the escape keys and address
   mapping already were. The NAT's and vsock's flusher decides in
   Bend too (src/net/flush.bend: block, unblock, reset, shut down, end from
-  what the host reports on each wake). Still in C: the mechanisms (the send
-  buffers, parking on a socket, the UDP flow table's lookup and idle timer),
-  the memory bound a send past the limits trips (it marks the connection
-  for the flusher to reset), and the vCPU register and vGIC blobs (opaque,
-  per hypervisor).
+  what the host reports on each wake; Flush.over: whether a send left a
+  connection past the hard limit or all of them past the wall), and so do
+  the UDP flows (src/net/udpflow.bend: which one closes past the most, and
+  when an idle one closes). Still in C: the mechanisms (sockets, the send
+  buffers, parking, finding a datagram's flow) and the vCPU register and
+  vGIC blobs (opaque, per hypervisor). A send past the limits is queued
+  before Bend's verdict drops it: the wall can be passed by the sends in
+  flight (one segment each) before their verdicts.
   Moving anything: A/B scripts/bench.sh interleaved, since Bend compiles
   the program as one state machine and even a changed signature on the
   restore path (restore.machine) slowed every exit by ~0.3 us.

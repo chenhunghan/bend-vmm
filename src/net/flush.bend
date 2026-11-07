@@ -75,6 +75,15 @@ def Flush.decide(+f: Facts, +blocked: Bool, +l: N.Limits) -> Act:
   Bool.pick(Act, Flush.fatal(f, l), FReset{Flush.closing(f)},
     Bool.pick(Act, U.U64.is_zero(Flush.pending(f)), Flush.drained(f, blocked), Flush.pressure(f, blocked, l)))
 
+# A send the host queued past the limits: its connection's pending bytes
+# over the hard limit (the guest sent on although it was blocked), or all
+# connections' pending bytes over the wall. The host then drops what the
+# connection holds and its flusher resets it (Facts.over).
+def Flush.over(+pending: U.U64, +total: U.U64, l: N.Limits) -> Bool:
+  match l:
+    case N.Limits{c, +hard, s, k, b, +wall, lg, lm, um, ui}:
+      U.U64.is_lt(hard, pending) || U.U64.is_lt(wall, total)
+
 # The facts as the host answers them (Hvf.tcp_flush): [err, over, pending,
 # total, idle (each hi, lo), closing, overdue, shut]; None for [] (the
 # socket is gone) or a malformed answer.

@@ -2809,12 +2809,9 @@ static u32 hvf_nat_send(HvfSock* k, const uint8_t* buf, u64 n) {
     }
     k->wlast = io_tick();
   }
-  if (hvf_wpend(k) + (n - at) > HVF_WHARD || hvf_wtotal + (n - at) > HVF_WALL) {
-    k->wreset = 1;
-    hvf_wdrop(k);
-  } else {
-    hvf_wkeep(k, buf + at, n - at);
-  }
+  // what is past the limits Bend decides from the answer (Flush.over), and
+  // tells the host (Hvf.tcp_over)
+  hvf_wkeep(k, buf + at, n - at);
   if (k->flushing) {
     return 0;
   }
@@ -2822,15 +2819,22 @@ static u32 hvf_nat_send(HvfSock* k, const uint8_t* buf, u64 n) {
   return 1;
 }
 
-// Hvf.tcp_send_staged(conn, slot) -> U32: sends a slot's bytes on a NAT
-// connection as hvf_nat_send does and frees it; 1 when a flusher must
-// start, else 0.
+// What a send answers: [1 when a flusher must start, else 0; the
+// connection's pending bytes; all connections' pending bytes (each hi, lo)].
+static Term hvf_sent(Env e, u32 start, HvfSock* k) {
+  u64      p     = k ? hvf_wpend(k) : 0;
+  uint32_t ws[5] = {start, (uint32_t)(p >> 32), (uint32_t)p, (uint32_t)(hvf_wtotal >> 32), (uint32_t)hvf_wtotal};
+  return hvf_words(e, ws, 5);
+}
+
+// Hvf.tcp_send_staged(conn, slot) -> List<U32>: sends a slot's bytes on a
+// NAT connection as hvf_nat_send does and frees it (hvf_sent).
 Term hvf_tcp_send_staged_run(Env e, Term* f, IoWork* w) {
   HvfSock* k = hvf_sock((u32)f[0], 0);
   u32      s = (u32)f[1];
   u32      r = !k || s >= HVF_STAGES || !hvf_stages[s].buf ? 0 : hvf_nat_send(k, hvf_stages[s].buf, hvf_stages[s].len);
   hvf_stage_free(s);
-  return (Term)r;
+  return hvf_sent(e, r, k);
 }
 
 // A NAT connection's flusher. src/net/flush.bend decides what it does
@@ -2945,7 +2949,24 @@ Term hvf_nat_send_run(Env e, Term* f, IoWork* w) {
   char*    buf = io_cbuf(e, f[1], &n, CID(Con));
   u32      r   = !k || !buf ? 0 : hvf_nat_send(k, (const uint8_t*)buf, n);
   free(buf);
-  return (Term)r;
+  return hvf_sent(e, r, k);
+}
+
+// Hvf.tcp_over(conn) -> U32: a send left the connection past the limits
+// (Flush.over): what it holds is dropped and its flusher resets it; 1 when a
+// flusher must start, else 0.
+Term hvf_tcp_over_run(Env e, Term* f, IoWork* w) {
+  HvfSock* k = hvf_sock((u32)f[0], 0);
+  if (!k) {
+    return (Term)0;
+  }
+  k->wreset = 1;
+  hvf_wdrop(k);
+  if (k->flushing) {
+    return (Term)0;
+  }
+  k->flushing = 1;
+  return (Term)1;
 }
 
 // Hvf.tcp_shutdown(conn) -> U32: no more data from the guest (once what is
@@ -3025,23 +3046,32 @@ static HvfSock* hvf_udp_flow(uint32_t sport, uint32_t ip, uint32_t port) {
   return NULL;
 }
 
-// Makes room for a new UDP flow: past HVF_UDP_MAX the least recently used
-// one closes (its receiver ends).
-static void hvf_udp_room(void) {
-  int      n   = 0;
-  HvfSock* old = NULL;
+// Hvf.udp_ages() -> List<U32>: every open UDP flow, [id, ns since a
+// datagram crossed it (hi, lo)]*: src/net/udpflow.bend decides which one
+// closes past the most (Udp.evict).
+Term hvf_udp_ages_run(Env e, Term* f, IoWork* w) {
+  static uint32_t ws[3 * HVF_MAX_SOCKS];
+  u64             now = io_tick();
+  int             n   = 0;
   for (int i = 0; i < HVF_MAX_SOCKS; i++) {
     HvfSock* k = &hvf_socks[i];
     if (k->used && k->udp && !k->closing) {
-      n++;
-      if (!old || k->ulast < old->ulast) {
-        old = k;
-      }
+      u64 age = now - k->ulast;
+      ws[n++] = k->key;
+      ws[n++] = (uint32_t)(age >> 32);
+      ws[n++] = (uint32_t)age;
     }
   }
-  if (n >= HVF_UDP_MAX && old) {
-    hvf_sock_free(old);
+  return hvf_words(e, ws, (u64)n);
+}
+
+// Hvf.udp_close(flow) -> U32: closes a UDP flow (its receiver ends). 0.
+Term hvf_udp_close_run(Env e, Term* f, IoWork* w) {
+  HvfSock* k = hvf_sock((u32)f[0], 1);
+  if (k) {
+    hvf_sock_free(k);
   }
+  return (Term)0;
 }
 
 // Hvf.udp_send(sport, ip, port, bytes) -> U32: sends from the flow of guest
@@ -3059,7 +3089,6 @@ Term hvf_udp_send_run(Env e, Term* f, IoWork* w) {
   HvfSock* k     = hvf_udp_flow(sport, ip, port);
   u32      fresh = 0;
   if (!k) {
-    hvf_udp_room();
     int fd = hvf_fd_has(1) ? socket(AF_INET, SOCK_DGRAM, 0) : -1;
     if (fd < 0) {
       free(buf);
@@ -3104,11 +3133,11 @@ static Term hvf_udp_recv_more(Env e, IoWork* w) {
     // nothing yet, or an ICMP error from the peer (a connected socket reports
     // it once): wait on, unless the flow has been idle too long
     if (now - k->ulast >= HVF_UDP_IDLE) {
-      if (hvf_trace & 2) {
-        fprintf(stderr, "[trace] udp %u: idle, closed\n", k->key);
-      }
-      hvf_sock_free(k);
-      return term_pak(CID(Nil), 0);
+      // idle: [0xFFFFFFFF, ns idle (hi, lo)]; Bend decides (Udp.idle) and
+      // closes it (Hvf.udp_close)
+      u64      idle  = now - k->ulast;
+      uint32_t ws[3] = {HVF_ERR, (uint32_t)(idle >> 32), (uint32_t)idle};
+      return hvf_words(e, ws, 3);
     }
     k->parked++;
     return io_wait_on(w, k->fd, POLLIN, k->ulast + HVF_UDP_IDLE, hvf_udp_recv_more);
@@ -3121,8 +3150,8 @@ static Term hvf_udp_recv_more(Env e, IoWork* w) {
 }
 
 // Hvf.udp_recv(flow) -> List<U32>: parks until a datagram arrives on the
-// flow; [ip, port, bytes...], or [] once the flow is closed (idle for
-// HVF_UDP_IDLE, or the least recently used past HVF_UDP_MAX).
+// flow: [ip, port, bytes...]; [0xFFFFFFFF, ns idle (hi, lo)] once no
+// datagram crossed it for HVF_UDP_IDLE; [] once the flow is closed.
 Term hvf_udp_recv_run(Env e, Term* f, IoWork* w) {
   HvfSock* k = hvf_sock((u32)f[0], 1);
   if (!k) {
@@ -4938,6 +4967,15 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.tcp_flush)
   io_eff(CID(Hvf.tcp_flush), hvf_tcp_flush_run);
+#endif
+#ifdef CID(Hvf.udp_ages)
+  io_eff(CID(Hvf.udp_ages), hvf_udp_ages_run);
+#endif
+#ifdef CID(Hvf.udp_close)
+  io_eff(CID(Hvf.udp_close), hvf_udp_close_run);
+#endif
+#ifdef CID(Hvf.tcp_over)
+  io_eff(CID(Hvf.tcp_over), hvf_tcp_over_run);
 #endif
 #ifdef CID(Hvf.tcp_flush_act)
   io_eff(CID(Hvf.tcp_flush_act), hvf_tcp_flush_act_run);

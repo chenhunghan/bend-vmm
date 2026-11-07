@@ -13,6 +13,7 @@ import ../src/vmm/opts.bend as Op
 import ../src/disk/access.bend as Acc
 import ../src/net/limits.bend as Lim
 import ../src/net/flush.bend as Fl
+import ../src/net/udpflow.bend as Uf
 import ../src/net/nat.bend as Nt
 import ../src/arm64/psci.bend as Ps
 import ../src/virtio/device.bend as D
@@ -418,11 +419,23 @@ def tcp_flusher.reset(quiet: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn
 # A UDP flow's receiver (flow: its number, Hvf.udp_send): datagrams for
 # guest port sport, as the guest's frames leave room; it ends when the flow
 # closes.
-@unsafe def udp_task.got(stop: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +flow: U32, +sport: U32, +ws: +List<U32>) -> IO(Unit):
-  match stop:
+# The host says the flow went idle: src/net/udpflow.bend decides it closes.
+@unsafe def udp_task.idle(close: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +flow: U32, +sport: U32) -> IO(Unit):
+  match close:
     case True{}:
-      IO.pure(Unit, Unit{})
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.udp_close(flow)
+        return Unit{}
     case False{}:
+      udp_task(mc, done, flow, sport)
+
+@unsafe def udp_task.got(stop: Bool, idle: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +flow: U32, +sport: U32, +ws: +List<U32>) -> IO(Unit):
+  match stop idle:
+    case True{} _:
+      IO.pure(Unit, Unit{})
+    case False{} True{}:
+      udp_task.idle(Uf.Udp.idle(U.U64{H.Host.first(List.drop(&2, U32, ws, 1n)), H.Host.first(List.drop(&2, U32, ws, 2n))}, Lim.Lim.default()), mc, done, flow, sport)
+    case False{} False{}:
       do IO<Unit>:
         dns : U32 <- H.Hvf.dns()
         net_deliver(mc, done, V.UdpData{Ad.Addr.to_guest(H.Host.first(ws), dns), H.Host.first(List.drop(&2, U32, ws, 1n)), sport, List.drop(&2, U32, ws, 2n)})
@@ -432,7 +445,7 @@ def tcp_flusher.reset(quiet: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn
 @unsafe def udp_task(+mc: Chan(M.Machine), +done: Chan(U32), +flow: U32, +sport: U32) -> IO(Unit):
   do IO<Unit>:
     +ws : +List<U32> <- H.Hvf.udp_recv(flow)
-    udp_task.got(List.is_empty(&2, U32, ws), mc, done, flow, sport, ws)
+    udp_task.got(List.is_empty(&2, U32, ws), U32.is_eq(H.Host.first(ws), 4294967295), mc, done, flow, sport, ws)
 
 @unsafe def net_cmd.connect(ok: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
   match ok:
@@ -441,10 +454,23 @@ def tcp_flusher.reset(quiet: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn
     case False{}:
       IO.spawn(Unit, net_deliver(mc, done, V.TcpRefused{conn}))
 
+# A flow closed to make room (src/net/udpflow.bend, Udp.evict).
+def net_cmd.evict(m: Maybe<&2, U32>) -> IO(Unit):
+  match m:
+    case None{}:
+      IO.pure(Unit, Unit{})
+    case Some{flow}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.udp_close(flow)
+        return Unit{}
+
 @unsafe def net_cmd.udp(fresh: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +flow: U32, +sport: U32) -> IO(Unit):
   match fresh:
     case True{}:
-      IO.spawn(Unit, udp_task(mc, done, flow, sport))
+      do IO<Unit>:
+        IO.spawn(Unit, udp_task(mc, done, flow, sport))
+        ages : +List<U32> <- H.Hvf.udp_ages()
+        net_cmd.evict(Uf.Udp.evict(Uf.Udp.ages(ages), flow, Lim.Lim.default()))
     case False{}:
       IO.pure(Unit, Unit{})
 
@@ -466,7 +492,7 @@ def tcp_flusher.reset(quiet: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn
         net_cmd.connect(U32.is_zero(rc), mc, done, conn)
     case V.TcpSend{+conn, bs}:
       do IO<Unit>:
-        rc : U32 <- H.Hvf.nat_send(conn, bs)
+        rc : U32 <- H.Host.nat_send(conn, bs)
         net_cmd.sent(U32.is_eq(rc, 1), mc, done, conn)
     case V.TcpShutdown{conn}:
       do IO<Unit>:
@@ -487,7 +513,7 @@ def tcp_flusher.reset(quiet: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn
         net_cmd.udp(U32.is_ne(rc, 0) && U32.is_ne(rc, 4294967295), mc, done, rc, sport)
     case V.TcpSendStaged{+conn, slot}:
       do IO<Unit>:
-        rc : U32 <- H.Hvf.tcp_send_staged(conn, slot)
+        rc : U32 <- H.Host.tcp_send_staged(conn, slot)
         net_cmd.sent(U32.is_eq(rc, 1), mc, done, conn)
     case V.StageDrop{slot}:
       do IO<Unit>:
@@ -832,11 +858,11 @@ def reply_rc(+rc: U32, ok: String) -> String:
         vs_connect.go(U32.is_zero(rc), mc, done, conn)
     case V.VsSend{+conn, bs}:
       do IO<Unit>:
-        rc : U32 <- H.Hvf.nat_send(vkey(conn), bs)
+        rc : U32 <- H.Host.nat_send(vkey(conn), bs)
         vs_sent(U32.is_eq(rc, 1), mc, done, conn)
     case V.VsSendStaged{+conn, slot}:
       do IO<Unit>:
-        rc : U32 <- H.Hvf.tcp_send_staged(vkey(conn), slot)
+        rc : U32 <- H.Host.tcp_send_staged(vkey(conn), slot)
         vs_sent(U32.is_eq(rc, 1), mc, done, conn)
     case V.VsStageDrop{slot}:
       do IO<Unit>:
@@ -856,7 +882,7 @@ def reply_rc(+rc: U32, ok: String) -> String:
         return Unit{}
     case V.VsAccepted{+conn, port}:
       do IO<Unit>:
-        rc : U32 <- H.Hvf.nat_send(vkey(conn), B.Bytes.of_string("OK " ++ U32.show(port) ++ "\n"))
+        rc : U32 <- H.Host.nat_send(vkey(conn), B.Bytes.of_string("OK " ++ U32.show(port) ++ "\n"))
         vs_sent(U32.is_eq(rc, 1), mc, done, conn)
         IO.spawn(Unit, vs_reader(mc, done, conn))
 
