@@ -243,7 +243,8 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   ( (slp 6; printf 'cd /mnt/share; dd if=/dev/zero of=a bs=1k count=300 2>/dev/null; dd if=/dev/zero of=b bs=1k count=700 2>&1 | grep -c "No space left"; rm a; dd if=/dev/zero of=c bs=1k count=200 2>/dev/null && echo C-OK; i=0; while [ $i -lt 400 ]; do echo line-$i-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; i=$((i+1)); done; sleep 1; echo LIM-DONE\n'; slp 10; printf 'poweroff -f\n'; slp 2) \
     | alarm 60 ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --share "$t/sh,quota=1M" --console-log "$t/console.log,max=16K,keep=2" --cmdline "console=ttyAMA0 quiet" > "$t/stdout" 2>&1 )
   out=$(cat "$t/stdout")
-  b=$(stat -f %z "$t/sh/b" 2>/dev/null || stat -c %s "$t/sh/b"); c=$(stat -f %z "$t/sh/c" 2>/dev/null || stat -c %s "$t/sh/c")
+  # (wc -c, not stat: GNU stat -f is about the file system)
+  b=$(wc -c < "$t/sh/b" | tr -d ' '); c=$(wc -c < "$t/sh/c" | tr -d ' ')
   [ "$b" -lt 716800 ] && [ "$b" -gt 524288 ] && [ "$c" = 204800 ] && [ -f "$t/console.log.1" ] && ! grep -q "LIM-DONE" <<<"$out" && cat "$t"/console.log* | grep -aq "LIM-DONE" \
     && grn "ok: share quota stops a write at 1 MiB (b: $b bytes) and frees with rm; the console log rotates" || { red "failed: limits (b $b, c $c)"; ls -la "$t"; tail -3 <<<"$out"; fail=1; }
   rm -rf "$t"
