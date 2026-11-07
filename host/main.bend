@@ -12,6 +12,7 @@ import ../src/vmm/cli.bend as Cli
 import ../src/vmm/opts.bend as Op
 import ../src/disk/access.bend as Acc
 import ../src/net/limits.bend as Lim
+import ../src/net/flush.bend as Fl
 import ../src/net/nat.bend as Nt
 import ../src/arm64/psci.bend as Ps
 import ../src/virtio/device.bend as D
@@ -353,28 +354,66 @@ def net_room(+m: M.Machine, udp: Bool, +conn: U32) -> Bool:
     rc : U32 <- H.Hvf.tcp_wait(conn)
     tcp_task.connected(U32.is_zero(rc), mc, done, conn)
 
-# A NAT connection's flusher (Hvf.tcp_flush): it tells the NAT when the
-# host's pending data for the connection blocks or unblocks it, or when the
-# host reset the connection, and ends once nothing is pending.
-@unsafe def tcp_flusher.got(open: Bool, full: Bool, reset: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
-  match open full reset:
-    case True{} _ _:
-      do IO<Unit>:
-        net_deliver(mc, done, V.TcpUnblocked{conn})
-        tcp_flusher(mc, done, conn)
-    case False{} True{} _:
+# A NAT connection's flusher: the host sends the guest's pending data as
+# the socket takes it and answers what it sees (Hvf.tcp_flush); the flusher
+# decides (src/net/flush.bend) and tells the NAT when the pending data
+# blocks or unblocks it, or when the connection was reset. blocked: the NAT
+# was told TcpBlocked; park: wait for the socket before looking again.
+@unsafe def tcp_flusher.act(a: Fl.Act, +blocked: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  match a:
+    case Fl.FWait{}:
+      tcp_flusher(mc, done, conn, blocked, 1)
+    case Fl.FBlock{}:
       do IO<Unit>:
         net_deliver(mc, done, V.TcpBlocked{conn})
-        tcp_flusher(mc, done, conn)
-    case False{} False{} True{}:
-      net_deliver(mc, done, V.TcpReset{conn})
-    case False{} False{} False{}:
+        tcp_flusher(mc, done, conn, True{}, 0)
+    case Fl.FUnblock{}:
+      do IO<Unit>:
+        net_deliver(mc, done, V.TcpUnblocked{conn})
+        tcp_flusher(mc, done, conn, False{}, 0)
+    case Fl.FShut{}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.tcp_flush_act(conn, 3)
+        tcp_flusher(mc, done, conn, blocked, 0)
+    case Fl.FEnd{}:
+      do IO<Unit>:
+        +more : U32 <- H.Hvf.tcp_flush_act(conn, 0)
+        tcp_flusher.again(U32.is_ne(more, 0), blocked, mc, done, conn)
+    case Fl.FClosed{}:
+      do IO<Unit>:
+        +more : U32 <- H.Hvf.tcp_flush_act(conn, 2)
+        tcp_flusher.again(U32.is_ne(more, 0), blocked, mc, done, conn)
+    case Fl.FReset{quiet}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.tcp_flush_act(conn, 1)
+        tcp_flusher.reset(quiet, mc, done, conn)
+
+# Guest data arrived between the facts and the end: the flusher goes on.
+@unsafe def tcp_flusher.again(more: Bool, +blocked: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  match more:
+    case True{}:
+      tcp_flusher(mc, done, conn, blocked, 0)
+    case False{}:
       IO.pure(Unit, Unit{})
 
-@unsafe def tcp_flusher(+mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+def tcp_flusher.reset(quiet: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  match quiet:
+    case True{}:
+      IO.pure(Unit, Unit{})
+    case False{}:
+      net_deliver(mc, done, V.TcpReset{conn})
+
+@unsafe def tcp_flusher.saw(f: Maybe<&2, Fl.Facts>, +blocked: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  match f:
+    case None{}:
+      IO.pure(Unit, Unit{})
+    case Some{+facts}:
+      tcp_flusher.act(Fl.Flush.decide(facts, blocked, Lim.Lim.default()), blocked, mc, done, conn)
+
+@unsafe def tcp_flusher(+mc: Chan(M.Machine), +done: Chan(U32), +conn: U32, +blocked: Bool, park: U32) -> IO(Unit):
   do IO<Unit>:
-    +rc : U32 <- H.Hvf.tcp_flush(conn)
-    tcp_flusher.got(U32.is_eq(rc, 0), U32.is_eq(rc, 3), U32.is_eq(rc, 2), mc, done, conn)
+    ws : +List<U32> <- H.Hvf.tcp_flush(conn, park)
+    tcp_flusher.saw(Fl.Flush.facts(ws), blocked, mc, done, conn)
 
 # A UDP flow's receiver (flow: its number, Hvf.udp_send): datagrams for
 # guest port sport, as the guest's frames leave room; it ends when the flow
@@ -414,7 +453,7 @@ def net_room(+m: M.Machine, udp: Bool, +conn: U32) -> Bool:
 @unsafe def net_cmd.sent(flush: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
   match flush:
     case True{}:
-      IO.spawn(Unit, tcp_flusher(mc, done, conn))
+      IO.spawn(Unit, tcp_flusher(mc, done, conn, False{}, 0))
     case False{}:
       IO.pure(Unit, Unit{})
 
@@ -721,30 +760,65 @@ def reply_rc(+rc: U32, ok: String) -> String:
 # program that stops reading never holds the event loop. While it is behind
 # the guest gets no credit (VsBlocked, VsUnblocked); if it stays stuck past
 # the host's limits the socket is reset and the guest sees the host side end.
-@unsafe def vs_flusher.got(open: Bool, full: Bool, reset: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
-  match open full reset:
-    case True{} _ _:
-      do IO<Unit>:
-        vs_deliver(mc, done, V.VsUnblocked{conn})
-        vs_flusher(mc, done, conn)
-    case False{} True{} _:
+@unsafe def vs_flusher.act(a: Fl.Act, +blocked: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  match a:
+    case Fl.FWait{}:
+      vs_flusher(mc, done, conn, blocked, 1)
+    case Fl.FBlock{}:
       do IO<Unit>:
         vs_deliver(mc, done, V.VsBlocked{conn})
-        vs_flusher(mc, done, conn)
-    case False{} False{} True{}:
-      vs_deliver(mc, done, V.VsEof{conn})
-    case False{} False{} False{}:
+        vs_flusher(mc, done, conn, True{}, 0)
+    case Fl.FUnblock{}:
+      do IO<Unit>:
+        vs_deliver(mc, done, V.VsUnblocked{conn})
+        vs_flusher(mc, done, conn, False{}, 0)
+    case Fl.FShut{}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.tcp_flush_act(vkey(conn), 3)
+        vs_flusher(mc, done, conn, blocked, 0)
+    case Fl.FEnd{}:
+      do IO<Unit>:
+        +more : U32 <- H.Hvf.tcp_flush_act(vkey(conn), 0)
+        vs_flusher.again(U32.is_ne(more, 0), blocked, mc, done, conn)
+    case Fl.FClosed{}:
+      do IO<Unit>:
+        +more : U32 <- H.Hvf.tcp_flush_act(vkey(conn), 2)
+        vs_flusher.again(U32.is_ne(more, 0), blocked, mc, done, conn)
+    case Fl.FReset{quiet}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.tcp_flush_act(vkey(conn), 1)
+        vs_flusher.reset(quiet, mc, done, conn)
+
+@unsafe def vs_flusher.again(more: Bool, +blocked: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  match more:
+    case True{}:
+      vs_flusher(mc, done, conn, blocked, 0)
+    case False{}:
       IO.pure(Unit, Unit{})
 
-@unsafe def vs_flusher(+mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+@unsafe def vs_flusher.reset(quiet: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  match quiet:
+    case True{}:
+      IO.pure(Unit, Unit{})
+    case False{}:
+      vs_deliver(mc, done, V.VsEof{conn})
+
+@unsafe def vs_flusher.saw(f: Maybe<&2, Fl.Facts>, +blocked: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
+  match f:
+    case None{}:
+      IO.pure(Unit, Unit{})
+    case Some{+facts}:
+      vs_flusher.act(Fl.Flush.decide(facts, blocked, Lim.Lim.default()), blocked, mc, done, conn)
+
+@unsafe def vs_flusher(+mc: Chan(M.Machine), +done: Chan(U32), +conn: U32, +blocked: Bool, park: U32) -> IO(Unit):
   do IO<Unit>:
-    +rc : U32 <- H.Hvf.tcp_flush(vkey(conn))
-    vs_flusher.got(U32.is_eq(rc, 0), U32.is_eq(rc, 3), U32.is_eq(rc, 2), mc, done, conn)
+    ws : +List<U32> <- H.Hvf.tcp_flush(vkey(conn), park)
+    vs_flusher.saw(Fl.Flush.facts(ws), blocked, mc, done, conn)
 
 @unsafe def vs_sent(flush: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +conn: U32) -> IO(Unit):
   match flush:
     case True{}:
-      IO.spawn(Unit, vs_flusher(mc, done, conn))
+      IO.spawn(Unit, vs_flusher(mc, done, conn, False{}, 0))
     case False{}:
       IO.pure(Unit, Unit{})
 

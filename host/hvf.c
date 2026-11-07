@@ -2833,83 +2833,92 @@ Term hvf_tcp_send_staged_run(Env e, Term* f, IoWork* w) {
   return (Term)r;
 }
 
-// The flusher's step: sends what the socket takes, then answers
-//   0  the pending data drained to HVF_WCAP / 2 after TcpBlocked: the NAT
-//      gets TcpUnblocked, and the flusher goes on (Hvf.tcp_flush again);
-//   3  the pending data passed HVF_WCAP: the NAT gets TcpBlocked, and the
-//      flusher goes on;
-//   2  the connection was reset (over HVF_WHARD, no byte taken for
-//      HVF_WSTALL, or the socket failed): the NAT gets TcpReset;
-//   1  nothing is pending (or the socket is gone): the flusher ends.
-// Otherwise it parks until the socket takes more, looking again every
-// HVF_WTICK. A shutdown or close the NAT asked for meanwhile happens once
-// the data is out.
-static Term hvf_tcp_flush_more(Env e, IoWork* w);
+// A NAT connection's flusher. src/net/flush.bend decides what it does
+// (Flush.decide); the host sends what the socket takes and answers what it
+// sees, then carries out the decision (Hvf.tcp_flush_act).
 
-static Term hvf_tcp_flush_step(HvfSock* k, IoWork* w) {
-  int err   = k->wreset ? 0 : hvf_wsend(k);
-  u64 now   = io_tick();
-  int late  = hvf_wpend(k) && k->wclose && now >= k->wdead;
-  int stall = hvf_wpend(k) && now - k->wlast >= HVF_WSTALL;
-  if (k->wreset || err || stall || late) {
-    if (hvf_trace & 2) {
-      fprintf(stderr, "[trace] tcp %u: reset (%s, %llu pending)\n", k->key, k->wreset ? "over the cap" : err ? strerror(err) : late ? "closed too long" : "stalled", (unsigned long long)hvf_wpend(k));
-    }
-    int           closed = k->wclose;
-    struct linger l      = {1, 0};
-    setsockopt(k->fd, SOL_SOCKET, SO_LINGER, &l, sizeof l);
-    hvf_wdrop(k);
-    k->flushing = 0;
-    hvf_sock_free(k);
-    return (Term)(u32)(closed ? 1 : 2);
-  }
-  if (hvf_wpend(k) == 0) {
-    if (k->wclose) {
-      k->flushing = 0;
-      hvf_sock_free(k);
-      return (Term)1;
-    }
-    if (k->wshut) {
-      k->wshut = 0;
-      shutdown(k->fd, SHUT_WR);
-    }
-    if (k->blocked) {
-      k->blocked = 0;
-      return (Term)0;
-    }
-    k->flushing = 0;
-    return (Term)1;
-  }
-  if (!k->wclose && !k->blocked && (hvf_wpend(k) > HVF_WCAP || hvf_wtotal > HVF_WBUDGET)) {
-    k->blocked = 1;
-    return (Term)3;
-  }
-  if (!k->wclose && k->blocked && hvf_wpend(k) <= HVF_WCAP / 2 && hvf_wtotal <= HVF_WBUDGET / 2) {
-    k->blocked = 0;
-    return (Term)0;
-  }
-  u64 until = k->wlast + HVF_WSTALL < now + HVF_WTICK ? k->wlast + HVF_WSTALL : now + HVF_WTICK;
-  k->parked++;
-  return io_wait_on(w, k->fd, POLLOUT, until, hvf_tcp_flush_more);
+// What the flusher sees, after sending what the socket takes: [err, over,
+// pending, total, idle ns (each hi, lo), closing, overdue, shut].
+static Term hvf_tcp_facts(Env e, HvfSock* k) {
+  int      err  = k->wreset ? 0 : hvf_wsend(k);
+  u64      now  = io_tick();
+  u64      pend = hvf_wpend(k);
+  u64      idle = pend ? now - k->wlast : 0;
+  uint32_t ws[11] = {(uint32_t)(err != 0), k->wreset, (uint32_t)(pend >> 32), (uint32_t)pend,
+                     (uint32_t)(hvf_wtotal >> 32), (uint32_t)hvf_wtotal, (uint32_t)(idle >> 32), (uint32_t)idle,
+                     k->wclose, (uint32_t)(k->wclose && now >= k->wdead), k->wshut};
+  return hvf_words(e, ws, 11);
 }
 
 static Term hvf_tcp_flush_more(Env e, IoWork* w) {
   HvfSock* k = hvf_sock_at(w);
   if (hvf_sock_woke(k)) {
-    return (Term)1;
+    return term_pak(CID(Nil), 0);
   }
-  return hvf_tcp_flush_step(k, w);
+  return hvf_tcp_facts(e, k);
 }
 
-// Hvf.tcp_flush(conn) -> U32: the flusher of a NAT connection (started when
-// Hvf.nat_send or Hvf.tcp_send_staged answers 1): see hvf_tcp_flush_step.
+// Hvf.tcp_flush(conn, park) -> List<U32>: the flusher of a NAT connection
+// (started when Hvf.nat_send or Hvf.tcp_send_staged answers 1). With park
+// and data pending, it first waits until the socket takes more (or the
+// tick, or the stall time is up); then it sends what the socket takes and
+// answers the facts (hvf_tcp_facts); [] once the socket is gone.
 Term hvf_tcp_flush_run(Env e, Term* f, IoWork* w) {
   HvfSock* k = hvf_sock((u32)f[0], 0);
   if (!k) {
-    return (Term)1;
+    return term_pak(CID(Nil), 0);
   }
   w->made = (intptr_t)(k - hvf_socks);
-  return hvf_tcp_flush_step(k, w);
+  if ((u32)f[1] && hvf_wpend(k)) {
+    u64 now   = io_tick();
+    u64 until = k->wlast + HVF_WSTALL < now + HVF_WTICK ? k->wlast + HVF_WSTALL : now + HVF_WTICK;
+    k->parked++;
+    return io_wait_on(w, k->fd, POLLOUT, until, hvf_tcp_flush_more);
+  }
+  return hvf_tcp_facts(e, k);
+}
+
+// Hvf.tcp_flush_act(conn, act) -> U32: what Flush.decide chose. 0: the
+// flusher ends; 1: the socket is reset (SO_LINGER 0) and freed; 2: the
+// closed connection is freed; 3: its write side shuts down. Ending and
+// freeing answer 1 instead (and do nothing) when guest data arrived since
+// the facts: the flusher goes on. Else 0.
+Term hvf_tcp_flush_act_run(Env e, Term* f, IoWork* w) {
+  HvfSock* k = hvf_sock((u32)f[0], 0);
+  if (!k) {
+    return (Term)0;
+  }
+  switch ((u32)f[1]) {
+    case 0:
+      if (hvf_wpend(k)) {
+        return (Term)1;
+      }
+      k->flushing = 0;
+      return (Term)0;
+    case 1: {
+      if (hvf_trace & 2) {
+        fprintf(stderr, "[trace] tcp %u: reset (%llu pending)\n", k->key, (unsigned long long)hvf_wpend(k));
+      }
+      struct linger l = {1, 0};
+      setsockopt(k->fd, SOL_SOCKET, SO_LINGER, &l, sizeof l);
+      hvf_wdrop(k);
+      k->flushing = 0;
+      hvf_sock_free(k);
+      return (Term)0;
+    }
+    case 2:
+      if (hvf_wpend(k)) {
+        return (Term)1;
+      }
+      k->flushing = 0;
+      hvf_sock_free(k);
+      return (Term)0;
+    case 3:
+      k->wshut = 0;
+      shutdown(k->fd, SHUT_WR);
+      return (Term)0;
+  }
+  return (Term)0;
 }
 
 // Hvf.net_holds() -> List<U32>: for each TCP connection holding data for the
@@ -4929,6 +4938,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.tcp_flush)
   io_eff(CID(Hvf.tcp_flush), hvf_tcp_flush_run);
+#endif
+#ifdef CID(Hvf.tcp_flush_act)
+  io_eff(CID(Hvf.tcp_flush_act), hvf_tcp_flush_act_run);
 #endif
 #ifdef CID(Hvf.nat_send)
   io_eff(CID(Hvf.nat_send), hvf_nat_send_run);

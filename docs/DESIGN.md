@@ -204,11 +204,13 @@ floor (`Csum.small`, `Tcp.small`).
   whether firmware fits its flash bank (Layout.flash_fits), whether a
   kernel is gzip-compressed (Image.is_gzip), and the options record with
   the restore policy (src/vmm/opts.bend); the escape keys and address
-  mapping already were. Still in C: the mechanisms those
-  limits drive (the send buffers, the flusher, the UDP flow table), which
-  run on socket readiness inside the event loop (moving their per-step
-  decisions would add work per send), and the vCPU register and vGIC blobs
-  (opaque, per hypervisor).
+  mapping already were. The NAT's and vsock's flusher decides in
+  Bend too (src/net/flush.bend: block, unblock, reset, shut down, end from
+  what the host reports on each wake). Still in C: the mechanisms (the send
+  buffers, parking on a socket, the UDP flow table's lookup and idle timer),
+  the memory bound a send past the limits trips (it marks the connection
+  for the flusher to reset), and the vCPU register and vGIC blobs (opaque,
+  per hypervisor).
   Moving anything: A/B scripts/bench.sh interleaved, since Bend compiles
   the program as one state machine and even a changed signature on the
   restore path (restore.machine) slowed every exit by ~0.3 us.

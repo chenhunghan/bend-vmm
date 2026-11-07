@@ -205,7 +205,11 @@ def Hvf.nat_send(conn: U32, bytes: +List<U32>) -> IO(U32):
 # A NAT connection's flusher: sends its pending data as the socket takes it.
 # 0: TcpUnblocked, then again; 3: TcpBlocked, then again; 2: TcpReset; 1:
 # done.
-def Hvf.tcp_flush(conn: U32) -> IO(U32):
+def Hvf.tcp_flush(conn: U32, park: U32) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.tcp_flush_act(conn: U32, act: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
