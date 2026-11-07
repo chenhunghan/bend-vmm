@@ -201,13 +201,14 @@ floor (`Csum.small`, `Tcp.small`).
   which command lines are valid (src/vmm/cli.bend), when a disk the host
   will not open for writing is attached read-only (src/disk/access.bend),
   the NAT's host-side limits (src/net/limits.bend, handed over at startup)
-  and whether firmware fits its flash bank (Layout.flash_fits); the escape
-  keys and address mapping already were. Still in C: the mechanisms those
+  whether firmware fits its flash bank (Layout.flash_fits), whether a
+  kernel is gzip-compressed (Image.is_gzip), and the options record with
+  the restore policy (src/vmm/opts.bend); the escape keys and address
+  mapping already were. Still in C: the mechanisms those
   limits drive (the send buffers, the flusher, the UDP flow table), which
   run on socket readiness inside the event loop (moving their per-step
-  decisions would add work per send), gzip detection of a kernel, and the
-  vCPU register and vGIC blobs (opaque, per hypervisor). host/main.bend
-  still fills its options record and runs the restore policy unproven.
+  decisions would add work per send), and the vCPU register and vGIC blobs
+  (opaque, per hypervisor).
   Moving anything: A/B scripts/bench.sh interleaved, since Bend compiles
   the program as one state machine and even a changed signature on the
   restore path (restore.machine) slowed every exit by ~0.3 us.

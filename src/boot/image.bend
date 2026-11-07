@@ -107,3 +107,10 @@ def Image.layout(ram_base: U.U64, ram_size: U.U64, info: ImageInfo, kernel_len: 
         +initrd_end : U.U64 <- Image.add(initrd, U.U64{0, initrd_len})
         ok : Bool = U32.is_le(dtb_len, Image.mib2()) && U.U64.is_le(initrd_end, ram_end)
         Image.when(Layout, ok, Layout{kernel, kernel_end, dtb, initrd, initrd_end})
+
+# A gzip stream (RFC 1952: 1f 8b), from a file's first bytes: a compressed
+# kernel (Ubuntu's vmlinuz) the host inflates into RAM. A file of 2 bytes or
+# fewer is not one.
+def Image.is_gzip(+head: +List<U32>) -> Bool:
+  Nat.is_le(3n, List.length(&2, U32, head)) && U32.is_eq(Maybe.default(&2, U32, List.get(&2, U32, head, 0n), 0), 31)
+    && U32.is_eq(Maybe.default(&2, U32, List.get(&2, U32, head, 1n), 0), 139)

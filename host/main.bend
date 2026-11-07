@@ -9,6 +9,7 @@ import ../src/vmm/snapfile.bend as Sf
 import ../src/vmm/control.bend as Ctl
 import ../src/dev/pointer.bend as Ptr
 import ../src/vmm/cli.bend as Cli
+import ../src/vmm/opts.bend as Op
 import ../src/disk/access.bend as Acc
 import ../src/net/limits.bend as Lim
 import ../src/net/nat.bend as Nt
@@ -56,77 +57,6 @@ def log_gated(drop: Bool, +g: U32, msg: String) -> IO(Unit):
     case False{}:
       log_err(Bool.pick(String, U32.is_eq(g, 1), "", "[vmm] (" ++ U32.show((g - 1 : U32)) ++ " messages dropped)\n") ++ "[vmm] " ++ msg)
 
-type Opts is Data:
-  Opts{kernel: String, initrd: String, payload: String, cmdline: String, mem: U32, cpus: U32, disk: String, share: String, restore: String, control: String, vsock: String, display: String, firmware: String, vars: String, forward: String, lan: String}
-
-def Opts.default() -> Opts:
-  Opts{"", "", "", "console=ttyAMA0 earlycon=pl011,0x9000000", 512, 1, "", "", "", "", "", "", "", "", "", ""}
-
-def Opts.mem(o: Opts) -> U32:
-  match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
-      m
-
-def Opts.disk(o: Opts) -> String:
-  match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
-      d
-
-def Opts.kernel(o: Opts) -> String:
-  match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
-      k
-
-def Opts.share(o: Opts) -> String:
-  match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
-      sh
-
-def Opts.restore(o: Opts) -> String:
-  match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
-      rs
-
-def Opts.control(o: Opts) -> String:
-  match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
-      ct
-
-def Opts.cpus(o: Opts) -> U32:
-  match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
-      n
-
-def Opts.vsock(o: Opts) -> String:
-  match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
-      vk
-
-def Opts.firmware(o: Opts) -> String:
-  match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
-      fw
-
-def Opts.vars(o: Opts) -> String:
-  match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
-      nv
-
-def Opts.forward(o: Opts) -> String:
-  match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
-      fd
-
-def Opts.lan(o: Opts) -> String:
-  match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
-      ln
-
-def Opts.display(o: Opts) -> String:
-  match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
-      dp
-
 # "WxH" or "WxH,headless" as a display (src/vmm/cli.bend).
 def display_of(spec: String) -> Maybe<&2, T.Display>:
   Cli.Cli.display(spec)
@@ -135,43 +65,6 @@ def display_of(spec: String) -> Maybe<&2, T.Display>:
 # framebuffer and screendump only, no window to take the host's pointer).
 def display_window(+spec: String) -> Maybe<&2, T.Display>:
   Bool.pick(Maybe<&2, T.Display>, String.ends_with(spec, ",headless"), None{}, display_of(spec))
-
-def Opts.num(s: String, d: U32) -> U32:
-  Maybe.default(&2, U32, U32.read(s), d)
-
-def Opts.set(+flag: String, +v: String, o: Opts) -> Opts:
-  match o:
-    case Opts{k, i, p, c, +m, +n, d, sh, rs, ct, vk, dp, fw, nv, +fd, ln}:
-      Opts{
-        Bool.pick(String, String.eq(flag, "--kernel"), v, k),
-        Bool.pick(String, String.eq(flag, "--initrd"), v, i),
-        Bool.pick(String, String.eq(flag, "--payload"), v, p),
-        Bool.pick(String, String.eq(flag, "--cmdline"), v, c),
-        Bool.pick(U32, String.eq(flag, "--mem"), Opts.num(v, m), m),
-        Bool.pick(U32, String.eq(flag, "--cpus"), Opts.num(v, n), n),
-        Bool.pick(String, String.eq(flag, "--disk"), v, d),
-        Bool.pick(String, String.eq(flag, "--share"), v, sh),
-        Bool.pick(String, String.eq(flag, "--restore"), v, rs),
-        Bool.pick(String, String.eq(flag, "--control"), v, ct),
-        Bool.pick(String, String.eq(flag, "--vsock"), v, vk),
-        Bool.pick(String, String.eq(flag, "--display"), v, dp),
-        Bool.pick(String, String.eq(flag, "--firmware"), v, fw),
-        Bool.pick(String, String.eq(flag, "--vars"), v, nv),
-        # --forward may be given more than once: the lists join
-        Bool.pick(String, String.eq(flag, "--forward"), Bool.pick(String, String.is_empty(fd), v, fd ++ "," ++ v), fd),
-        Bool.pick(String, String.eq(flag, "--lan"), v, ln)
-      }
-
-def Opts.parse(args: List<String>, o: Opts) -> Opts:
-  match args:
-    case Nil{}:
-      o
-    case Con{flag, rest}:
-      match rest:
-        case Nil{}:
-          o
-        case Con{v, more}:
-          Opts.parse(more, Opts.set(flag, v, o))
 
 def ram() -> U.U64:
   L.Layout.ram_base()
@@ -1287,9 +1180,9 @@ def devices.input(none: Bool) -> +List<D.DevKind>:
     case False{}:
       devices.lan.go(Cli.Cli.lan(spec))
 
-@unsafe def devices(o: Opts) -> IO(+List<D.DevKind>):
+@unsafe def devices(o: Op.Opts) -> IO(+List<D.DevKind>):
   match o:
-    case Opts{k, i, p, c, m, n, +d, +sh, rs, ct, +vk, dp, fw, nv, fd, +ln}:
+    case Op.Opts{k, i, p, c, m, n, +d, +sh, rs, ct, +vk, dp, fw, nv, fd, +ln}:
       do IO<+List<D.DevKind>>:
         +lan : +List<D.DevKind> <- devices.lan(String.is_empty(ln), ln)
         +disks : +List<D.DevKind> <- devices.disk(String.is_empty(d), d)
@@ -1315,9 +1208,9 @@ def no_image() -> I.ImageInfo:
   I.ImageInfo{U.U64.zero(), U.U64.zero(), U.U64.zero()}
 
 # Writes the DTB and the initrd where the layout says; answers (entry, dtb).
-def boot_linux.lay(lay: I.Layout, o: Opts, +ilen: U32, nslots: Nat) -> IO(U.U64 & U.U64):
+def boot_linux.lay(lay: I.Layout, o: Op.Opts, +ilen: U32, nslots: Nat) -> IO(U.U64 & U.U64):
   match lay o:
-    case I.Layout{kernel, kend, +dtb, +rd, rd_end} Opts{k, initrd, p, cmdline, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
+    case I.Layout{kernel, kend, +dtb, +rd, rd_end} Op.Opts{k, initrd, p, cmdline, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       +has_rd = U32.is_ne(ilen, 0)
       do IO<U.U64 & U.U64>:
         cfg : T.DtbCfg = T.DtbCfg{U32.to_nat(cpus), ram_bytes(mem), cmdline, initrd_of(has_rd, rd, rd_end), nslots, display_of(dp), False{}}
@@ -1327,7 +1220,7 @@ def boot_linux.lay(lay: I.Layout, o: Opts, +ilen: U32, nslots: Nat) -> IO(U.U64 
         die_if(U32.is_ne(got, ilen), "loading the initrd")
         return (kernel, dtb)
 
-def boot_linux.placed(placed: Maybe<&2, I.Layout>, o: Opts, ilen: U32, nslots: Nat) -> IO(U.U64 & U.U64):
+def boot_linux.placed(placed: Maybe<&2, I.Layout>, o: Op.Opts, ilen: U32, nslots: Nat) -> IO(U.U64 & U.U64):
   match placed:
     case None{}:
       IO.die(U.U64 & U.U64, 1, "bend-vmm: the kernel, DTB and initrd do not fit in RAM")
@@ -1336,9 +1229,9 @@ def boot_linux.placed(placed: Maybe<&2, I.Layout>, o: Opts, ilen: U32, nslots: N
 
 # Loads the kernel at the start of RAM (text_offset 0, every kernel since
 # 3.17), then places the DTB and initrd after it.
-def boot_linux(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
+def boot_linux(+o: Op.Opts, nslots: Nat) -> IO(U.U64 & U.U64):
   match o:
-    case Opts{kernel, +initrd, p, c, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
+    case Op.Opts{kernel, +initrd, p, c, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       do IO<U.U64 & U.U64>:
         +klen : U32 <- H.Host.load(kernel, ram())
         die_if(U32.is_eq(klen, err()), "cannot load the kernel")
@@ -1350,9 +1243,9 @@ def boot_linux(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
         boot_linux.placed(placed, o, ilen, nslots)
 
 # A bare-metal payload runs from the start of RAM, with the DTB 64 MiB in.
-def boot_payload(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
+def boot_payload(+o: Op.Opts, nslots: Nat) -> IO(U.U64 & U.U64):
   match o:
-    case Opts{k, i, payload, cmdline, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
+    case Op.Opts{k, i, payload, cmdline, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       +dtb = U.U64.add_u32(ram(), 67108864)
       do IO<U.U64 & U.U64>:
         cfg : T.DtbCfg = T.DtbCfg{U32.to_nat(cpus), ram_bytes(mem), cmdline, None{}, nslots, display_of(dp), False{}}
@@ -1364,9 +1257,9 @@ def boot_payload(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
 # --firmware: UEFI firmware runs in place from flash bank 0 (address 0) and
 # finds the device tree, with the flash banks in it, at the start of RAM, as
 # edk2's ArmVirtQemu expects of QEMU's virt machine.
-def boot_uefi(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
+def boot_uefi(+o: Op.Opts, nslots: Nat) -> IO(U.U64 & U.U64):
   match o:
-    case Opts{k, i, p, cmdline, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
+    case Op.Opts{k, i, p, cmdline, +mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       do IO<U.U64 & U.U64>:
         +csz : U32 <- H.Hvf.file_size(fw)
         die_if(Bool.not(L.Layout.flash_fits(csz)), "the firmware " ++ fw ++ " is missing or larger than its 64 MiB flash bank")
@@ -1378,22 +1271,22 @@ def boot_uefi(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
         _ : U32 <- H.Host.write(ram(), T.Dtb.build(cfg))
         return (L.Layout.flash0_base(), ram())
 
-def boot.kernel(payload: Bool, o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
+def boot.kernel(payload: Bool, o: Op.Opts, nslots: Nat) -> IO(U.U64 & U.U64):
   match payload:
     case True{}:
       boot_payload(o, nslots)
     case False{}:
       boot_linux(o, nslots)
 
-def boot.go(kernel: Bool, +o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
+def boot.go(kernel: Bool, +o: Op.Opts, nslots: Nat) -> IO(U.U64 & U.U64):
   match kernel:
     case False{}:
       boot_uefi(o, nslots)
     case True{}:
-      boot.kernel(String.is_empty(Opts.kernel(o)), o, nslots)
+      boot.kernel(String.is_empty(Op.Opts.kernel(o)), o, nslots)
 
-def boot(+o: Opts, nslots: Nat) -> IO(U.U64 & U.U64):
-  boot.go(String.is_empty(Opts.firmware(o)), o, nslots)
+def boot(+o: Op.Opts, nslots: Nat) -> IO(U.U64 & U.U64):
+  boot.go(String.is_empty(Op.Opts.firmware(o)), o, nslots)
 
 # Stop code 1 is a guest reset: start over in a fresh process.
 def stopped.reset(reset: Bool, +code: U32) -> IO(Unit):
@@ -1642,9 +1535,9 @@ def resolver() -> IO(Unit):
     +done : Chan(U32) <- Chan.new(U32, 4)
     run_machine(mc, done, ctl, disp, fwd, [0])
 
-@unsafe def start(o: Opts, kinds: +List<D.DevKind>, entry: U.U64 & U.U64) -> IO(Unit):
+@unsafe def start(o: Op.Opts, kinds: +List<D.DevKind>, entry: U.U64 & U.U64) -> IO(Unit):
   match o:
-    case Opts{k, i, p, c, m, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
+    case Op.Opts{k, i, p, c, m, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
       match entry:
         case (pc, dtb):
           start.go(cpus, ct, dp, fd, kinds, pc, dtb)
@@ -1698,7 +1591,7 @@ def psci_on(m: M.Machine) -> +List<Bool>:
     case False{}:
       IO.pure(U32, 0)
 
-@unsafe def restore.machine(got: Maybe<&2, M.Machine>, +o: Opts, kinds: +List<D.DevKind>) -> IO(Unit):
+@unsafe def restore.machine(got: Maybe<&2, M.Machine>, +o: Op.Opts, kinds: +List<D.DevKind>) -> IO(Unit):
   match got:
     case None{}:
       IO.die(Unit, 1, "bend-vmm: the snapshot's machine state does not decode")
@@ -1713,36 +1606,17 @@ def psci_on(m: M.Machine) -> +List<Bool>:
         put(mc, m2)
         +done : Chan(U32) <- Chan.new(U32, 4)
         log_err("bend-vmm: restored")
-        run_machine(mc, done, Opts.control(o), Opts.display(o), Opts.forward(o), cpus)
-
-# Options for a restore: the snapshot's own, plus this run's --control.
-# o with this run's --forward (forwards are not the snapshot's: they come
-# from the command line that restores it).
-def Opts.with_forward(o: Opts, fd: String) -> Opts:
-  match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, was, ln}:
-      Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}
-
-# o with the RAM and vCPUs a restore makes (the snapshot header's).
-def Opts.with_size(o: Opts, mem: U32, cpus: U32) -> Opts:
-  match o:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
-      Opts{k, i, p, c, mem, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}
-
-def restore.opts(saved: List<String>, now: Opts) -> Opts:
-  match now:
-    case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
-      Opts.with_forward(Opts.set("--control", ct, Opts.parse(List.drop(&1, String, saved, 1n), Opts.default())), fd)
+        run_machine(mc, done, Op.Opts.control(o), Op.Opts.display(o), Op.Opts.forward(o), cpus)
 
 # A UEFI guest's flash banks come back from the same firmware and variable
 # files; bank 1 stays unmapped when the snapshot caught a flash command.
-def restore.flash(none: Bool, +o: Opts) -> IO(Unit):
+def restore.flash(none: Bool, +o: Op.Opts) -> IO(Unit):
   match none:
     case True{}:
       IO.pure(Unit, Unit{})
     case False{}:
       match o:
-        case Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
+        case Op.Opts{k, i, p, c, m, n, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
           do IO<Unit>:
             +rc : U32 <- H.Hvf.fw_load(fw, nv)
             die_if(U32.is_ne(rc, 0), "cannot load the firmware (step " ++ U32.show(rc) ++ ")")
@@ -1753,27 +1627,6 @@ def restore.flash_mode(m: Maybe<&2, M.Machine>) -> IO(U32):
       IO.pure(U32, 0)
     case Some{mc}:
       H.Hvf.flash(3, Bool.to_u32(U32.is_zero(Pf.Pflash.mode(M.Machine.flash_of(mc)))), 0, [])
-
-# A snapshot names the host files and sockets its devices use. Restoring it
-# opens them only when this command line names the same ones, so a snapshot
-# from elsewhere cannot choose what to open, share or replace: the first
-# flag that differs, as a message ("" when none does).
-def restore.differs.one(+flag: String, +was: String, +now: String) -> String:
-  Bool.pick(String, String.eq(was, now), "",
-    Bool.pick(String, String.is_empty(was),
-      "the snapshot was taken without " ++ flag ++ "; restore it without " ++ flag,
-      "the snapshot was taken with " ++ flag ++ " " ++ was ++ "; pass the same " ++ flag ++ " to restore it"))
-
-def restore.differs.first(+a: String, b: String) -> String:
-  Bool.pick(String, String.is_empty(a), b, a)
-
-def restore.differs(+was: Opts, +now: Opts) -> String:
-  restore.differs.first(restore.differs.one("--disk", Opts.disk(was), Opts.disk(now)),
-    restore.differs.first(restore.differs.one("--share", Opts.share(was), Opts.share(now)),
-      restore.differs.first(restore.differs.one("--vsock", Opts.vsock(was), Opts.vsock(now)),
-        restore.differs.first(restore.differs.one("--firmware", Opts.firmware(was), Opts.firmware(now)),
-          restore.differs.first(restore.differs.one("--vars", Opts.vars(was), Opts.vars(now)),
-            restore.differs.one("--lan", Opts.lan(was), Opts.lan(now)))))))
 
 # The devices of a machine, as their snapshot words (Snap's Enc.kind).
 def kinds_words(ks: +List<D.DevKind>) -> +List<U32>:
@@ -1854,7 +1707,7 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     case Some{+h}:
       snap.walk(67n, Sf.Snapf.need(h, []), h, [], size)
 
-@unsafe def restore(path: String, +now: Opts) -> IO(Unit):
+@unsafe def restore(path: String, +now: Op.Opts) -> IO(Unit):
   do IO<Unit>:
     +st : +List<U32> <- H.Hvf.snap_open(path)
     die_if(U32.is_ne(H.Host.first(st), 0), "cannot read the snapshot (" ++ U32.show(H.Host.first(st)) ++ ")")
@@ -1862,15 +1715,15 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     +l : Sf.Layout <- snap.start(Sf.Snapf.head(Sf.Snapf.word(st, 1n), hb), Sf.Snapf.u64_at(st, 2n))
     saved : List<String> <- H.Hvf.snap_args()
     +prog : U32 <- H.Hvf.prog()
-    +o0 : Opts = restore.opts(List.drop(&1, String, saved, Nat.sub(U32.to_nat(prog), 1n)), now)
-    +o : Opts = Opts.with_size(o0, Sf.Snapf.mem_mib(l), Sf.Snapf.cpus(l, Opts.cpus(o0)))
+    +o0 : Op.Opts = Op.Restore.opts(List.drop(&1, String, saved, Nat.sub(U32.to_nat(prog), 1n)), now)
+    +o : Op.Opts = Op.Opts.with_size(o0, Sf.Snapf.mem_mib(l), Sf.Snapf.cpus(l, Op.Opts.cpus(o0)))
     die_if(Bool.not(Sf.Snapf.agrees(l, ram())), "the snapshot's header does not describe a machine this host makes")
-    +why : String = restore.differs(o, now)
+    +why : String = Op.Restore.differs(o, now)
     die_if(Bool.not(String.is_empty(why)), why)
-    +vm : U32 <- H.Host.vm_init(Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), ram(), Opts.cpus(o))
+    +vm : U32 <- H.Host.vm_init(Op.Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), ram(), Op.Opts.cpus(o))
     die_if(U32.is_ne(vm, 0), "cannot create the VM (step " ++ U32.show(vm) ++ ")")
-    display.map(display_of(Opts.display(o)))
-    restore.flash(String.is_empty(Opts.firmware(o)), o)
+    display.map(display_of(Op.Opts.display(o)))
+    restore.flash(String.is_empty(Op.Opts.firmware(o)), o)
     +kinds : +List<D.DevKind> <- devices(o)
     ws : +List<U32> <- H.Hvf.snap_machine()
     +got : Maybe<&2, M.Machine> = Snap.Snap.decode(ws)
@@ -1880,21 +1733,21 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     _ : U32 <- restore.flash_mode(got)
     restore.machine(got, o, kinds)
 
-@unsafe def boot_fresh(+o: Opts) -> IO(Unit):
+@unsafe def boot_fresh(+o: Op.Opts) -> IO(Unit):
   do IO<Unit>:
-    +rc : U32 <- H.Host.vm_init(Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), ram(), Opts.cpus(o))
+    +rc : U32 <- H.Host.vm_init(Op.Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), ram(), Op.Opts.cpus(o))
     die_if(U32.is_ne(rc, 0), "cannot create the VM (step " ++ U32.show(rc) ++ ")")
-    display.map(display_of(Opts.display(o)))
+    display.map(display_of(Op.Opts.display(o)))
     +kinds : +List<D.DevKind> <- devices(o)
     entry : U.U64 & U.U64 <- boot(o, List.length(&2, D.DevKind, kinds))
     start(o, kinds, entry)
 
-@unsafe def main.mode(fresh: Bool, +o: Opts) -> IO(Unit):
+@unsafe def main.mode(fresh: Bool, +o: Op.Opts) -> IO(Unit):
   match fresh:
     case True{}:
       boot_fresh(o)
     case False{}:
-      restore(Opts.restore(o), o)
+      restore(Op.Opts.restore(o), o)
 
 def usage() -> String:
   String.join([
@@ -1927,8 +1780,8 @@ def main.info(args: List<String>) -> Maybe<&2, String>:
       do IO<Unit>:
         +why : String = Cli.Cli.check(args)
         die_if(Bool.not(String.is_empty(why)), why ++ " (bend-vmm --help)")
-        +o : Opts = Opts.parse(args, Opts.default())
-        main.mode(String.is_empty(Opts.restore(o)), o)
+        +o : Op.Opts = Op.Opts.parse(args, Op.Opts.default())
+        main.mode(String.is_empty(Op.Opts.restore(o)), o)
 
 # Arguments as the host keeps them: each one's bytes, then a 0.
 def args_bytes(args: List<String>) -> +List<U32>:

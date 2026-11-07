@@ -2,6 +2,7 @@ import Base
 import ../src/lib/u64.bend as U
 import ../src/lib/bytes.bend as B
 import ../src/vmm/abi.bend as V
+import ../src/boot/image.bend as I
 
 # Hypervisor.framework effects (host/hvf.c) and their typed wrappers.
 # Words cross the boundary as U32; 64-bit values as (hi, lo) pairs.
@@ -10,7 +11,7 @@ def Hvf.init(ram_mb: U32, gicd_hi: U32, gicd_lo: U32, gicr_hi: U32, gicr_lo: U32
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.load(path: String, gpa_hi: U32, gpa_lo: U32) -> IO(U32):
+def Hvf.load(path: String, gpa_hi: U32, gpa_lo: U32, gz: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -419,10 +420,41 @@ def Host.vm_init(ram_mb: U32, gicd: U.U64, gicr: U.U64, ram: U.U64, cpus: U32) -
     case U.U64{dh, dl} U.U64{rh, rl} U.U64{mh, ml}:
       Hvf.init(ram_mb, dh, dl, rh, rl, mh, ml, cpus)
 
-def Host.load(path: String, gpa: U.U64) -> IO(U32):
+# A file's first bytes (at most 16; [] when it cannot be read).
+def Host.head.read(r: File & Result<&1, &1, U32 & String, List<&2, U32>>) -> IO(+List<U32>):
+  match r:
+    case (f, Done{bs}):
+      do IO<+List<U32>>:
+        File.close(f)
+        return bs
+    case (f, Fail{e}):
+      do IO<+List<U32>>:
+        File.close(f)
+        return []
+
+def Host.head.opened(r: Result<&1, &1, U32 & String, File>) -> IO(+List<U32>):
+  match r:
+    case Fail{e}:
+      IO.pure(+List<U32>, [])
+    case Done{f}:
+      do IO<+List<U32>>:
+        got : File & Result<&1, &1, U32 & String, List<&2, U32>> <- File.read_bytes(f, 16)
+        Host.head.read(got)
+
+def Host.head(path: String) -> IO(+List<U32>):
+  do IO<+List<U32>>:
+    r : Result<&1, &1, U32 & String, File> <- File.open(path, "r")
+    Host.head.opened(r)
+
+# Copies a file into RAM at gpa, inflating it when it is gzip-compressed
+# (src/boot/image.bend decides from its first bytes): its size in RAM, or
+# 0xFFFFFFFF.
+def Host.load(+path: String, gpa: U.U64) -> IO(U32):
   match gpa:
     case U.U64{h, l}:
-      Hvf.load(path, h, l)
+      do IO<U32>:
+        +head : +List<U32> <- Host.head(path)
+        Hvf.load(path, h, l, Bool.to_u32(I.Image.is_gzip(head)))
 
 def Host.write(gpa: U.U64, bytes: +List<U32>) -> IO(U32):
   match gpa:

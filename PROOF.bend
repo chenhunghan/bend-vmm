@@ -41,3 +41,4 @@ import ./proofs/cli.bend as Proofs_cli
 import ./proofs/access.bend as Proofs_access
 import ./proofs/limits.bend as Proofs_limits
 import ./proofs/lan.bend as Proofs_lan
+import ./proofs/opts.bend as Proofs_opts

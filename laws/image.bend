@@ -49,3 +49,13 @@ law image.layout_old_kernel:
 
 law image.layout_no_room:
   {I.Image.layout(w(1073741824), w(33554432), info(), 20971520, 4096, 0) == None{} : Maybe<&2, I.Layout>}
+
+# Proposed: gzip detection of a kernel file (its first bytes).
+law image.gzip:
+  {I.Image.is_gzip([31, 139, 8, 0]) == True{} : Bool}
+
+law image.gzip_raw:
+  {I.Image.is_gzip([77, 90, 0, 0]) == False{} : Bool}
+
+law image.gzip_too_short:
+  {I.Image.is_gzip([31, 139]) == False{} : Bool}

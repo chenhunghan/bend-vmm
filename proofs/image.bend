@@ -27,3 +27,12 @@ def L.image.layout_old_kernel():
 
 def L.image.layout_no_room():
   {==}
+
+def L.image.gzip():
+  {==}
+
+def L.image.gzip_raw():
+  {==}
+
+def L.image.gzip_too_short():
+  {==}

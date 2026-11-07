@@ -1352,8 +1352,9 @@ static int64_t hvf_gunzip(uint8_t* src, uint64_t n, uint8_t* dst, uint64_t room)
   return hvf_inflate(src, n, dst, room, 31);
 }
 
-// Hvf.load(path, gpa_hi, gpa_lo) -> U32: copies a file into RAM, inflating
-// it first when it is gzip-compressed; the size in RAM, or 0xFFFFFFFF.
+// Hvf.load(path, gpa_hi, gpa_lo, gz) -> U32: copies a file into RAM,
+// inflating it first when gz (src/boot/image.bend, Image.is_gzip, decides);
+// the size in RAM, or 0xFFFFFFFF.
 Term hvf_load_run(Env e, Term* f, IoWork* w) {
   u64   n;
   char* path = io_cstr(e, f[0], &n);
@@ -1374,7 +1375,7 @@ Term hvf_load_run(Env e, Term* f, IoWork* w) {
   }
   uint64_t gpa = hvf_u64(f[1], f[2]);
   int64_t  got = -1;
-  if (st.st_size > 2 && file[0] == 0x1f && file[1] == 0x8b) {
+  if ((u32)f[3] != 0) {
     uint8_t* dst = hvf_ptr(gpa, 1);
     if (dst) {
       got = hvf_gunzip(file, (uint64_t)st.st_size, dst, hvf_ram_size - (gpa - hvf_ram_base));
