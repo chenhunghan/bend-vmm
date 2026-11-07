@@ -19,9 +19,10 @@ type Cmd is Data:
   CPointerUsage{}
   CUnknown{}
   CBad{why: String}
+  CStatusJson{}
 
 def Ctl.usage() -> String:
-  "unknown command (pause, resume, snapshot PATH, screendump PATH, type TEXT, pointer X Y, powerdown, net, status, quit)"
+  "unknown command (pause, resume, snapshot PATH, screendump PATH, type TEXT, pointer X Y, powerdown, net, status [json], quit)"
 
 def Ctl.pointer_usage() -> String:
   "usage: pointer X Y (0..32767)"
@@ -45,10 +46,14 @@ def Ctl.pointer(ws: List<&2, String>) -> Cmd:
 def Ctl.needs(+arg: String, c: Cmd, why: String) -> Cmd:
   Bool.pick(Cmd, String.is_empty(arg), CBad{why}, c)
 
+# status json: the VM's state as one JSON object, for programs.
+def Ctl.status_json(paused: Bool) -> String:
+  "{\"state\":\"" ++ Bool.pick(String, paused, "paused", "running") ++ "\"}"
+
 def Ctl.verb(+verb: String, +arg: String) -> Cmd:
   Bool.pick(Cmd, String.eq(verb, "pause"), CPause{},
   Bool.pick(Cmd, String.eq(verb, "resume"), CResume{},
-  Bool.pick(Cmd, String.eq(verb, "status"), CStatus{},
+  Bool.pick(Cmd, String.eq(verb, "status"), Bool.pick(Cmd, String.eq(arg, "json"), CStatusJson{}, CStatus{}),
   Bool.pick(Cmd, String.eq(verb, "quit"), CQuit{},
   Bool.pick(Cmd, String.eq(verb, "net"), CNet{},
   Bool.pick(Cmd, String.eq(verb, "powerdown"), CPowerdown{},

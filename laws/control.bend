@@ -81,3 +81,14 @@ law control.screendump_no_path:
 
 law control.type_nothing:
   {C.Ctl.parse("type") == C.CBad{"usage: type TEXT"} : C.Cmd}
+
+# Proposed: status json, for programs (bend-vk8s).
+
+law control.status_json:
+  {C.Ctl.parse("status json") == C.CStatusJson{} : C.Cmd}
+
+law control.status_json_running:
+  {C.Ctl.status_json(False{}) == "{\"state\":\"running\"}" : String}
+
+law control.status_json_paused:
+  {C.Ctl.status_json(True{}) == "{\"state\":\"paused\"}" : String}

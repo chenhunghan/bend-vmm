@@ -76,3 +76,11 @@ def L.control.screendump_no_path():
 def L.control.type_nothing():
   {==}
 
+def L.control.status_json():
+  {==}
+
+def L.control.status_json_running():
+  {==}
+
+def L.control.status_json_paused():
+  {==}

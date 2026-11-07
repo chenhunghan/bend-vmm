@@ -692,6 +692,10 @@ def reply_rc(+rc: U32, ok: String) -> String:
       do IO<String>:
         +st : +List<U32> <- H.Hvf.pause_state()
         return Bool.pick(String, U32.is_zero(H.Host.first(st)), "running", "paused")
+    case Ctl.CStatusJson{}:
+      do IO<String>:
+        +st : +List<U32> <- H.Hvf.pause_state()
+        return Ctl.Ctl.status_json(Bool.not(U32.is_zero(H.Host.first(st))))
     case Ctl.CQuit{}:
       do IO<String>:
         _ : Result<&1, &1, U32, Unit> <- Chan.send(U32, done, 0)
