@@ -150,6 +150,17 @@ Releases: a tag `v*` builds `bend-vmm` for macOS (signed with a Developer ID
 and notarized) and Linux arm64 and publishes both on a GitHub release
 (`.github/workflows/release.yml`; the signing secrets are listed there).
 
+## As a library
+
+`main.bend` at the repository's root is a BendHub package (MIT):
+`import 0xeedc51d20a9b77c2ac19c4d8f57d45a6/main.bend as V` (bend-vmm as of
+25ed585), then `V.Vmm.run(prog, flags)` runs the VMM inside another Bend
+program: `prog` is how that program starts the VMM again (on a guest reset,
+and in a snapshot's saved command line), e.g. `["vk8s", "vmm"]`, and `flags`
+are the options above. One VM per process (the host layer's state is the
+process's). On macOS the program needs the Hypervisor.framework entitlement
+(`scripts/build.sh your.bend out/your` builds and signs it).
+
 ## Start time
 
 Measured on an M-series Mac with Ubuntu's 6.8 arm64 kernel:
