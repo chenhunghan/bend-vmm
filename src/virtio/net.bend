@@ -157,11 +157,16 @@ def Net.tx.go(fuel: Nat, -R: Type, st: Q.Vq & +List<+List<U32>>, used: Bool) -> 
             Net.tx.step(R, r, acc, used, st2 => Net.tx.go(f, R, st2, True{}))
 
 # The virtio_net_hdr of a host frame whose headers are hlen bytes and whose
-# payload is len bytes.
-def Net.host_hdr(+hlen: U32, +len: U32) -> +List<U32>:
-  +gso = U32.is_lt(1460, len)
+# payload is len bytes, which the guest takes as TCP segments of size bytes
+# (the guest's MSS, W.Wire.host_seg).
+def Net.host_hdr_of(+size: U32, +hlen: U32, +len: U32) -> +List<U32>:
+  +gso = U32.is_lt(size, len)
   List.append(&2, U32, [2, Bool.pick(U32, gso, 1, 0)], List.append(&2, U32, B.Bytes.le16(hlen),
-    List.append(&2, U32, B.Bytes.le16(Bool.pick(U32, gso, 1460, 0)), List.append(&2, U32, B.Bytes.zeros(4n), B.Bytes.le16(1)))))
+    List.append(&2, U32, B.Bytes.le16(Bool.pick(U32, gso, size, 0)), List.append(&2, U32, B.Bytes.zeros(4n), B.Bytes.le16(1)))))
+
+# The same, in 1460-byte segments.
+def Net.host_hdr(+hlen: U32, +len: U32) -> +List<U32>:
+  Net.host_hdr_of(1460, hlen, len)
 
 # A host frame [256, conn, off, len, headers...] over a receive chain: the
 # virtio_net_hdr and the headers through Bend, then the payload from the
@@ -171,7 +176,7 @@ def Net.rx.deliver.host(-R: Type, q: Q.Vq, +h: U32, +w: +List<Q.Desc>, frame: +L
     case Con{tag, Con{conn, Con{off, Con{+len, +head}}}}:
       +hlen = U32.from_nat(List.length(&2, U32, head))
       do V.Op<R, Q.Vq>:
-        n : U32 <- Q.Vq.scatter(R, Q.Chain{h, [], w}, List.append(&2, U32, Net.host_hdr(hlen, len), head))
+        n : U32 <- Q.Vq.scatter(R, Q.Chain{h, [], w}, List.append(&2, U32, Net.host_hdr_of(W.Wire.host_seg(tag), hlen, len), head))
         V.Op.net_to_ram(R, conn, off, Q.Vq.segs(w, (12 + hlen : U32), len))
         Q.Vq.push(R, q, h, (12 + (hlen + len : U32) : U32))
     case _:

@@ -90,3 +90,18 @@ def L.nat.fwd_syn_again():
 
 def L.nat.fwd_limit():
   {==}
+
+def L.nat.seg_size():
+  {==}
+
+def L.nat.mss_cuts_data():
+  {==}
+
+def L.nat.mss_past_1460():
+  {==}
+
+def L.nat.mss_held():
+  {==}
+
+def L.nat.no_mss_held():
+  {==}

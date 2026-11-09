@@ -57,3 +57,12 @@ def L.wire.eth_parse():
 
 def L.wire.eth_short():
   {==}
+
+def L.wire.host_tag_1460():
+  {==}
+
+def L.wire.host_seg_of_tag():
+  {==}
+
+def L.wire.host_frame_of_is_host():
+  {==}

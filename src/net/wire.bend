@@ -317,12 +317,25 @@ def Wire.host_tag() -> U32:
 def Wire.host_frame(conn: U32, off: U32, len: U32, head: +List<U32>) -> +List<U32>:
   Wire.host_tag() <> conn <> off <> len <> head
 
+# A host frame the guest cuts into TCP segments of size bytes (its GSO
+# size): the tag carries size in its top 16 bits, 256 alone meaning 1460.
+def Wire.host_tag_of(+size: U32) -> U32:
+  Bool.pick(U32, U32.is_eq(size, 1460), Wire.host_tag(), ((size << 16n : U32) .|. Wire.host_tag() : U32))
+
+def Wire.host_frame_of(+size: U32, conn: U32, off: U32, len: U32, head: +List<U32>) -> +List<U32>:
+  Wire.host_tag_of(size) <> conn <> off <> len <> head
+
+# The segment size of a host frame's tag.
+def Wire.host_seg(+tag: U32) -> U32:
+  +s = (tag >> 16n : U32)
+  Bool.pick(U32, U32.is_zero(s), 1460, s)
+
 def Wire.is_host_frame(f: +List<U32>) -> Bool:
   match f:
     case Nil{}:
       False{}
     case x <> t:
-      U32.is_eq(x, Wire.host_tag())
+      U32.is_eq((x .&. 65535 : U32), Wire.host_tag())
 
 # The 20-byte IPv4 header (IHL 5, flags DF, id 0, TTL 64) of a packet with
 # len bytes after the header, with its checksum.

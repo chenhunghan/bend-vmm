@@ -213,3 +213,38 @@ law nat.fwd_syn_again:
 # once and the guest sees nothing.
 law nat.fwd_limit:
   {(frames(N.Slirp.host_event(N.Slirp{busy(256n), 256}, V.TcpIncoming{7, 8080})), cmds(N.Slirp.host_event(N.Slirp{busy(256n), 256}, V.TcpIncoming{7, 8080}))) == ([], [V.TcpAbort{7}]) : +List<+List<U32>> & +List<V.NetCmd>}
+
+# Proposed: the guest's MSS. A guest that forwards into a smaller MTU (a pod
+# network behind a VXLAN, MTU 1450) says so in its SYN's MSS (1410): every
+# segment of the host's data toward it carries at most that many bytes, on
+# the byte path (TcpData) and on the held one (TcpReady: the host frame's
+# tag carries the segment size, its virtio GSO size). No MSS, or one past
+# 1460: 1460.
+def syn_mss(m: U32) -> N.Slirp:
+  net(N.Slirp.guest_frame(N.Slirp.new(), to_host(W.Tcp.build(g(), remote(), W.Tcp{40000, 80, 999, 0, 2, 65535, m, []}), remote(), 6)))
+
+def est_mss(m: U32) -> N.Slirp:
+  net(N.Slirp.host_event(syn_mss(m), V.TcpConnected{0}))
+
+law nat.seg_size:
+  {[N.Tcp.seg_size(0), N.Tcp.seg_size(1410), N.Tcp.seg_size(9000), N.Tcp.seg_size(10)] == [1460, 1410, 1460, 64] : +List<U32>}
+
+law nat.mss_cuts_data:
+  {frames(N.Slirp.host_event(est_mss(1410), V.TcpData{0, B.Bytes.zeros(2000n)})) == [host_tcp(24, 2, 1000, 0, B.Bytes.zeros(1410n)), host_tcp(24, 1412, 1000, 0, B.Bytes.zeros(590n))] : +List<+List<U32>>}
+
+law nat.mss_past_1460:
+  {frames(N.Slirp.host_event(est_mss(9000), V.TcpData{0, B.Bytes.zeros(2000n)})) == [host_tcp(24, 2, 1000, 0, B.Bytes.zeros(1460n)), host_tcp(24, 1462, 1000, 0, B.Bytes.zeros(540n))] : +List<+List<U32>>}
+
+# The segment sizes of host frames.
+def segs_of(fs: +List<+List<U32>>) -> +List<U32>:
+  match fs:
+    case Nil{}:
+      []
+    case Con{f, t}:
+      W.Wire.host_seg(Maybe.default(&2, U32, List.head(&2, U32, f), 0)) <> segs_of(t)
+
+law nat.mss_held:
+  {segs_of(frames(N.Slirp.host_event(est_mss(1410), V.TcpReady{0, 4000}))) == [1410] : +List<U32>}
+
+law nat.no_mss_held:
+  {segs_of(frames(N.Slirp.host_event(established(), V.TcpReady{0, 4000}))) == [1460] : +List<U32>}
