@@ -467,6 +467,46 @@ def net_cmd.evict(m: Maybe<&2, U32>) -> IO(Unit):
         _ : U32 <- H.Hvf.udp_close(flow)
         return Unit{}
 
+def resolver.got(r: File & Result<&1, &1, U32 & String, String>) -> IO(String):
+  match r:
+    case (f, got):
+      do IO<String>:
+        File.close(f)
+        return Result.default(&1, &1, U32 & String, String, got, "")
+
+def resolver.opened(r: Result<&1, &1, U32 & String, File>) -> IO(String):
+  match r:
+    case Fail{e}:
+      IO.pure(String, "")
+    case Done{f}:
+      do IO<String>:
+        got : File & Result<&1, &1, U32 & String, String> <- File.read(f, 65536)
+        resolver.got(got)
+
+# The host's resolver, for the guest's DNS server 10.0.2.3 (src/net/addr.bend).
+def resolver() -> IO(Unit):
+  do IO<Unit>:
+    r : Result<&1, &1, U32 & String, File> <- File.open("/etc/resolv.conf", "r")
+    text : String <- resolver.opened(r)
+    _ : U32 <- H.Hvf.set_dns(Ad.Addr.nameserver(text))
+    return Unit{}
+
+# The host address of the guest's destination ip; the resolver is read
+# again first when ip is the DNS server (src/net/addr.bend, Addr.reread).
+def nat_dns.go(again: Bool) -> IO(U32):
+  match again:
+    case True{}:
+      do IO<U32>:
+        resolver()
+        d : U32 <- H.Hvf.dns()
+        return d
+    case False{}:
+      H.Hvf.dns()
+
+def nat_dns(+ip: U32) -> IO(U32):
+  nat_dns.go(Ad.Addr.reread(ip))
+
+
 @unsafe def net_cmd.udp(fresh: Bool, +mc: Chan(M.Machine), +done: Chan(U32), +flow: U32, +sport: U32) -> IO(Unit):
   match fresh:
     case True{}:
@@ -488,9 +528,9 @@ def net_cmd.evict(m: Maybe<&2, U32>) -> IO(Unit):
 
 @unsafe def net_cmd(+mc: Chan(M.Machine), +done: Chan(U32), cmd: V.NetCmd) -> IO(Unit):
   match cmd:
-    case V.TcpConnect{+conn, ip, port}:
+    case V.TcpConnect{+conn, +ip, port}:
       do IO<Unit>:
-        dns : U32 <- H.Hvf.dns()
+        dns : U32 <- nat_dns(ip)
         rc : U32 <- H.Hvf.tcp_connect(conn, Ad.Addr.to_host(ip, dns), port)
         net_cmd.connect(U32.is_zero(rc), mc, done, conn)
     case V.TcpSend{+conn, bs}:
@@ -509,9 +549,9 @@ def net_cmd.evict(m: Maybe<&2, U32>) -> IO(Unit):
       do IO<Unit>:
         _ : U32 <- H.Hvf.tcp_abort(conn)
         return Unit{}
-    case V.UdpSend{+sport, ip, port, bs}:
+    case V.UdpSend{+sport, +ip, port, bs}:
       do IO<Unit>:
-        dns : U32 <- H.Hvf.dns()
+        dns : U32 <- nat_dns(ip)
         +rc : U32 <- H.Hvf.udp_send(sport, Ad.Addr.to_host(ip, dns), port, bs)
         net_cmd.udp(U32.is_ne(rc, 0) && U32.is_ne(rc, 4294967295), mc, done, rc, sport)
     case V.TcpSendStaged{+conn, slot}:
@@ -680,7 +720,8 @@ def reply_rc(+rc: U32, ok: String) -> String:
         +m : M.Machine <- take(mc)
         put(mc, m)
         holds : +List<U32> <- H.Hvf.net_holds()
-        return M.Machine.net_show(m) ++ "\nheld on the host [conn, bytes, parked]...: " ++ List.show(~&2, ~U32, ~U32.show, holds)
+        dns : U32 <- H.Hvf.dns()
+        return M.Machine.net_show(m) ++ "\nresolver (10.0.2.3 on the host, read from /etc/resolv.conf at each query): " ++ Ad.Addr.show(dns) ++ "\nheld on the host [conn, bytes, parked]...: " ++ List.show(~&2, ~U32, ~U32.show, holds)
     case Ctl.CPowerdown{}:
       do IO<String>:
         power_button(mc, done)
@@ -1568,30 +1609,6 @@ def shutdown_ms() -> U32:
 
 # Runs a machine: the vCPU loops of the given CPUs, console input and the
 # control socket; ends when a vCPU stops the VM.
-def resolver.got(r: File & Result<&1, &1, U32 & String, String>) -> IO(String):
-  match r:
-    case (f, got):
-      do IO<String>:
-        File.close(f)
-        return Result.default(&1, &1, U32 & String, String, got, "")
-
-def resolver.opened(r: Result<&1, &1, U32 & String, File>) -> IO(String):
-  match r:
-    case Fail{e}:
-      IO.pure(String, "")
-    case Done{f}:
-      do IO<String>:
-        got : File & Result<&1, &1, U32 & String, String> <- File.read(f, 65536)
-        resolver.got(got)
-
-# The host's resolver, for the guest's DNS server 10.0.2.3 (src/net/addr.bend).
-def resolver() -> IO(Unit):
-  do IO<Unit>:
-    r : Result<&1, &1, U32 & String, File> <- File.open("/etc/resolv.conf", "r")
-    text : String <- resolver.opened(r)
-    _ : U32 <- H.Hvf.set_dns(Ad.Addr.nameserver(text))
-    return Unit{}
-
 @unsafe def run_machine(+mc: Chan(M.Machine), +done: Chan(U32), +ctl: String, disp: String, fwd: String, cpus: +List<U32>) -> IO(Unit):
   do IO<Unit>:
     resolver()

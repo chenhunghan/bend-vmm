@@ -73,3 +73,13 @@ def Addr.to_host(+ip: U32, +dns: U32) -> U32:
 # A host-side source as the guest sees it.
 def Addr.to_guest(+ip: U32, +dns: U32) -> U32:
   Bool.pick(U32, U32.is_eq(ip, Addr.loopback()), Addr.gateway(), Bool.pick(U32, U32.is_eq(ip, dns), Addr.dns(), ip))
+
+# Whether a guest destination is the DNS server 10.0.2.3: the host's
+# resolver is read again for it, so a host network change (a new Wi-Fi,
+# a VPN, a reboot of the router) reaches a long-running guest.
+def Addr.reread(ip: U32) -> Bool:
+  U32.is_eq(ip, Addr.dns())
+
+# a.b.c.d
+def Addr.show(+ip: U32) -> String:
+  U32.show((ip >> 24n : U32)) ++ "." ++ U32.show(((ip >> 16n : U32) .&. 255 : U32)) ++ "." ++ U32.show(((ip >> 8n : U32) .&. 255 : U32)) ++ "." ++ U32.show((ip .&. 255 : U32))

@@ -171,6 +171,8 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   slp 12
   [ "$(echo pause | nc -U "$sock")" = paused ] && [ "$(echo status | nc -U "$sock")" = paused ] && grn "ok: pause" || { red "failed: pause"; fail=1; }
   [ "$(echo resume | nc -U "$sock")" = running ] && grn "ok: resume" || { red "failed: resume"; fail=1; }
+  # the NAT's DNS server follows the host's resolver (read at each query)
+  echo net | nc -U "$sock" | grep -q '^resolver .*: [0-9]*\.[0-9]*\.[0-9]*\.[0-9]*$' && grn "ok: net shows the resolver" || { red "failed: net shows the resolver"; fail=1; }
   [ "$(echo "snapshot $t/vm.snap" | nc -U "$sock")" = saved ] && grn "ok: snapshot ($(du -h "$t/vm.snap" | cut -f1) on disk)" || { red "failed: snapshot"; fail=1; }
   echo quit | nc -U "$sock" >/dev/null; slp 1
   out=$(drive 40 "restored" 'cat /tmp/m\n' "MARK-42" 'poweroff -f\n' -- ./out/bend-vmm --restore "$t/vm.snap" 2>&1)

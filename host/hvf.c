@@ -3045,8 +3045,14 @@ Term hvf_udp_send_run(Env e, Term* f, IoWork* w) {
     k->uip    = ip;
     k->urport = port;
   }
-  send(k->fd, buf, n, HVF_NOSIG);
+  ssize_t sent = send(k->fd, buf, n, HVF_NOSIG);
   free(buf);
+  if (sent < 0 && !fresh && errno != EAGAIN && errno != ENOBUFS) {
+    // the socket's route or source address is gone (a host network
+    // change): the flow closes, the guest's next datagram opens a new one
+    hvf_sock_free(k);
+    return (Term)HVF_ERR;
+  }
   k->ulast = io_tick();
   return (Term)fresh;
 }

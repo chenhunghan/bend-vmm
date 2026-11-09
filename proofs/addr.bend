@@ -30,3 +30,15 @@ def L.addr.reply_from_host():
 
 def L.addr.reply_from_resolver():
   {==}
+
+def L.addr.reread_dns():
+  {==}
+
+def L.addr.reread_not_others():
+  {==}
+
+def L.addr.show_quad():
+  {==}
+
+def L.addr.show_dns():
+  {==}

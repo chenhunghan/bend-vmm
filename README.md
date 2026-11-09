@@ -251,7 +251,10 @@ elsewhere. What holds today:
   except these, refused by the NAT (a TCP SYN gets a RST, a UDP datagram is
   dropped): 0.0.0.0/8, 127.0.0.0/8 named directly, 169.254.0.0/16 (link
   local, where clouds serve instance metadata), 224.0.0.0/4 (multicast) and
-  255.255.255.255; 10.0.2.3 (the host's resolver) takes port 53 only. The
+  255.255.255.255; 10.0.2.3 (the host's resolver, the first nameserver of
+  /etc/resolv.conf, read again at each query so a host network change
+  reaches a running guest; `net` on the control socket shows it) takes port
+  53 only. The
   host itself stays reachable as 10.0.2.2, which is the host's loopback: a
   service bound to 127.0.0.1 on the host is open to the guest. The guest
   holds at most 256 TCP connections and 128 UDP flows (the least recently
