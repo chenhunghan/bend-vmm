@@ -176,3 +176,17 @@ law snapfile.cpus_asked:
 # Proposed: a snapshot is written next to its path, then renamed over it.
 law snapfile.tmp:
   {S.Snapf.tmp("out/vm.snap") == "out/vm.snap.bend-vmm-tmp" : String}
+
+# Proposed: the format version is the hypervisor's (Hypervisor.framework 1,
+# KVM 2, any other none), and it heads the sizes a plan is made from.
+law snapfile.version_hvf:
+  {S.Snapf.version(0) == 1 : U32}
+
+law snapfile.version_kvm:
+  {S.Snapf.version(1) == 2 : U32}
+
+law snapfile.version_other:
+  {S.Snapf.version(7) == 0 : U32}
+
+law snapfile.sizes:
+  {S.Snapf.sizes([1, 0, 1073741824]) == [2, 0, 1073741824] : List<&2, U32>}

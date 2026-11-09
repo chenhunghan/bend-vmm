@@ -352,3 +352,21 @@ def Snapf.load.wire(l: Layout) -> +List<U32>:
   match l:
     case Layout{Head{v, n, b, r, a}, ao, wo, nw, go, ng, +cs, ro}:
       List.concat(&2, U32, [Snapf.w64(b), Snapf.w64(r), Snapf.w64(ro), Snapf.w64(ao), Snapf.w64(a), Snapf.w64(wo), Snapf.w64(U.U64.shl(2n, nw)), Snapf.w64(go), Snapf.w64(ng), [U32.from_nat(List.length(&2, Part, cs))], Snapf.cpus.wire(cs)])
+
+# The snapshot format each hypervisor writes and reads, from the host's fact
+# (the first word Hvf.snap_save answers, the second of Hvf.snap_open's:
+# 0 Hypervisor.framework, 1 KVM): version 1 holds Hypervisor.framework's
+# register entries and hv_gic_state, version 2 KVM's register list and its
+# vGIC replay. A snapshot restores only where its version is this host's;
+# another hypervisor has no version (0, which no header carries).
+def Snapf.version(+hv: U32) -> U32:
+  Bool.pick(U32, U32.is_eq(hv, 0), 1, Bool.pick(U32, U32.is_eq(hv, 1), 2, 0))
+
+# The sizes Hvf.snap_save answers, with its hypervisor word made the
+# format's version (Snapf.plan_of reads a version there).
+def Snapf.sizes(ws: +List<U32>) -> +List<U32>:
+  match ws:
+    case Nil{}:
+      []
+    case Con{hv, rest}:
+      Con{Snapf.version(hv), rest}

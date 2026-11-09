@@ -16,3 +16,12 @@ def L.clients.other_verb():
 def L.clients.deadline():
   {==}
 
+
+def L.clients.backlogs():
+  {==}
+
+def L.clients.full_retry():
+  {==}
+
+def L.clients.signals():
+  {==}

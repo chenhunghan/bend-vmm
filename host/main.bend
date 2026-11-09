@@ -603,7 +603,7 @@ def snap.place(ok: Bool, rc: U32, tmp: String, path: String) -> IO(U32):
     +sizes : +List<U32> <- H.Hvf.snap_save(Snap.Snap.encode(m))
     +dst : String = path
     +tmp : String = Sf.Snapf.tmp(dst)
-    +wrote : U32 <- snap.commit(tmp, Sf.Snapf.plan_of(sizes))
+    +wrote : U32 <- snap.commit(tmp, Sf.Snapf.plan_of(Sf.Snapf.sizes(sizes)))
     rc : U32 <- snap.place(U32.is_zero(wrote), wrote, tmp, dst)
     put(mc, m)
     resume_if(U32.is_zero(was))
@@ -1279,7 +1279,7 @@ def devices.vsock(none: Bool, +path: String) -> IO(+List<D.DevKind>):
       do IO<+List<D.DevKind>>:
         +why : String <- H.Host.listen.ok(path)
         die_if(Bool.not(String.is_empty(why)), "cannot listen on the vsock socket " ++ path ++ ": " ++ why)
-        +rc : U32 <- H.Hvf.vsock_listen(path, Hf.Files.private())
+        +rc : U32 <- H.Hvf.vsock_listen(path, Hf.Files.private(), Ck.Clients.backlog_vsock())
         die_if(U32.is_ne(rc, 0), "cannot listen on the vsock socket (" ++ U32.show(rc) ++ ")")
         return [D.VsockKind{U.U64{0, 3}}]
 
@@ -1444,7 +1444,7 @@ def stopped(+code: U32) -> IO(Unit):
       do IO<Unit>:
         +why : String <- H.Host.listen.ok(path)
         die_if(Bool.not(String.is_empty(why)), "cannot listen on the control socket " ++ path ++ ": " ++ why)
-        +rc : U32 <- H.Hvf.ctl_listen(path, Hf.Files.private())
+        +rc : U32 <- H.Hvf.ctl_listen(path, Hf.Files.private(), Ck.Clients.backlog_control())
         die_if(U32.is_ne(rc, 0), "cannot listen on the control socket (" ++ U32.show(rc) ++ ")")
         IO.spawn(Unit, ctl_loop(mc, done))
 
@@ -1513,7 +1513,7 @@ def stopped(+code: U32) -> IO(Unit):
     case Some{Cli.Fwd{+addr, +hport, +gport}}:
       do IO<Unit>:
         die_if(U32.is_le(Cli.Fwd.max(), idx), "--forward: at most " ++ U32.show(Cli.Fwd.max()) ++ " forwards")
-        +rc : U32 <- H.Hvf.fwd_listen(idx, addr, hport)
+        +rc : U32 <- H.Hvf.fwd_listen(idx, addr, hport, Ck.Clients.backlog_forward())
         forwards.listened(rc, idx, addr, hport, gport, mc, done)
 
 # Listens for every forward (one that cannot listen, its port taken or its
@@ -1803,7 +1803,7 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     +st : +List<U32> <- H.Hvf.snap_open(path)
     die_if(U32.is_ne(H.Host.first(st), 0), "cannot read the snapshot (" ++ U32.show(H.Host.first(st)) ++ ")")
     hb : +List<U32> <- H.Hvf.snap_peek(0, 0, 40)
-    +l : Sf.Layout <- snap.start(Sf.Snapf.head(Sf.Snapf.word(st, 1n), hb), Sf.Snapf.u64_at(st, 2n))
+    +l : Sf.Layout <- snap.start(Sf.Snapf.head(Sf.Snapf.version(Sf.Snapf.word(st, 1n)), hb), Sf.Snapf.u64_at(st, 2n))
     saved : List<String> <- H.Hvf.snap_args()
     +prog : U32 <- H.Hvf.prog()
     +o0 : Op.Opts = Op.Restore.opts(List.drop(&1, String, saved, Nat.sub(U32.to_nat(prog), 1n)), now)
@@ -1924,6 +1924,8 @@ def args_bytes(args: List<String>) -> +List<U32>:
     _ : U32 <- H.Hvf.set_prog(U32.from_nat(List.length(&1, String, prog)))
     _ : U32 <- H.Hvf.net_limits(Lim.Lim.wire(Lim.Lim.default()))
     _ : U32 <- H.Host.fds()
+    _ : U32 <- H.Hvf.signals(Ck.Clients.mask(Ck.Clients.signals()))
+    _ : U32 <- H.Hvf.accept_retry(Ck.Clients.full_retry_ms())
     main.go(main.info(flags), flags)
 
 @unsafe def main() -> IO(Unit):

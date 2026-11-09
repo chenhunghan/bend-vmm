@@ -649,7 +649,7 @@ static int vmb_gic_restore(const uint8_t* blob, size_t size) {
   return hv.gic_set_state && hv.gic_set_state(blob, size) == HV_SUCCESS ? 0 : -1;
 }
 
-#define HVF_SNAP_VER 1
+#define HVF_HYPERVISOR 0 // Snapf.version: 0 Hypervisor.framework
 
 #else
 
@@ -782,7 +782,7 @@ static int vmb_gic_restore(const uint8_t* blob, size_t size) {
   return bad;
 }
 
-#define HVF_SNAP_VER 2
+#define HVF_HYPERVISOR 1 // Snapf.version: 1 KVM
 
 #endif
 
@@ -1654,6 +1654,7 @@ static void hvf_tty_raw(void) {
 // Bend waits on them they end the VMM as before, with the terminal restored.
 static int        hvf_sig_pipe[2] = {-1, -1};
 static atomic_int hvf_sig_armed;
+static atomic_uint hvf_sig_mask; // the signals Bend takes (Clients.signals; Hvf.signals)
 static sigset_t   hvf_sig_set;
 
 static void* hvf_sig_thread(void* arg) {
@@ -1663,7 +1664,7 @@ static void* hvf_sig_thread(void* arg) {
     if (sigwait(&hvf_sig_set, &sig) != 0) {
       continue;
     }
-    if (!atomic_load(&hvf_sig_armed)) {
+    if (!atomic_load(&hvf_sig_armed) || !(atomic_load(&hvf_sig_mask) & (1u << sig))) {
       hvf_tty_restore();
       signal(sig, SIG_DFL);
       sigset_t one;
@@ -1705,6 +1706,14 @@ static Term hvf_signal_more(Env e, IoWork* w) {
     return io_wait_on(w, hvf_sig_pipe[0], POLLIN, 0, hvf_signal_more);
   }
   return (Term)(u32)(unsigned char)c;
+}
+
+// Hvf.signals(mask) -> U32: the signals the VMM takes (bit n: signal n;
+// src/vmm/clients.bend, Clients.signals), of the ones this thread can catch
+// (SIGTERM, SIGINT, SIGHUP); any other keeps its default action. 0.
+Term hvf_signals_run(Env e, Term* f, IoWork* w) {
+  atomic_store(&hvf_sig_mask, (unsigned)(u32)f[0]);
+  return (Term)0;
 }
 
 // Hvf.signal_wait() -> U32: from the first call on, SIGTERM, SIGINT and
@@ -3674,7 +3683,7 @@ Term hvf_snap_save_run(Env e, Term* f, IoWork* w) {
   uint32_t ncpus = hvf_snap_ncpus();
   uint32_t ws[12 + 2 * HVF_MAX_CPUS];
   uint64_t v[5] = {hvf_ram_base, hvf_ram_size, hvf_arglen, hvf_snapw.nwords, hvf_snapw.ngic};
-  ws[0]         = HVF_SNAP_VER;
+  ws[0]         = HVF_HYPERVISOR;
   for (int i = 0; i < 5; i++) {
     ws[1 + 2 * i] = (uint32_t)(v[i] >> 32);
     ws[2 + 2 * i] = (uint32_t)v[i];
@@ -3812,7 +3821,7 @@ Term hvf_snap_open_run(Env e, Term* f, IoWork* w) {
   }
   hvf_snap_rfd   = fd;
   uint64_t sz    = (uint64_t)st.st_size;
-  uint32_t ws[4] = {0, HVF_SNAP_VER, (uint32_t)(sz >> 32), (uint32_t)sz};
+  uint32_t ws[4] = {0, HVF_HYPERVISOR, (uint32_t)(sz >> 32), (uint32_t)sz};
   return hvf_words(e, ws, 4);
 }
 
@@ -4269,7 +4278,7 @@ Term hvf_ctl_listen_run(Env e, Term* f, IoWork* w) {
   if (fd >= 0) {
     fcntl(fd, F_SETFD, FD_CLOEXEC);
   }
-  if (fd < 0 || bind(fd, (struct sockaddr*)&a, sizeof a) != 0 || listen(fd, 4) != 0) {
+  if (fd < 0 || bind(fd, (struct sockaddr*)&a, sizeof a) != 0 || listen(fd, (int)(u32)f[2]) != 0) {
     int err = errno;
     if (fd >= 0) {
       close(fd);
@@ -4289,6 +4298,16 @@ static Term hvf_ctl_line(Env e, IoWork* w);
 static uint64_t hvf_ctl_deadline;
 static uint64_t hvf_ctl_wait_ns = 5000000000ull; // Hvf.ctl_next's deadline (Clients.deadline_ms)
 
+// How long a listener out of descriptors waits before it tries again
+// (Clients.full_retry_ms, Hvf.accept_retry).
+static uint64_t hvf_full_retry_ns = 100000000ull;
+
+// Hvf.accept_retry(ms) -> U32: 0.
+Term hvf_accept_retry_run(Env e, Term* f, IoWork* w) {
+  hvf_full_retry_ns = (uint64_t)(u32)f[0] * 1000000ull;
+  return (Term)0;
+}
+
 static int hvf_accept_full(int err) {
   return err == EMFILE || err == ENFILE || err == ENOBUFS || err == ENOMEM;
 }
@@ -4297,7 +4316,7 @@ static Term hvf_ctl_accept(Env e, IoWork* w) {
   int c = accept(hvf_ctl_fd, NULL, NULL);
   if (c < 0) {
     // out of descriptors the listener stays readable: wait, don't spin
-    return hvf_accept_full(errno) ? io_wait_on(w, 0, 0, io_tick() + 100000000ull, hvf_ctl_accept)
+    return hvf_accept_full(errno) ? io_wait_on(w, 0, 0, io_tick() + hvf_full_retry_ns, hvf_ctl_accept)
                                   : io_wait_on(w, hvf_ctl_fd, POLLIN, 0, hvf_ctl_accept);
   }
   fcntl(c, F_SETFD, FD_CLOEXEC);
@@ -4452,7 +4471,7 @@ Term hvf_vsock_listen_run(Env e, Term* f, IoWork* w) {
   if (fd >= 0) {
     fcntl(fd, F_SETFD, FD_CLOEXEC);
   }
-  if (fd < 0 || bind(fd, (struct sockaddr*)&a, sizeof a) != 0 || listen(fd, 16) != 0) {
+  if (fd < 0 || bind(fd, (struct sockaddr*)&a, sizeof a) != 0 || listen(fd, (int)(u32)f[2]) != 0) {
     int err = errno;
     if (fd >= 0) {
       close(fd);
@@ -4473,7 +4492,7 @@ static uint64_t hvf_vs_wait_ns = 5000000000ull; // Hvf.vsock_accept's deadline (
 static Term hvf_vs_accept(Env e, IoWork* w) {
   int c = accept(hvf_vs_fd, NULL, NULL);
   if (c < 0) {
-    return hvf_accept_full(errno) ? io_wait_on(w, 0, 0, io_tick() + 100000000ull, hvf_vs_accept)
+    return hvf_accept_full(errno) ? io_wait_on(w, 0, 0, io_tick() + hvf_full_retry_ns, hvf_vs_accept)
                                   : io_wait_on(w, hvf_vs_fd, POLLIN, 0, hvf_vs_accept);
   }
   fcntl(c, F_SETFD, FD_CLOEXEC);
@@ -4598,7 +4617,7 @@ Term hvf_fwd_listen_run(Env e, Term* f, IoWork* w) {
   a.sin_family         = AF_INET;
   a.sin_port           = htons((uint16_t)port);
   a.sin_addr           = ia;
-  if (bind(fd, (struct sockaddr*)&a, sizeof a) != 0 || listen(fd, 64) != 0) {
+  if (bind(fd, (struct sockaddr*)&a, sizeof a) != 0 || listen(fd, (int)(u32)f[3]) != 0) {
     int err = errno;
     close(fd);
     return (Term)(u32)err;
@@ -4630,11 +4649,11 @@ static Term hvf_fwd_accept_more(Env e, IoWork* w) {
       }
       // nothing to accept (or a client gone already): wait for the next;
       // anything else (out of descriptors, memory) leaves the listener
-      // readable, so wait 100 ms rather than spin
+      // readable, so wait (Clients.full_retry_ms) rather than spin
       if (err == EAGAIN || err == EWOULDBLOCK || err == ECONNABORTED) {
         return io_wait_on(w, lfd, POLLIN, 0, hvf_fwd_accept_more);
       }
-      return io_wait_on(w, 0, 0, io_tick() + 100000000ull, hvf_fwd_accept_more);
+      return io_wait_on(w, 0, 0, io_tick() + hvf_full_retry_ns, hvf_fwd_accept_more);
     }
     fcntl(c, F_SETFD, FD_CLOEXEC);
     fcntl(c, F_SETFL, O_NONBLOCK);
@@ -5078,6 +5097,12 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.vcpu_queue)
   io_eff(CID(Hvf.vcpu_queue), hvf_vcpu_queue_run);
+#endif
+#ifdef CID(Hvf.signals)
+  io_eff(CID(Hvf.signals), hvf_signals_run);
+#endif
+#ifdef CID(Hvf.accept_retry)
+  io_eff(CID(Hvf.accept_retry), hvf_accept_retry_run);
 #endif
 #ifdef CID(Hvf.sock_facts)
   io_eff(CID(Hvf.sock_facts), hvf_sock_facts_run);

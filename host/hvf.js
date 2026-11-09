@@ -19,6 +19,8 @@ io_eff(CID(Hvf.disk_open_with), hvf_unavailable);
 io_eff(CID(Hvf.disk_err), () => 0);
 io_eff(CID(Hvf.disk_status), hvf_unavailable);
 io_eff(CID(Hvf.signal_wait), hvf_unavailable);
+io_eff(CID(Hvf.signals), () => 0);
+io_eff(CID(Hvf.accept_retry), () => 0);
 io_eff(CID(Hvf.disk_size), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.disk_read), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.disk_write), hvf_unavailable);

@@ -135,3 +135,15 @@ def L.snapfile.cpus_header():
 
 def L.snapfile.cpus_asked():
   {==}
+
+def L.snapfile.version_hvf():
+  {==}
+
+def L.snapfile.version_kvm():
+  {==}
+
+def L.snapfile.version_other():
+  {==}
+
+def L.snapfile.sizes():
+  {==}

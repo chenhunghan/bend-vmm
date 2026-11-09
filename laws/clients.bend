@@ -17,3 +17,14 @@ law clients.other_verb:
 
 law clients.deadline:
   {C.Clients.deadline_ms() == 5000 : U32}
+
+# Proposed: listener backlogs, the retry when out of descriptors, and the
+# signals the VMM takes (SIGHUP, SIGINT, SIGTERM: mask 0x8006).
+law clients.backlogs:
+  {[C.Clients.backlog_control(), C.Clients.backlog_vsock(), C.Clients.backlog_forward()] == [4, 16, 64] : List<&2, U32>}
+
+law clients.full_retry:
+  {C.Clients.full_retry_ms() == 100 : U32}
+
+law clients.signals:
+  {C.Clients.mask(C.Clients.signals()) == 32774 : U32}

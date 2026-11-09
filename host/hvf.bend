@@ -129,6 +129,14 @@ def Hvf.disk_status(disk: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.signals(mask: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.accept_retry(ms: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.signal_wait() -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
@@ -420,7 +428,7 @@ def Hvf.snap_gic() -> IO(U32):
   import "./hvf.js"
 
 # The control socket (host/hvf.c).
-def Hvf.ctl_listen(path: String, mode: U32) -> IO(U32):
+def Hvf.ctl_listen(path: String, mode: U32, backlog: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -438,7 +446,7 @@ def Hvf.unix_connect(key: U32, path: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.vsock_listen(path: String, mode: U32) -> IO(U32):
+def Hvf.vsock_listen(path: String, mode: U32, backlog: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -456,7 +464,7 @@ def Hvf.vsock_accept(deadline_ms: U32) -> IO(+List<U32>):
 
 # Port forwarding (host/hvf.c): forward idx listens on addr:port; each
 # accepted client is a NAT connection, its id fresh (0x20000000 up).
-def Hvf.fwd_listen(idx: U32, addr: String, port: U32) -> IO(U32):
+def Hvf.fwd_listen(idx: U32, addr: String, port: U32, backlog: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
