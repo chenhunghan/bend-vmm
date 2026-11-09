@@ -10,6 +10,7 @@ import ../src/arm64/kvmexit.bend as Kx
 import ../src/arm64/gicplan.bend as Gp
 import ../src/arm64/regplan.bend as Rp
 import ../src/net/fds.bend as Fd
+import ../src/vmm/hostfiles.bend as Hf
 
 # Hypervisor.framework effects (host/hvf.c) and their typed wrappers.
 # Words cross the boundary as U32; 64-bit values as (hi, lo) pairs.
@@ -234,7 +235,7 @@ def Hvf.nat_send(conn: U32, bytes: +List<U32>) -> IO(+List<U32>):
 # A NAT connection's flusher: sends its pending data as the socket takes it.
 # 0: TcpUnblocked, then again; 3: TcpBlocked, then again; 2: TcpReset; 1:
 # done.
-def Hvf.console_log(path: String) -> IO(U32):
+def Hvf.console_log(path: String, mode: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -330,7 +331,7 @@ def Hvf.snap_commit(path: String, plan: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.lan_open(dir: String, mac: +List<U32>) -> IO(U32):
+def Hvf.lan_open(dir: String, mac: +List<U32>, mode: U32, replace: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -363,6 +364,22 @@ def Hvf.net_limits(words: +List<U32>) -> IO(U32):
   import "./hvf.js"
 
 def Hvf.rename(from: String, to: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.sock_facts(path: String) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.sock_remove(path: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.mkdir(path: String, mode: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.dir_facts(path: String) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -403,7 +420,7 @@ def Hvf.snap_gic() -> IO(U32):
   import "./hvf.js"
 
 # The control socket (host/hvf.c).
-def Hvf.ctl_listen(path: String) -> IO(U32):
+def Hvf.ctl_listen(path: String, mode: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -421,7 +438,7 @@ def Hvf.unix_connect(key: U32, path: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.vsock_listen(path: String) -> IO(U32):
+def Hvf.vsock_listen(path: String, mode: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -466,7 +483,7 @@ def Hvf.fb_init(width: U32, height: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.fb_dump(path: String) -> IO(U32):
+def Hvf.fb_dump(path: String, mode: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -719,3 +736,70 @@ def Host.fds() -> IO(U32):
     +ws : +List<U32> <- Hvf.nofile()
     +lim : U32 <- Host.nofile.set(ws)
     Hvf.fd_room(Fd.Fds.room(lim))
+
+# What a path to listen on holds, as src/vmm/hostfiles.bend decides
+# (Files.listen) from the host's facts (Hvf.sock_facts).
+def Host.listen.of(ws: +List<U32>) -> Hf.Listen:
+  match ws:
+    case Con{+kind, Con{live, rest}}:
+      Hf.Files.listen(kind, U32.is_ne(live, 0))
+    case _:
+      Hf.LNotSocket{}
+
+# May the VMM listen at path? "" when it may (a dead socket there is
+# removed first), else why not.
+def Host.listen.clear(l: Hf.Listen, path: String) -> IO(String):
+  match l:
+    case Hf.LReplace{}:
+      do IO<String>:
+        +rc : U32 <- Hvf.sock_remove(path)
+        return Bool.pick(String, U32.is_zero(rc), "", "cannot remove the old socket (" ++ U32.show(rc) ++ ")")
+    case _:
+      IO.pure(String, Hf.Files.listen.why(l))
+
+def Host.listen.ok(+path: String) -> IO(String):
+  do IO<String>:
+    +ws : +List<U32> <- Hvf.sock_facts(path)
+    Host.listen.clear(Host.listen.of(ws), path)
+
+# Whether the LAN directory may be used (Files.dir_trusted), made 0700 when
+# missing.
+def Host.lan_dir.of(ws: +List<U32>) -> Bool:
+  match ws:
+    case Con{+kind, Con{mine, Con{+perm, rest}}}:
+      Hf.Files.dir_trusted(kind, U32.is_ne(mine, 0), perm)
+    case _:
+      False{}
+
+def Host.lan_dir.ok(+dir: String) -> IO(Bool):
+  do IO<Bool>:
+    _ : U32 <- Hvf.mkdir(dir, Hf.Files.private_dir())
+    +ws : +List<U32> <- Hvf.dir_facts(dir)
+    return Host.lan_dir.of(ws)
+
+# Joins the LAN in dir: Files decides whether the directory is trusted and
+# whether an old socket of this MAC may be replaced; 0, or an errno.
+def Host.lan_open.go(l: Hf.Listen, +dir: String, mac: +List<U32>) -> IO(U32):
+  match l:
+    case Hf.LBind{}:
+      Hvf.lan_open(dir, mac, Hf.Files.private(), 0)
+    case Hf.LReplace{}:
+      Hvf.lan_open(dir, mac, Hf.Files.private(), 1)
+    case Hf.LInUse{}:
+      IO.pure(U32, 48)  # EADDRINUSE (macOS) / Linux 98: only shown
+    case Hf.LNotSocket{}:
+      IO.pure(U32, 17)  # EEXIST
+
+def Host.lan_open.trusted(ok: Bool, +dir: String, +mac: +List<U32>) -> IO(U32):
+  match ok:
+    case True{}:
+      do IO<U32>:
+        +ws : +List<U32> <- Hvf.sock_facts(dir ++ "/" ++ Hf.Files.lan_sock(mac))
+        Host.lan_open.go(Host.listen.of(ws), dir, mac)
+    case False{}:
+      IO.pure(U32, 13)  # EACCES
+
+def Host.lan_open(+dir: String, +mac: +List<U32>) -> IO(U32):
+  do IO<U32>:
+    +ok : Bool <- Host.lan_dir.ok(dir)
+    Host.lan_open.trusted(ok, dir, mac)

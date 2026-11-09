@@ -13,6 +13,7 @@ import ../src/vmm/clients.bend as Ck
 import ../src/dev/conlog.bend as Cl
 import ../src/vmm/opts.bend as Op
 import ../src/disk/access.bend as Acc
+import ../src/vmm/hostfiles.bend as Hf
 import ../src/net/limits.bend as Lim
 import ../src/net/flush.bend as Fl
 import ../src/net/udpflow.bend as Uf
@@ -583,7 +584,7 @@ def snap.commit(path: String, plan: Maybe<&2, +List<Sf.Piece>>) -> IO(U32):
         _ : U32 <- H.Hvf.snap_drop()
         return 27
     case Some{ps}:
-      H.Hvf.snap_commit(path, Sf.Snapf.pieces.wire(ps))
+      H.Hvf.snap_commit(path, Con{Hf.Files.private(), Sf.Snapf.pieces.wire(ps)})
 
 # A written snapshot (rc 0) renamed into place.
 def snap.place(ok: Bool, rc: U32, tmp: String, path: String) -> IO(U32):
@@ -662,7 +663,7 @@ def reply_rc(+rc: U32, ok: String) -> String:
         return "bye"
     case Ctl.CScreendump{path}:
       do IO<String>:
-        +rc : U32 <- H.Hvf.fb_dump(path)
+        +rc : U32 <- H.Hvf.fb_dump(path, Hf.Files.private())
         return reply_rc(rc, "saved")
     case Ctl.CPointer{x, y}:
       do IO<String>:
@@ -1270,13 +1271,15 @@ def devices.share(none: Bool, spec: String) -> IO(+List<D.DevKind>):
 
 # --vsock PATH: a virtio-vsock device (guest CID 3) whose host side is
 # Unix sockets under PATH.
-def devices.vsock(none: Bool, path: String) -> IO(+List<D.DevKind>):
+def devices.vsock(none: Bool, +path: String) -> IO(+List<D.DevKind>):
   match none:
     case True{}:
       IO.pure(+List<D.DevKind>, [])
     case False{}:
       do IO<+List<D.DevKind>>:
-        +rc : U32 <- H.Hvf.vsock_listen(path)
+        +why : String <- H.Host.listen.ok(path)
+        die_if(Bool.not(String.is_empty(why)), "cannot listen on the vsock socket " ++ path ++ ": " ++ why)
+        +rc : U32 <- H.Hvf.vsock_listen(path, Hf.Files.private())
         die_if(U32.is_ne(rc, 0), "cannot listen on the vsock socket (" ++ U32.show(rc) ++ ")")
         return [D.VsockKind{U.U64{0, 3}}]
 
@@ -1297,8 +1300,8 @@ def devices.input(none: Bool) -> +List<D.DevKind>:
       IO.pure(+List<D.DevKind>, [])
     case Some{Cli.LanSpec{+dir, +mac, ip, prefix}}:
       do IO<+List<D.DevKind>>:
-        +rc : U32 <- H.Hvf.lan_open(dir, mac)
-        die_if(U32.is_ne(rc, 0), "cannot join the LAN in " ++ dir ++ " (" ++ U32.show(rc) ++ "; it must be this user's directory, mode 0700)")
+        +rc : U32 <- H.Host.lan_open(dir, mac)
+        die_if(U32.is_ne(rc, 0), "cannot join the LAN in " ++ dir ++ " (" ++ U32.show(rc) ++ "; it must be this user's directory, mode 0700, and this MAC's socket not in use)")
         return [D.LanKind{mac, ip, prefix}]
 
 @unsafe def devices.lan(none: Bool, spec: String) -> IO(+List<D.DevKind>):
@@ -1433,13 +1436,15 @@ def stopped(+code: U32) -> IO(Unit):
   stopped.reset(U32.is_eq(code, 1), code)
 
 # Starts the control socket when --control names one.
-@unsafe def control(none: Bool, path: String, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+@unsafe def control(none: Bool, +path: String, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
   match none:
     case True{}:
       IO.pure(Unit, Unit{})
     case False{}:
       do IO<Unit>:
-        +rc : U32 <- H.Hvf.ctl_listen(path)
+        +why : String <- H.Host.listen.ok(path)
+        die_if(Bool.not(String.is_empty(why)), "cannot listen on the control socket " ++ path ++ ": " ++ why)
+        +rc : U32 <- H.Hvf.ctl_listen(path, Hf.Files.private())
         die_if(U32.is_ne(rc, 0), "cannot listen on the control socket (" ++ U32.show(rc) ++ ")")
         IO.spawn(Unit, ctl_loop(mc, done))
 
@@ -1884,7 +1889,7 @@ def console_log.rotate(go: Bool, keep: U32) -> IO(Unit):
       IO.pure(Unit, Unit{})
     case Some{Cli.ConLog{+path, max, keep}}:
       do IO<Unit>:
-        +rc : U32 <- H.Hvf.console_log(path)
+        +rc : U32 <- H.Hvf.console_log(path, Hf.Files.private())
         die_if(U32.is_ne(rc, 0), "cannot open the console log " ++ path ++ " (" ++ U32.show(rc) ++ ")")
         IO.spawn(Unit, console_log.loop(max, keep))
 

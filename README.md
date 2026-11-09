@@ -235,8 +235,11 @@ elsewhere. What holds today:
   the ones opened; its header must describe a machine this host makes
   (RAM at its base, whole MiB), and a malformed file is refused
   (src/vmm/snapfile.bend bounds every part before the host reads it).
-  Snapshots, screendumps and the control and vsock sockets
-  are this user's alone (mode 0600), and never written through a symlink.
+  Snapshots, screendumps, the console log and the control, vsock and LAN
+  sockets are this user's alone (mode 0600), and never written through a
+  symlink. `--control` and `--vsock` replace only a dead socket at their
+  path: a socket a running VMM listens on, or anything that is not a
+  socket, is refused and left alone (src/vmm/hostfiles.bend).
 - Disk images: locked while in use; `:ro` disks and qcow2 backing files open
   read-only, and a backing file must be a regular file. A guest cannot
   write a qcow2 header at the start of a raw disk (which would make it a

@@ -228,7 +228,10 @@ floor (`Csum.small`, `Tcp.small`).
   as what type, and that a mode it sets keeps only its permission bits
   (src/fs/entry.bend), how each disk use opens and locks its image
   (Access.flags), the process's descriptor limit (Fds.soft) and whether a
-  display fits the framebuffer (Cli.display.fits). Still in C: the
+  display fits the framebuffer (Cli.display.fits), and what the VMM makes
+  on the host (src/vmm/hostfiles.bend: every file and socket 0600, the LAN
+  directory 0700 and trusted only when it is this user's alone, and a
+  listening path replaced only when it holds a dead socket). Still in C: the
   mechanisms (system calls, sockets, the send buffers, parking, finding a
   datagram's flow, the 9p descriptor cache, reading and writing the
   registers a plan names, gzip's inflate, the window's drawing) and

@@ -3746,14 +3746,15 @@ Term hvf_snap_commit_run(Env e, Term* f, IoWork* w) {
   u64       np;
   uint32_t* plan = hvf_u32s(e, f[1], &np);
   int       err  = 0;
-  // the guest's whole RAM: readable by this user alone, and never written
-  // through a symlink planted at the path
-  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+  // the guest's whole RAM: the file's mode is the plan's first word
+  // (Files.private: this user alone), and it is never written through a
+  // symlink planted at the path
+  int fd = np ? open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, (mode_t)plan[0]) : -1;
   if (fd < 0) {
-    err = errno;
+    err = np ? errno : EINVAL;
   } else {
     errno = 0;
-    for (u64 i = 0; !err && i < np;) {
+    for (u64 i = 1; !err && i < np;) {
       if (hvf_snap_piece(fd, plan, np, &i) != 0) {
         err = errno ? errno : EIO;
       }
@@ -3952,6 +3953,84 @@ Term hvf_snap_gic_run(Env e, Term* f, IoWork* w) {
   return (Term)(vmb_gic_restore(hvf_snap.gic, hvf_snap.ngic) == 0 ? 0 : HVF_ERR);
 }
 
+// Paths the VMM makes things at (src/vmm/hostfiles.bend decides from
+// these facts)
+// =====================================================================
+#include <sys/un.h>
+
+// Removes path only when it is a socket (lstat: never through a symlink).
+static int hvf_unlink_sock(const char* path) {
+  struct stat st;
+  if (lstat(path, &st) != 0) {
+    return errno;
+  }
+  if (!S_ISSOCK(st.st_mode)) {
+    return ENOTSOCK;
+  }
+  return unlink(path) != 0 ? errno : 0;
+}
+
+// Hvf.sock_facts(path) -> List<U32>: [what path holds (lstat: 0 nothing,
+// 1 a socket, 2 anything else), 1 when a process answers on it (a stream
+// connect is accepted, or the socket is a datagram one: EPROTOTYPE)].
+Term hvf_sock_facts_run(Env e, Term* f, IoWork* w) {
+  u64         n;
+  char*       path = io_cstr(e, f[0], &n);
+  struct stat st;
+  uint32_t    ws[2] = {0, 0};
+  if (lstat(path, &st) == 0) {
+    ws[0] = S_ISSOCK(st.st_mode) ? 1 : 2;
+  }
+  struct sockaddr_un a = {0};
+  a.sun_family         = AF_UNIX;
+  if (ws[0] == 1 && n < sizeof a.sun_path) {
+    memcpy(a.sun_path, path, n + 1);
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd >= 0) {
+      ws[1] = connect(fd, (struct sockaddr*)&a, sizeof a) == 0 || errno == EPROTOTYPE;
+      close(fd);
+    }
+  }
+  free(path);
+  return hvf_words(e, ws, 2);
+}
+
+// Hvf.sock_remove(path) -> U32: removes a socket Bend found dead
+// (Files.listen); never anything but a socket. 0, or an errno.
+Term hvf_sock_remove_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* path = io_cstr(e, f[0], &n);
+  int   err  = hvf_unlink_sock(path);
+  free(path);
+  return (Term)(u32)err;
+}
+
+// Hvf.mkdir(path, mode) -> U32: 0, or an errno (EEXIST when it is there).
+Term hvf_mkdir_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* path = io_cstr(e, f[0], &n);
+  int   err  = mkdir(path, (mode_t)(u32)f[1]) != 0 ? errno : 0;
+  free(path);
+  return (Term)(u32)err;
+}
+
+// Hvf.dir_facts(path) -> List<U32>: [what path is (lstat: 0 nothing, 1 a
+// directory, 2 anything else), 1 when it is this user's, its permission
+// bits]; Files.dir_trusted decides.
+Term hvf_dir_facts_run(Env e, Term* f, IoWork* w) {
+  u64         n;
+  char*       path = io_cstr(e, f[0], &n);
+  struct stat st;
+  uint32_t    ws[3] = {0, 0, 0};
+  if (lstat(path, &st) == 0) {
+    ws[0] = S_ISDIR(st.st_mode) ? 1 : 2;
+    ws[1] = st.st_uid == getuid();
+    ws[2] = (uint32_t)(st.st_mode & 07777);
+  }
+  free(path);
+  return hvf_words(e, ws, 3);
+}
+
 // The LAN NIC (--lan DIR; src/virtio/lan.bend decides where each frame
 // goes)
 // =====================================================================
@@ -3997,24 +4076,18 @@ static int hvf_lan_addr(struct sockaddr_un* a, const char* name) {
   return k > 0 && k < (int)sizeof a->sun_path ? 0 : -1;
 }
 
-// Hvf.lan_open(dir, mac) -> U32: binds this VM's socket on the LAN in dir
-// (made, mode 0700, when missing; refused unless it is this user's directory
-// and no one else's). 0, or an errno.
+// Hvf.lan_open(dir, mac, mode, replace) -> U32: binds this VM's socket on
+// the LAN in dir, which Bend trusts (src/vmm/hostfiles.bend,
+// Files.dir_trusted), with mode; replace (Files.listen) removes a dead
+// socket of this MAC first. 0, or an errno.
 Term hvf_lan_open_run(Env e, Term* f, IoWork* w) {
   u64      n;
   char*    dir = io_cstr(e, f[0], &n);
   u64      nm;
   char*    mac = io_cbuf(e, f[1], &nm, CID(Con));
   int      err = 0;
-  struct stat st;
   if (!mac || nm != 6 || n == 0 || n >= sizeof hvf_lan.dir) {
     err = EINVAL;
-  } else if (mkdir(dir, 0700) != 0 && errno != EEXIST) {
-    err = errno;
-  } else if (lstat(dir, &st) != 0) {
-    err = errno;
-  } else if (!S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 077) != 0) {
-    err = EACCES;
   }
   struct sockaddr_un a;
   if (!err) {
@@ -4025,7 +4098,9 @@ Term hvf_lan_open_run(Env e, Term* f, IoWork* w) {
     }
   }
   if (!err) {
-    unlink(a.sun_path); // a VM that ended without removing its socket
+    if ((u32)f[3] != 0) {
+      hvf_unlink_sock(a.sun_path); // a VM that ended without removing it
+    }
     int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
     int sz = 1 << 20;
     if (fd < 0 || bind(fd, (struct sockaddr*)&a, sizeof a) != 0 || pipe(hvf_lan.wake) != 0) {
@@ -4034,7 +4109,7 @@ Term hvf_lan_open_run(Env e, Term* f, IoWork* w) {
         close(fd);
       }
     } else {
-      chmod(a.sun_path, 0600);
+      chmod(a.sun_path, (mode_t)(u32)f[2]);
       setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sz, sizeof sz);
       setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz);
       fcntl(fd, F_SETFL, O_NONBLOCK);
@@ -4176,7 +4251,9 @@ Term hvf_lan_release_run(Env e, Term* f, IoWork* w) {
 static int hvf_ctl_fd = -1;
 static int hvf_ctl_client = -1;
 
-// Hvf.ctl_listen(path) -> U32: 0, or an errno.
+// Hvf.ctl_listen(path, mode) -> U32: listens on path, which Bend found
+// free (src/vmm/hostfiles.bend, Files.listen), its socket given mode; 0, or
+// an errno.
 Term hvf_ctl_listen_run(Env e, Term* f, IoWork* w) {
   u64   n;
   char* path = io_cstr(e, f[0], &n);
@@ -4187,7 +4264,6 @@ Term hvf_ctl_listen_run(Env e, Term* f, IoWork* w) {
     return (Term)(u32)ENAMETOOLONG;
   }
   memcpy(a.sun_path, path, n + 1);
-  unlink(path);
   free(path);
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd >= 0) {
@@ -4200,7 +4276,7 @@ Term hvf_ctl_listen_run(Env e, Term* f, IoWork* w) {
     }
     return (Term)(u32)err;
   }
-  chmod(a.sun_path, 0600); // this user alone
+  chmod(a.sun_path, (mode_t)(u32)f[1]); // Files.private: this user alone
   fcntl(fd, F_SETFL, O_NONBLOCK);
   hvf_ctl_fd = fd;
   return (Term)0;
@@ -4358,7 +4434,8 @@ Term hvf_unix_connect_run(Env e, Term* f, IoWork* w) {
   return (Term)0;
 }
 
-// Hvf.vsock_listen(path) -> U32: 0, or an errno.
+// Hvf.vsock_listen(path, mode) -> U32: listens on path, which Bend found
+// free (Files.listen), its socket given mode; 0, or an errno.
 Term hvf_vsock_listen_run(Env e, Term* f, IoWork* w) {
   u64   n;
   char* path = io_cstr(e, f[0], &n);
@@ -4370,7 +4447,6 @@ Term hvf_vsock_listen_run(Env e, Term* f, IoWork* w) {
   }
   memcpy(a.sun_path, path, n + 1);
   snprintf(hvf_vs_base, sizeof hvf_vs_base, "%s", path);
-  unlink(path);
   free(path);
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd >= 0) {
@@ -4383,7 +4459,7 @@ Term hvf_vsock_listen_run(Env e, Term* f, IoWork* w) {
     }
     return (Term)(u32)err;
   }
-  chmod(a.sun_path, 0600); // this user alone
+  chmod(a.sun_path, (mode_t)(u32)f[1]); // Files.private: this user alone
   fcntl(fd, F_SETFL, O_NONBLOCK);
   hvf_vs_fd = fd;
   return (Term)0;
@@ -4738,8 +4814,8 @@ Term hvf_fb_init_run(Env e, Term* f, IoWork* w) {
   return (Term)0;
 }
 
-// Hvf.fb_dump(path) -> U32: writes the framebuffer as a binary PPM (P6);
-// 0, or an errno.
+// Hvf.fb_dump(path, mode) -> U32: writes the framebuffer as a binary PPM
+// (P6) to a new file of mode (Files.private); 0, or an errno.
 Term hvf_fb_dump_run(Env e, Term* f, IoWork* w) {
   u64   n;
   char* path = io_cstr(e, f[0], &n);
@@ -4747,7 +4823,7 @@ Term hvf_fb_dump_run(Env e, Term* f, IoWork* w) {
     free(path);
     return (Term)(u32)ENODEV;
   }
-  int   ofd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+  int   ofd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, (mode_t)(u32)f[1]); // Files.private
   FILE* out = ofd >= 0 ? fdopen(ofd, "wb") : NULL;
   if (!out && ofd >= 0) {
     close(ofd);
@@ -4895,10 +4971,11 @@ Term hvf_fb_present_run(Env e, Term* f, IoWork* w) {
 
 // The console log (--console-log): stdout becomes the log file (dup2), so
 // console output takes the same path as ever.
-static char* hvf_clog_path;
+static char*  hvf_clog_path;
+static mode_t hvf_clog_mode = 0600; // Files.private, from Hvf.console_log
 
 static int hvf_clog_open(int trunc) {
-  int fd = open(hvf_clog_path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC | (trunc ? O_TRUNC : 0), 0600);
+  int fd = open(hvf_clog_path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC | (trunc ? O_TRUNC : 0), hvf_clog_mode);
   if (fd < 0) {
     return errno;
   }
@@ -4909,11 +4986,12 @@ static int hvf_clog_open(int trunc) {
   return r;
 }
 
-// Hvf.console_log(path) -> U32: console output goes to the file at path
-// (appended; never through a symlink; this user's alone) instead of
-// stdout. 0, or an errno.
+// Hvf.console_log(path, mode) -> U32: console output goes to the file at
+// path (appended; never through a symlink; made with mode, Files.private)
+// instead of stdout. 0, or an errno.
 Term hvf_console_log_run(Env e, Term* f, IoWork* w) {
   u64 n;
+  hvf_clog_mode = (mode_t)(u32)f[1];
   free(hvf_clog_path);
   hvf_clog_path = io_cstr(e, f[0], &n);
   return (Term)(u32)hvf_clog_open(0);
@@ -5000,6 +5078,18 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.vcpu_queue)
   io_eff(CID(Hvf.vcpu_queue), hvf_vcpu_queue_run);
+#endif
+#ifdef CID(Hvf.sock_facts)
+  io_eff(CID(Hvf.sock_facts), hvf_sock_facts_run);
+#endif
+#ifdef CID(Hvf.sock_remove)
+  io_eff(CID(Hvf.sock_remove), hvf_sock_remove_run);
+#endif
+#ifdef CID(Hvf.mkdir)
+  io_eff(CID(Hvf.mkdir), hvf_mkdir_run);
+#endif
+#ifdef CID(Hvf.dir_facts)
+  io_eff(CID(Hvf.dir_facts), hvf_dir_facts_run);
 #endif
 #ifdef CID(Hvf.snap_plans)
   io_eff(CID(Hvf.snap_plans), hvf_snap_plans_run);

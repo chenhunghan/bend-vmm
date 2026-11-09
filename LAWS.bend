@@ -54,3 +54,4 @@ import ./laws/kvmexit.bend as Laws_kvmexit
 import ./laws/gicplan.bend as Laws_gicplan
 import ./laws/regplan.bend as Laws_regplan
 import ./laws/entry.bend as Laws_entry
+import ./laws/hostfiles.bend as Laws_hostfiles
