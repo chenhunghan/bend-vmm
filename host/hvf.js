@@ -76,6 +76,7 @@ io_eff(CID(Hvf.snap_commit), hvf_unavailable);
 io_eff(CID(Hvf.snap_drop), hvf_unavailable);
 io_eff(CID(Hvf.rename), hvf_unavailable);
 io_eff(CID(Hvf.net_limits), () => 0);
+io_eff(CID(Hvf.snap_plans), () => 0);
 io_eff(CID(Hvf.set_prog), () => 0);
 io_eff(CID(Hvf.lan_open), hvf_unavailable);
 io_eff(CID(Hvf.lan_send), () => 0);

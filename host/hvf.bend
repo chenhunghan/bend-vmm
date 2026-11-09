@@ -6,6 +6,9 @@ import ../src/boot/image.bend as I
 import ../src/vmm/loggate.bend as Lg
 import ../src/net/flush.bend as Fl
 import ../src/net/limits.bend as Lm
+import ../src/arm64/kvmexit.bend as Kx
+import ../src/arm64/gicplan.bend as Gp
+import ../src/arm64/regplan.bend as Rp
 
 # Hypervisor.framework effects (host/hvf.c) and their typed wrappers.
 # Words cross the boundary as U32; 64-bit values as (hi, lo) pairs.
@@ -366,6 +369,10 @@ def Hvf.rename(from: String, to: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.snap_plans(gic: +List<U32>, regs: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.snap_drop() -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
@@ -488,10 +495,15 @@ def Op.advance_pc() -> U32:
 def Reg.cpsr() -> U32:
   32
 
-def Host.vm_init(ram_mb: U32, gicd: U.U64, gicr: U.U64, ram: U.U64, cpus: U32) -> IO(U32):
+# Makes the VM, then hands over what a snapshot keeps (the vGIC replay and the
+# register keys).
+def Host.vm_init(ram_mb: U32, gicd: U.U64, gicr: U.U64, ram: U.U64, +cpus: U32) -> IO(U32):
   match gicd gicr ram:
     case U.U64{dh, dl} U.U64{rh, rl} U.U64{mh, ml}:
-      Hvf.init(ram_mb, dh, dl, rh, rl, mh, ml, cpus)
+      do IO<U32>:
+        +rc : U32 <- Hvf.init(ram_mb, dh, dl, rh, rl, mh, ml, cpus)
+        _ : U32 <- Hvf.snap_plans(Gp.Gic.plan(cpus, Gp.Gic.nirqs()), Rp.Regs.hvf())
+        return rc
 
 # A file's first bytes (at most 16; [] when it cannot be read).
 def Host.head.read(r: File & Result<&1, &1, U32 & String, List<&2, U32>>) -> IO(+List<U32>):
@@ -586,7 +598,7 @@ def Host.decode_exit.kind(is0: Bool, is1: Bool, is2: Bool, kind: U32, rest: +Lis
     case False{} False{} True{}:
       V.Canceled{}
     case False{} False{} False{}:
-      V.UnknownExit{kind}
+      Kx.KvmExit.decode(kind, rest)
 
 # Decodes Hvf.vcpu(.., Op.run(), ..) words into a RawExit.
 def Host.decode_exit(ws: +List<U32>) -> V.RawExit:

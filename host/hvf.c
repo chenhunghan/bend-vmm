@@ -433,7 +433,7 @@ static int vmb_create(uint64_t gicd, uint64_t gicr, uint32_t ncpus) {
     }
     kvm_clamp_pa(c);
   }
-  uint32_t nirqs = 256;
+  uint32_t nirqs = 256; // Gic.nirqs (src/arm64/gicplan.bend)
   if (kvm_gic_attr(KVM_DEV_ARM_VGIC_GRP_NR_IRQS, 0, &nirqs) != 0
       || kvm_gic_attr(KVM_DEV_ARM_VGIC_GRP_CTRL, KVM_DEV_ARM_VGIC_CTRL_INIT, NULL) != 0) {
     return 8;
@@ -539,78 +539,57 @@ static uint64_t        hvf_pause_total; // the length of every pause so far, in 
 static int             hvf_save_gen;    // bumped by each snapshot
 static int             hvf_saving;      // vCPU threads still to save
 
+// What a snapshot keeps, as the VMM hands it over at startup
+// (Hvf.snap_plans): the register keys a Hypervisor.framework vCPU saves, in
+// order (src/arm64/regplan.bend), and the vGIC replay a KVM snapshot reads
+// (src/arm64/gicplan.bend: steps of [op, group, width, attr hi, attr lo]).
+static uint32_t* hvf_reg_plan;
+static u64       hvf_nreg_plan;
+static uint32_t* hvf_gic_plan;
+static u64       hvf_ngic_plan;
+
 #ifdef __APPLE__
 
-// Every register a snapshot keeps besides X0..X30, PC, CPSR, FPCR, FPSR and
-// Q0..Q31. Registers this macOS lacks fail to read and are skipped.
-static const uint16_t hvf_sysregs[] = {
-  HV_SYS_REG_DBGBVR0_EL1, HV_SYS_REG_DBGBCR0_EL1, HV_SYS_REG_DBGWVR0_EL1, HV_SYS_REG_DBGWCR0_EL1,
-  HV_SYS_REG_DBGBVR1_EL1, HV_SYS_REG_DBGBCR1_EL1, HV_SYS_REG_DBGWVR1_EL1, HV_SYS_REG_DBGWCR1_EL1,
-  HV_SYS_REG_MDCCINT_EL1, HV_SYS_REG_MDSCR_EL1, HV_SYS_REG_MPIDR_EL1, HV_SYS_REG_SCTLR_EL1,
-  0xc081 /* ACTLR_EL1 */, HV_SYS_REG_CPACR_EL1, HV_SYS_REG_TTBR0_EL1, HV_SYS_REG_TTBR1_EL1,
-  HV_SYS_REG_TCR_EL1, HV_SYS_REG_APIAKEYLO_EL1, HV_SYS_REG_APIAKEYHI_EL1, HV_SYS_REG_APIBKEYLO_EL1,
-  HV_SYS_REG_APIBKEYHI_EL1, HV_SYS_REG_APDAKEYLO_EL1, HV_SYS_REG_APDAKEYHI_EL1, HV_SYS_REG_APDBKEYLO_EL1,
-  HV_SYS_REG_APDBKEYHI_EL1, HV_SYS_REG_APGAKEYLO_EL1, HV_SYS_REG_APGAKEYHI_EL1, HV_SYS_REG_SPSR_EL1,
-  HV_SYS_REG_ELR_EL1, HV_SYS_REG_SP_EL0, HV_SYS_REG_AFSR0_EL1, HV_SYS_REG_AFSR1_EL1,
-  HV_SYS_REG_ESR_EL1, HV_SYS_REG_FAR_EL1, HV_SYS_REG_PAR_EL1, HV_SYS_REG_MAIR_EL1,
-  HV_SYS_REG_AMAIR_EL1, HV_SYS_REG_VBAR_EL1, HV_SYS_REG_CONTEXTIDR_EL1, HV_SYS_REG_TPIDR_EL1,
-  0xc687 /* SCXTNUM_EL1 */, HV_SYS_REG_CNTKCTL_EL1, HV_SYS_REG_CSSELR_EL1, HV_SYS_REG_TPIDR_EL0,
-  HV_SYS_REG_TPIDRRO_EL0, 0xde85 /* TPIDR2_EL0 */, 0xde87 /* SCXTNUM_EL0 */, HV_SYS_REG_CNTV_CTL_EL0,
-  HV_SYS_REG_CNTV_CVAL_EL0, HV_SYS_REG_SP_EL1, 0xdf11 /* CNTP_CTL_EL0 */, 0xdf12 /* CNTP_CVAL_EL0 */,
-};
-#define HVF_NSYSREGS (sizeof hvf_sysregs / sizeof *hvf_sysregs)
 
-// The GIC CPU interface registers: hv_gic_state leaves them out, so each
-// vCPU saves its own. Restored after hv_gic_set_state, before the first run.
-static const uint16_t hvf_iccregs[] = {
-  HV_GIC_ICC_REG_SRE_EL1, HV_GIC_ICC_REG_CTLR_EL1, HV_GIC_ICC_REG_PMR_EL1, HV_GIC_ICC_REG_BPR0_EL1,
-  HV_GIC_ICC_REG_BPR1_EL1, HV_GIC_ICC_REG_AP0R0_EL1, HV_GIC_ICC_REG_AP1R0_EL1,
-  HV_GIC_ICC_REG_IGRPEN0_EL1, HV_GIC_ICC_REG_IGRPEN1_EL1,
-};
-#define HVF_NICCREGS (sizeof hvf_iccregs / sizeof *hvf_iccregs)
-
-// A vCPU's registers as entries {u32 key, u64 value}: key 0x10000 | n for
-// hv_reg_t n, 0x20000 | n for system register n, 0x30000 | n (n < 64) for
-// half n of SIMD register n / 2; then the guest's virtual count (key 0x40000).
+// A vCPU's registers as entries {u32 key, u64 value}, one per key of the
+// plan (src/arm64/regplan.bend says what each key names); a register this
+// macOS lacks fails to read and is left out.
 typedef struct {
   uint32_t key;
   uint64_t val;
 } __attribute__((packed)) HvfRegEntry;
 
 static void hvf_save_regs(HvfCpu* c) {
-  size_t       cap = 33 + 2 + HVF_NSYSREGS + HVF_NICCREGS + 64 + 1, n = 0;
-  HvfRegEntry* e   = io_mem(malloc(cap * sizeof *e));
-  for (uint32_t r = 0; r <= 30; r++) {
-    e[n++] = (HvfRegEntry){0x10000 | r, hvf_reg(c, (hv_reg_t)(HV_REG_X0 + r))};
-  }
-  e[n++] = (HvfRegEntry){0x10000 | HV_REG_PC, hvf_reg(c, HV_REG_PC)};
-  e[n++] = (HvfRegEntry){0x10000 | HV_REG_CPSR, hvf_reg(c, HV_REG_CPSR)};
-  e[n++] = (HvfRegEntry){0x10000 | HV_REG_FPCR, hvf_reg(c, HV_REG_FPCR)};
-  e[n++] = (HvfRegEntry){0x10000 | HV_REG_FPSR, hvf_reg(c, HV_REG_FPSR)};
-  for (size_t i = 0; i < HVF_NSYSREGS; i++) {
-    uint64_t v;
-    if (hv.get_sys_reg(c->vcpu, (hv_sys_reg_t)hvf_sysregs[i], &v) == HV_SUCCESS) {
-      e[n++] = (HvfRegEntry){0x20000 | hvf_sysregs[i], v};
+  HvfRegEntry* e = io_mem(malloc((hvf_nreg_plan ? hvf_nreg_plan : 1) * sizeof *e));
+  size_t       n = 0;
+  for (u64 i = 0; i < hvf_nreg_plan; i++) {
+    uint32_t key = hvf_reg_plan[i], kind = key >> 16, id = key & 0xffff;
+    uint64_t v  = 0;
+    int      ok = 1;
+    if (kind == 1) {
+      v = hvf_reg(c, (hv_reg_t)id);
+    } else if (kind == 2) {
+      ok = hv.get_sys_reg(c->vcpu, (hv_sys_reg_t)id, &v) == HV_SUCCESS;
+    } else if (kind == 3 && id < 64) {
+      hv_simd_fp_uchar16_t q;
+      uint64_t             half[2] = {0, 0};
+      if (hv.get_simd(c->vcpu, (hv_simd_fp_reg_t)(HV_SIMD_FP_REG_Q0 + id / 2), &q) == HV_SUCCESS) {
+        memcpy(half, &q, 16);
+      }
+      v = half[id & 1];
+    } else if (kind == 5) {
+      ok = hv.get_icc && hv.get_icc(c->vcpu, (hv_gic_icc_reg_t)id, &v) == HV_SUCCESS;
+    } else if (kind == 4) {
+      uint64_t off = 0;
+      hv.get_vtimer_offset(c->vcpu, &off);
+      v = mach_absolute_time() - off;
+    } else {
+      ok = 0;
+    }
+    if (ok) {
+      e[n++] = (HvfRegEntry){key, v};
     }
   }
-  for (uint32_t q = 0; q < 32; q++) {
-    hv_simd_fp_uchar16_t v;
-    uint64_t             half[2] = {0, 0};
-    if (hv.get_simd(c->vcpu, (hv_simd_fp_reg_t)(HV_SIMD_FP_REG_Q0 + q), &v) == HV_SUCCESS) {
-      memcpy(half, &v, 16);
-    }
-    e[n++] = (HvfRegEntry){0x30000 | (2 * q), half[0]};
-    e[n++] = (HvfRegEntry){0x30000 | (2 * q + 1), half[1]};
-  }
-  for (size_t i = 0; hv.get_icc && i < HVF_NICCREGS; i++) {
-    uint64_t v;
-    if (hv.get_icc(c->vcpu, (hv_gic_icc_reg_t)hvf_iccregs[i], &v) == HV_SUCCESS) {
-      e[n++] = (HvfRegEntry){0x50000 | hvf_iccregs[i], v};
-    }
-  }
-  uint64_t off = 0;
-  hv.get_vtimer_offset(c->vcpu, &off);
-  e[n++] = (HvfRegEntry){0x40000, mach_absolute_time() - off};
   free(c->saved);
   c->saved  = (uint8_t*)e;
   c->nsaved = n * sizeof *e;
@@ -740,13 +719,9 @@ static void hvf_load_regs(HvfCpu* c, const uint8_t* blob, size_t size) {
   }
 }
 
-// The vGIC's state as a replay: entries {u32 group, u32 width, u64 attr,
-// u64 value}, written back in order with KVM_SET_DEVICE_ATTR. Each set of
-// enable, pending or active bits comes after a write of all ones to its
-// clear register, so the restored bits are exactly the saved ones. The order
-// follows the architecture's dependencies: distributor control,
-// redistributors (SGIs, PPIs), SPIs (configuration, routing, line levels,
-// then pending, active, enabled), the CPU interfaces.
+// The vGIC's state as a replay (src/arm64/gicplan.bend decides what and in
+// what order): entries {u32 group, u32 width, u64 attr, u64 value}, written
+// back in order with KVM_SET_DEVICE_ATTR.
 typedef struct {
   uint32_t group, width;
   uint64_t attr, val;
@@ -765,92 +740,20 @@ static void kvm_gic_put(KvmGicSave* g, uint32_t group, uint32_t width, uint64_t 
   g->e[g->n++] = (KvmGicEntry){group, width, attr, val};
 }
 
-// Reads one register into the replay; one KVM does not have is left out.
-static void kvm_gic_keep(KvmGicSave* g, uint32_t group, uint32_t width, uint64_t attr) {
-  uint64_t               v = 0;
-  struct kvm_device_attr a = {0, group, attr, (uint64_t)(uintptr_t)&v};
-  if (ioctl(kvm_gic, KVM_GET_DEVICE_ATTR, &a) == 0) {
-    kvm_gic_put(g, group, width, attr, width == 4 ? (uint32_t)v : v);
-  }
-}
-
-// clear-all at off_clear, then the saved bits of off_set
-static void kvm_gic_bits(KvmGicSave* g, uint32_t group, uint64_t base, uint64_t off_set, uint64_t off_clear) {
-  kvm_gic_put(g, group, 4, base | off_clear, 0xffffffffu);
-  kvm_gic_keep(g, group, 4, base | off_set);
-}
-
-#define KVM_GIC_SYSREG(op0, op1, crn, crm, op2)                                                         \
-  (((uint64_t)(op0) << KVM_REG_ARM64_SYSREG_OP0_SHIFT) | ((uint64_t)(op1) << KVM_REG_ARM64_SYSREG_OP1_SHIFT) \
-   | ((uint64_t)(crn) << KVM_REG_ARM64_SYSREG_CRN_SHIFT) | ((uint64_t)(crm) << KVM_REG_ARM64_SYSREG_CRM_SHIFT) \
-   | ((uint64_t)(op2) << KVM_REG_ARM64_SYSREG_OP2_SHIFT))
-
+// Carries out the plan: op 0 reads the register into the replay (one KVM
+// does not have is left out), op 1 replays all ones.
 static void vmb_gic_save(uint8_t** out, size_t* nout) {
-  KvmGicSave g     = {0};
-  uint32_t   nirqs = 0;
-  struct kvm_device_attr a = {0, KVM_DEV_ARM_VGIC_GRP_NR_IRQS, 0, (uint64_t)(uintptr_t)&nirqs};
-  if (ioctl(kvm_gic, KVM_GET_DEVICE_ATTR, &a) != 0 || nirqs > 1024) {
-    nirqs = 256;
-  }
-  const uint32_t D = KVM_DEV_ARM_VGIC_GRP_DIST_REGS, R = KVM_DEV_ARM_VGIC_GRP_REDIST_REGS;
-  kvm_gic_keep(&g, D, 4, 0x0000); // GICD_CTLR
-  for (uint32_t cpu = 0; cpu < kvm_ncpus; cpu++) {
-    uint64_t m = (uint64_t)cpu << KVM_DEV_ARM_VGIC_V3_MPIDR_SHIFT;
-    kvm_gic_keep(&g, R, 4, m | 0x10080); // IGROUPR0
-    kvm_gic_keep(&g, R, 4, m | 0x10c00); // ICFGR0
-    kvm_gic_keep(&g, R, 4, m | 0x10c04); // ICFGR1
-    for (uint64_t i = 0; i < 8; i++) {
-      kvm_gic_keep(&g, R, 4, m | (0x10400 + 4 * i)); // IPRIORITYR
+  KvmGicSave g = {0};
+  for (u64 i = 0; i + 5 <= hvf_ngic_plan; i += 5) {
+    const uint32_t* s    = hvf_gic_plan + i;
+    uint64_t        attr = ((uint64_t)s[3] << 32) | s[4], v = 0;
+    if (s[0] == 1) {
+      kvm_gic_put(&g, s[1], s[2], attr, 0xffffffffu);
+      continue;
     }
-    kvm_gic_bits(&g, R, m, 0x10200, 0x10280); // ISPENDR0 / ICPENDR0
-    kvm_gic_bits(&g, R, m, 0x10300, 0x10380); // ISACTIVER0 / ICACTIVER0
-    kvm_gic_bits(&g, R, m, 0x10100, 0x10180); // ISENABLER0 / ICENABLER0
-  }
-  for (uint32_t irq = 32; irq < nirqs; irq += 32) {
-    kvm_gic_keep(&g, D, 4, 0x0080 + irq / 8); // IGROUPR
-  }
-  for (uint32_t irq = 32; irq < nirqs; irq += 4) {
-    kvm_gic_keep(&g, D, 4, 0x0400 + irq); // IPRIORITYR
-  }
-  for (uint32_t irq = 32; irq < nirqs; irq += 16) {
-    kvm_gic_keep(&g, D, 4, 0x0c00 + irq / 4); // ICFGR
-  }
-  for (uint32_t irq = 32; irq < nirqs; irq++) {
-    kvm_gic_keep(&g, D, 4, 0x6000 + 8 * (uint64_t)irq);     // IROUTER, low half
-    kvm_gic_keep(&g, D, 4, 0x6000 + 8 * (uint64_t)irq + 4); // and high
-  }
-  for (uint32_t irq = 32; irq < nirqs; irq += 32) {
-    kvm_gic_keep(&g, KVM_DEV_ARM_VGIC_GRP_LEVEL_INFO, 4,
-                 ((uint64_t)VGIC_LEVEL_INFO_LINE_LEVEL << KVM_DEV_ARM_VGIC_LINE_LEVEL_INFO_SHIFT) | irq);
-  }
-  for (uint32_t irq = 32; irq < nirqs; irq += 32) {
-    kvm_gic_bits(&g, D, 0, 0x0200 + irq / 8, 0x0280 + irq / 8); // ISPENDR / ICPENDR
-    kvm_gic_bits(&g, D, 0, 0x0300 + irq / 8, 0x0380 + irq / 8); // ISACTIVER / ICACTIVER
-  }
-  for (uint32_t irq = 32; irq < nirqs; irq += 32) {
-    kvm_gic_bits(&g, D, 0, 0x0100 + irq / 8, 0x0180 + irq / 8); // ISENABLER / ICENABLER
-  }
-  const uint32_t C = KVM_DEV_ARM_VGIC_GRP_CPU_SYSREGS;
-  const uint64_t icc[] = {
-    KVM_GIC_SYSREG(3, 0, 12, 12, 5), // ICC_SRE_EL1
-    KVM_GIC_SYSREG(3, 0, 12, 12, 4), // ICC_CTLR_EL1
-    KVM_GIC_SYSREG(3, 0, 4, 6, 0),   // ICC_PMR_EL1
-    KVM_GIC_SYSREG(3, 0, 12, 8, 3),  // ICC_BPR0_EL1
-    KVM_GIC_SYSREG(3, 0, 12, 12, 3), // ICC_BPR1_EL1
-    KVM_GIC_SYSREG(3, 0, 12, 8, 4),  // ICC_AP0R0_EL1 .. 3
-    KVM_GIC_SYSREG(3, 0, 12, 8, 5),
-    KVM_GIC_SYSREG(3, 0, 12, 8, 6),
-    KVM_GIC_SYSREG(3, 0, 12, 8, 7),
-    KVM_GIC_SYSREG(3, 0, 12, 9, 0),  // ICC_AP1R0_EL1 .. 3
-    KVM_GIC_SYSREG(3, 0, 12, 9, 1),
-    KVM_GIC_SYSREG(3, 0, 12, 9, 2),
-    KVM_GIC_SYSREG(3, 0, 12, 9, 3),
-    KVM_GIC_SYSREG(3, 0, 12, 12, 6), // ICC_IGRPEN0_EL1
-    KVM_GIC_SYSREG(3, 0, 12, 12, 7), // ICC_IGRPEN1_EL1
-  };
-  for (uint32_t cpu = 0; cpu < kvm_ncpus; cpu++) {
-    for (size_t i = 0; i < sizeof icc / sizeof *icc; i++) {
-      kvm_gic_keep(&g, C, 8, ((uint64_t)cpu << KVM_DEV_ARM_VGIC_V3_MPIDR_SHIFT) | icc[i]);
+    struct kvm_device_attr a = {0, s[1], attr, (uint64_t)(uintptr_t)&v};
+    if (ioctl(kvm_gic, KVM_GET_DEVICE_ATTR, &a) == 0) {
+      kvm_gic_put(&g, s[1], s[2], attr, s[2] == 4 ? (uint32_t)v : v);
     }
   }
   *out  = (uint8_t*)g.e;
@@ -1049,27 +952,11 @@ static void hvf_run(HvfCpu* c) {
 
 #else
 
-static void hvf_put_exception(HvfCpu* c, uint64_t esr, uint64_t ipa, const uint64_t x[4], uint64_t xt) {
-  c->out[c->nout++] = 0;
-  hvf_put64(c, esr);
-  hvf_put64(c, 0);
-  hvf_put64(c, ipa);
-  for (int i = 0; i < 4; i++) {
-    hvf_put64(c, x[i]);
-  }
-  hvf_put64(c, xt);
-  if (hvf_trace & 1) {
-    fprintf(stderr, "[trace] esr=%08llx ipa=%09llx x0=%llx xt=%llx pc=%llx\n", (unsigned long long)esr,
-      (unsigned long long)ipa, (unsigned long long)x[0], (unsigned long long)xt,
-      (unsigned long long)vmb_get(c, 31));
-  }
-}
-
-// KVM's exits in Hypervisor.framework's terms, so the machine sees one
-// hypervisor: an MMIO exit becomes a data abort with a valid syndrome (the
-// access size, direction, SRT 0 and the stored value), a forwarded PSCI call
-// an HVC (or SMC) with X0..X3, a PSCI system event (kernels without the
-// SMCCC filter) an HVC of SYSTEM_OFF or SYSTEM_RESET, a signal a cancel.
+// KVM's exits as their facts, kind 2000 + KVM's exit reason:
+// src/arm64/kvmexit.bend makes them Hypervisor.framework's (an MMIO exit a
+// data abort, a forwarded PSCI call an HVC or SMC, a PSCI system event an HVC
+// of SYSTEM_OFF or SYSTEM_RESET), so the machine sees one hypervisor. A
+// signal is a cancel.
 static void hvf_run(HvfCpu* c) {
   hvf_gate(c);
   c->in_mmio = 0;
@@ -1097,35 +984,39 @@ static void hvf_run(HvfCpu* c) {
     c->out[c->nout++] = err == EINTR || err == EAGAIN ? 2 : 1000 + (uint32_t)err;
     return;
   }
-  uint64_t x[4] = {0, 0, 0, 0};
   switch (c->run->exit_reason) {
     case KVM_EXIT_MMIO: {
+      // src/arm64/kvmexit.bend makes it a data abort
       uint32_t len = c->run->mmio.len;
-      uint64_t sas = len == 1 ? 0 : len == 2 ? 1 : len == 4 ? 2 : 3;
-      uint64_t esr = (0x24ull << 26) | (1ull << 25) | (1ull << 24) | (sas << 22) | (len == 8 ? 1ull << 15 : 0)
-                     | (c->run->mmio.is_write ? 1ull << 6 : 0);
-      uint64_t xt = 0;
+      uint64_t xt  = 0, a = c->run->mmio.phys_addr;
       if (c->run->mmio.is_write) {
         memcpy(&xt, c->run->mmio.data, len <= 8 ? len : 8);
       }
-      c->in_mmio = 1;
-      hvf_put_exception(c, esr, c->run->mmio.phys_addr, x, xt);
+      c->in_mmio        = 1;
+      c->out[c->nout++] = 2000 + KVM_EXIT_MMIO;
+      c->out[c->nout++] = len;
+      c->out[c->nout++] = c->run->mmio.is_write ? 1 : 0;
+      hvf_put64(c, a);
+      hvf_put64(c, xt);
       break;
     }
     case KVM_EXIT_HYPERCALL: {
+      // an HVC or SMC (src/arm64/kvmexit.bend)
       int smc = 0;
 #ifdef KVM_HYPERCALL_EXIT_SMC
       smc = (c->run->hypercall.flags & KVM_HYPERCALL_EXIT_SMC) != 0;
 #endif
+      c->out[c->nout++] = 2000 + KVM_EXIT_HYPERCALL;
+      c->out[c->nout++] = (uint32_t)smc;
       for (int i = 0; i < 4; i++) {
-        x[i] = vmb_get(c, (uint64_t)i);
+        hvf_put64(c, vmb_get(c, (uint64_t)i));
       }
-      hvf_put_exception(c, ((smc ? 0x17ull : 0x16ull) << 26) | (1ull << 25), 0, x, 0);
       break;
     }
     case KVM_EXIT_SYSTEM_EVENT:
-      x[0] = c->run->system_event.type == KVM_SYSTEM_EVENT_RESET ? 0x84000009u : 0x84000008u;
-      hvf_put_exception(c, (0x16ull << 26) | (1ull << 25), 0, x, 0);
+      // SYSTEM_RESET or SYSTEM_OFF (src/arm64/kvmexit.bend)
+      c->out[c->nout++] = 2000 + KVM_EXIT_SYSTEM_EVENT;
+      c->out[c->nout++] = c->run->system_event.type;
       break;
     case KVM_EXIT_INTR:
       c->out[c->nout++] = 2;
@@ -2274,6 +2165,16 @@ static struct {
 #define HVF_UDP_MAX     hvf_lim.udp_max
 #define HVF_UDP_IDLE    hvf_lim.udp_idle
 
+// Hvf.snap_plans(gic, regs) -> U32: takes what a snapshot keeps (see
+// hvf_reg_plan), once at startup.
+Term hvf_snap_plans_run(Env e, Term* f, IoWork* w) {
+  free(hvf_gic_plan);
+  free(hvf_reg_plan);
+  hvf_gic_plan = hvf_u32s(e, f[0], &hvf_ngic_plan);
+  hvf_reg_plan = hvf_u32s(e, f[1], &hvf_nreg_plan);
+  return (Term)0;
+}
+
 // Hvf.net_limits(words) -> U32: takes the limits (Lim.wire: seven 64-bit
 // values as hi, lo, two counts, one more 64-bit value). 0, or EINVAL for a
 // list of another length.
@@ -3188,9 +3089,10 @@ Term hvf_udp_recv_run(Env e, Term* f, IoWork* w) {
 // ==============================================
 //
 // Paths from the guest are relative to a share root, components separated by
-// "/", none empty, "." or "..". An operation resolves the parent directory
-// with realpath and refuses it unless it lies inside the root (so a symlink
-// cannot lead out), and never follows a symlink in the final component.
+// "/", none empty, "." or ".." (src/fs/contain.bend vets them). An operation
+// walks the directories from the share's open root without following any
+// symlink (hvf_fs_at), and never follows one in the final component either,
+// so it stays inside the share by construction.
 // Answers are word lists (host/hvf.bend decodes them):
 //   [0] ok   [1, errno]   [2, mode, uid, gid, nlink, size, ino, blocks, atime,
 //   mtime, ctime (64-bit values as hi, lo)]   [3, bytes...]   [4, count]
@@ -3207,6 +3109,8 @@ Term hvf_udp_recv_run(Env e, Term* f, IoWork* w) {
 
 #define HVF_MAX_SHARES 8
 static char* hvf_shares[HVF_MAX_SHARES];
+// Each share's root, open (Hvf.share_open): paths walk from it.
+static int hvf_share_fd[HVF_MAX_SHARES];
 static int   hvf_nshares;
 
 // Hvf.share_open(path) -> U32: a share index, or 0xFFFFFFFF.
@@ -3224,12 +3128,6 @@ static int hvf_walk_one(const char* p, const struct stat* st, int flag, struct F
     hvf_walk_sum += st->st_size;
   }
   return 0;
-}
-
-// The size of the regular file at path (0 for anything else, or none).
-static int64_t hvf_lsize(const char* path) {
-  struct stat st;
-  return path && lstat(path, &st) == 0 && S_ISREG(st.st_mode) ? (int64_t)st.st_size : 0;
 }
 
 static void hvf_share_add(u32 sh, int64_t d) {
@@ -3250,56 +3148,66 @@ Term hvf_share_open_run(Env e, Term* f, IoWork* w) {
     free(real);
     return (Term)HVF_ERR;
   }
-  hvf_shares[hvf_nshares] = real;
+  int rfd = open(real, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (rfd < 0) {
+    free(real);
+    return (Term)HVF_ERR;
+  }
+  hvf_share_fd[hvf_nshares] = rfd;
+  hvf_shares[hvf_nshares]   = real;
   return (Term)(u32)hvf_nshares++;
 }
 
-static int hvf_rel_ok(const char* p) {
-  if (p[0] == 0) {
-    return 1;
+// Walks rel's directories from the share's root, never through a symlink:
+// each component opens O_DIRECTORY | O_NOFOLLOW, so the walk stays inside
+// the share by construction. The names are Bend's to vet (src/fs/contain.bend,
+// Share.rel_ok: no empty part, no "." or ".."). Answers the directory that
+// holds rel's last component (*dfd; hvf_fs_unat closes it) and that
+// component (*leaf, inside buf; "." for the root). 0, or an errno.
+static int hvf_fs_at(u32 sh, const char* rel, char* buf, int* dfd, const char** leaf) {
+  int cur = hvf_share_fd[sh];
+  *dfd    = cur;
+  *leaf   = ".";
+  if (rel[0] == 0) {
+    return 0;
   }
-  const char* c = p;
+  int k = snprintf(buf, PATH_MAX, "%s", rel);
+  if (k < 0 || k >= PATH_MAX) {
+    return ENAMETOOLONG;
+  }
+  char* p = buf;
   for (;;) {
-    const char* end = strchr(c, '/');
-    size_t      len = end ? (size_t)(end - c) : strlen(c);
-    if (len == 0 || (len == 1 && c[0] == '.') || (len == 2 && c[0] == '.' && c[1] == '.')) {
+    char* slash = strchr(p, '/');
+    if (!slash) {
+      *dfd  = cur;
+      *leaf = p;
       return 0;
     }
-    if (!end) {
-      return 1;
+    *slash  = 0;
+    int nfd = openat(cur, p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int err = nfd < 0 ? errno : 0;
+    if (cur != hvf_share_fd[sh]) {
+      close(cur);
     }
-    c = end + 1;
+    if (nfd < 0) {
+      *dfd = -1;
+      return err;
+    }
+    cur = nfd;
+    p   = slash + 1;
   }
 }
 
-// The host path for rel in share sh, in out (PATH_MAX); 0 on success or an errno.
-static int hvf_resolve(u32 sh, const char* rel, char* out) {
-  if (sh >= (u32)hvf_nshares || !hvf_rel_ok(rel)) {
-    return EINVAL;
+static void hvf_fs_unat(u32 sh, int dfd) {
+  if (dfd >= 0 && sh < HVF_MAX_SHARES && dfd != hvf_share_fd[sh]) {
+    close(dfd);
   }
-  const char* root = hvf_shares[sh];
-  if (rel[0] == 0) {
-    snprintf(out, PATH_MAX, "%s", root);
-    return 0;
-  }
-  char        parent[PATH_MAX];
-  const char* slash = strrchr(rel, '/');
-  int         k     = slash ? snprintf(parent, sizeof parent, "%s/%.*s", root, (int)(slash - rel), rel)
-                            : snprintf(parent, sizeof parent, "%s", root);
-  if (k < 0 || k >= (int)sizeof parent) {
-    return ENAMETOOLONG;
-  }
-  char real[PATH_MAX];
-  if (!realpath(parent, real)) {
-    return errno;
-  }
-  // a share of "/" holds every path (its prefix is the empty string)
-  size_t rl = strcmp(root, "/") == 0 ? 0 : strlen(root);
-  if (strncmp(real, root, rl) != 0 || (real[rl] != 0 && real[rl] != '/')) {
-    return EACCES;
-  }
-  k = snprintf(out, PATH_MAX, "%s/%s", real, slash ? slash + 1 : rel);
-  return k < 0 || k >= PATH_MAX ? ENAMETOOLONG : 0;
+}
+
+// The size of the regular file leaf in dfd (0 for anything else, or none).
+static int64_t hvf_lsizeat(int dfd, const char* leaf) {
+  struct stat st;
+  return dfd >= 0 && fstatat(dfd, leaf, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(st.st_mode) ? (int64_t)st.st_size : 0;
 }
 
 // Open files for reads and writes, by share, relative path and direction:
@@ -3388,12 +3296,8 @@ static Term hvf_fs_ok(Env e) {
   return hvf_words(e, &ok, 1);
 }
 
-static int hvf_dir_cmp(const void* a, const void* b) {
-  return strcmp(*(char* const*)a, *(char* const*)b);
-}
-
 // Hvf.fs(share, op, path, path2, a_hi, a_lo, b, bytes) -> List<U32>.
-// op: 0 stat, 1 list(from = a_lo, max = b), 2 read(offset a, len b),
+// op: 0 stat, 1 list (every entry, unordered: Bend orders and pages them), 2 read(offset a, len b),
 // 3 write(offset a, bytes), 4 create(mode b), 5 mkdir(mode b),
 // 6 remove(dir = b), 7 rename(to path2), 8 truncate(size a), 9 chmod(mode b),
 // 10 symlink(target path2), 11 readlink, 12 statfs, 13 read from offset a
@@ -3414,8 +3318,10 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
   // reads and writes reuse an open file (hvf_fdc) and skip resolving
   int      io    = op == 2 || op == 3 || op == 13 || op == 14;
   int      wr    = op == 3 || op == 14;
-  int      fd    = io ? hvf_fdc_find(sh, rel, wr) : -1;
-  int      err   = fd >= 0 ? 0 : hvf_resolve(sh, rel, path);
+  int      fd    = io && sh < (u32)hvf_nshares ? hvf_fdc_find(sh, rel, wr) : -1;
+  int      dfd = -1, dfd2 = -1;
+  const char *leaf = ".", *leaf2 = ".";
+  int      err   = sh >= (u32)hvf_nshares ? EINVAL : fd >= 0 ? 0 : hvf_fs_at(sh, rel, path, &dfd, &leaf);
   if (!err && (op == 4 || op == 5 || op == 6 || op == 7 || op == 10)) {
     hvf_fdc_flush(sh);
   }
@@ -3423,7 +3329,7 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
     // a regular file only: a FIFO or a device in the share must not block
     // or reach the VMM
     struct stat st = {0};
-    fd = open(path, (wr ? O_WRONLY : O_RDONLY) | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    fd = openat(dfd, leaf, (wr ? O_WRONLY : O_RDONLY) | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
       err = errno;
     } else if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
@@ -3435,13 +3341,13 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
     }
   }
   if (!err && (op == 7)) {
-    err = hvf_resolve(sh, rel2, path2);
+    err = hvf_fs_at(sh, rel2, path2, &dfd2, &leaf2);
   }
   if (err) {
     res = hvf_fs_err(e, err);
   } else if (op == 0) {
     struct stat st;
-    if (lstat(path, &st) != 0) {
+    if (fstatat(dfd, leaf, &st, AT_SYMLINK_NOFOLLOW) != 0) {
       res = hvf_fs_err(e, errno);
     } else {
       hvf_w(&out, 2);
@@ -3460,12 +3366,12 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
   } else if (op == 1) {
     // never through a symlink (O_NOFOLLOW), and the entries are looked at
     // where they are (fstatat), not through a path
-    int  dfd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    DIR* d   = dfd >= 0 ? fdopendir(dfd) : NULL;
+    int  lfd = openat(dfd, leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    DIR* d   = lfd >= 0 ? fdopendir(lfd) : NULL;
     if (!d) {
       res = hvf_fs_err(e, errno);
-      if (dfd >= 0) {
-        close(dfd);
+      if (lfd >= 0) {
+        close(lfd);
       }
     } else {
       char**         names = NULL;
@@ -3481,9 +3387,10 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
         }
         names[cnt++] = strdup(de->d_name);
       }
-      qsort(names, cnt, sizeof(char*), hvf_dir_cmp);
+      // every entry, as the file system keeps them: src/fs/listing.bend
+      // orders and pages them (Listing.page)
       hvf_w(&out, 5);
-      for (size_t i = (size_t)(u32)a; i < cnt && i < (size_t)(u32)a + b; i++) {
+      for (size_t i = 0; i < cnt; i++) {
         struct stat st;
         int         ok = fstatat(dirfd(d), names[i], &st, AT_SYMLINK_NOFOLLOW) == 0;
         hvf_w64(&out, ok ? (uint64_t)st.st_ino : 0);
@@ -3554,30 +3461,30 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
       }
     }
   } else if (op == 4) {
-    int fd = open(path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, b & 0777);
+    int fd = openat(dfd, leaf, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, b & 0777);
     res = fd < 0 ? hvf_fs_err(e, errno) : (close(fd), hvf_fs_ok(e));
   } else if (op == 5) {
-    res = mkdir(path, b & 0777) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+    res = mkdirat(dfd, leaf, b & 0777) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
   } else if (op == 6) {
-    int64_t was = b ? 0 : hvf_lsize(path);
-    res         = (b ? rmdir(path) : unlink(path)) != 0 ? hvf_fs_err(e, errno) : (hvf_share_add(sh, -was), hvf_fs_ok(e));
+    int64_t was = b ? 0 : hvf_lsizeat(dfd, leaf);
+    res         = unlinkat(dfd, leaf, b ? AT_REMOVEDIR : 0) != 0 ? hvf_fs_err(e, errno) : (hvf_share_add(sh, -was), hvf_fs_ok(e));
   } else if (op == 7) {
-    int64_t over = hvf_lsize(path2);
-    res          = rename(path, path2) != 0 ? hvf_fs_err(e, errno) : (hvf_share_add(sh, -over), hvf_fs_ok(e));
+    int64_t over = hvf_lsizeat(dfd2, leaf2);
+    res          = renameat(dfd, leaf, dfd2, leaf2) != 0 ? hvf_fs_err(e, errno) : (hvf_share_add(sh, -over), hvf_fs_ok(e));
   } else if (op == 8) {
-    int t = open(path, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
-    int64_t was = hvf_lsize(path);
+    int t = openat(dfd, leaf, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    int64_t was = hvf_lsizeat(dfd, leaf);
     res         = t < 0 || ftruncate(t, (off_t)a) != 0 ? hvf_fs_err(e, errno) : (hvf_share_add(sh, (int64_t)a - was), hvf_fs_ok(e));
     if (t >= 0) {
       close(t);
     }
   } else if (op == 9) {
-    res = lchmod(path, b & 0777) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+    res = fchmodat(dfd, leaf, b & 0777, AT_SYMLINK_NOFOLLOW) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
   } else if (op == 10) {
-    res = symlink(rel2, path) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+    res = symlinkat(rel2, dfd, leaf) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
   } else if (op == 11) {
     char    buf[PATH_MAX];
-    ssize_t k = readlink(path, buf, sizeof buf);
+    ssize_t k = readlinkat(dfd, leaf, buf, sizeof buf);
     if (k < 0) {
       res = hvf_fs_err(e, errno);
     } else {
@@ -3604,6 +3511,8 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
   } else {
     res = hvf_fs_err(e, ENOSYS);
   }
+  hvf_fs_unat(sh, dfd);
+  hvf_fs_unat(sh, dfd2);
   free(rel);
   free(rel2);
   free(bytes);
@@ -5095,6 +5004,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.vcpu_queue)
   io_eff(CID(Hvf.vcpu_queue), hvf_vcpu_queue_run);
+#endif
+#ifdef CID(Hvf.snap_plans)
+  io_eff(CID(Hvf.snap_plans), hvf_snap_plans_run);
 #endif
 #ifdef CID(Hvf.net_limits)
   io_eff(CID(Hvf.net_limits), hvf_net_limits_run);

@@ -154,7 +154,7 @@ floor (`Csum.small`, `Tcp.small`).
 - Cold boot to a shell about 0.55 s; a snapshot restores in about 30 ms.
 - Linux hosts: host/hvf.c's backends interface has a KVM implementation
   (vGICv3, PSCI forwarded to the machine by the SMCCC filter, MMIO exits
-  rewritten as data aborts with a valid syndrome), and `scripts/check-host.sh`
+  rewritten as data aborts with a valid syndrome by src/arm64/kvmexit.bend), and `scripts/check-host.sh`
   passes on Ubuntu 24.04 arm64 (run by `scripts/lima/linux-host.sh`; on an
   M1/M2 Mac the KVM host is emulated by QEMU), snapshots included: vCPU
   registers by KVM_GET_REG_LIST, the vGIC as an ordered replay of its
@@ -215,12 +215,18 @@ floor (`Csum.small`, `Tcp.small`).
   (src/vmm/loggate.bend), the control and vsock clients' deadline and the
   vsock CONNECT line (src/vmm/clients.bend), --forward specs (Fwd in
   src/vmm/cli.bend), the share quota (src/fs/quota.bend) and the console
-  log's rotation (src/dev/conlog.bend). Still in C: the mechanisms
-  (sockets, the send buffers, parking, finding a datagram's flow), the
-  share's path containment (realpath, the security boundary) and its
-  listing order (sorted once per listing: moving it would pass every entry
-  through Bend on each call), KVM's exit synthesis, and the vCPU register
-  and vGIC blobs (opaque, per hypervisor). A send past the limits is
+  log's rotation (src/dev/conlog.bend). So are the share's names
+  (src/fs/contain.bend: which relative paths are valid; the host then walks
+  them one component at a time with openat and O_NOFOLLOW from the share's
+  root, so no path leaves it, symlinked directories included) and its
+  listing order (src/fs/listing.bend: sorted and paged in Bend), KVM's exits
+  in Hypervisor.framework's terms (src/arm64/kvmexit.bend: the host reports
+  KVM's facts, Bend builds the data-abort or HVC syndrome), and what a
+  snapshot keeps: the vGIC's replay order (src/arm64/gicplan.bend) and the
+  registers a Hypervisor.framework vCPU saves (src/arm64/regplan.bend),
+  handed over at startup. Still in C: the mechanisms (sockets, the send
+  buffers, parking, finding a datagram's flow, reading and writing the
+  registers a plan names). A send past the limits is
   queued before Bend's verdict drops it: the wall can be passed by the
   sends in flight (one segment each) before their verdicts.
   Moving anything: A/B scripts/bench.sh interleaved, since Bend compiles

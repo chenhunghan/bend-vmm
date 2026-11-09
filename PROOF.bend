@@ -49,3 +49,8 @@ import ./proofs/conlog.bend as Proofs_conlog
 import ./proofs/loggate.bend as Proofs_loggate
 import ./proofs/fds.bend as Proofs_fds
 import ./proofs/clients.bend as Proofs_clients
+import ./proofs/contain.bend as Proofs_contain
+import ./proofs/listing.bend as Proofs_listing
+import ./proofs/kvmexit.bend as Proofs_kvmexit
+import ./proofs/gicplan.bend as Proofs_gicplan
+import ./proofs/regplan.bend as Proofs_regplan

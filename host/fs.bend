@@ -3,6 +3,8 @@ import ../src/lib/u64.bend as U
 import ../src/vmm/abi.bend as V
 import ./hvf.bend as H
 import ../src/fs/quota.bend as Qt
+import ../src/fs/contain.bend as Ct
+import ../src/fs/listing.bend as Ls
 
 # Shared directories: V.FsOp on the host (host/hvf.c, "Shared directories").
 
@@ -57,19 +59,34 @@ def Fs.decode.go(+tag: U32, +ws: +List<U32>) -> V.FsResult:
 def Fs.decode(+ws: +List<U32>) -> V.FsResult:
   Fs.decode.go(Fs.w(ws, 0n), ws)
 
-def Fs.call(sh: U32, op: U32, p: String, p2: String, a: U.U64, b: U32, bytes: +List<U32>) -> IO(V.FsResult):
+# A host operation on a share: its paths' names vetted first
+# (src/fs/contain.bend: no empty part, no "." or ".."; the host walks them
+# without following a symlink).
+def Fs.run(sh: U32, op: U32, p: String, p2: String, a: U.U64, b: U32, bytes: +List<U32>) -> IO(V.FsResult):
   match a:
     case U.U64{ah, al}:
       do IO<V.FsResult>:
         +ws : +List<U32> <- H.Hvf.fs(sh, op, p, p2, ah, al, b, bytes)
         return Fs.decode(ws)
 
+def Fs.call(+sh: U32, +op: U32, +p: String, +p2: String, +a: U.U64, +b: U32, +bytes: +List<U32>) -> IO(V.FsResult):
+  Bool.pick(IO(V.FsResult), Ct.Share.rel_ok(p) && (U32.is_ne(op, 7) || Ct.Share.rel_ok(p2)),
+    Fs.run(sh, op, p, p2, a, b, bytes), IO.pure(V.FsResult, V.FsErr{Ct.Share.einval()}))
+
+# The page of a listing the guest asked for (src/fs/listing.bend).
+def Fs.paged(r: V.FsResult, +from: U32, +max: U32) -> V.FsResult:
+  match r:
+    case V.FsEntries{es}:
+      V.FsEntries{Ls.Listing.page(es, from, max)}
+    case _:
+      r
+
 def Host.fs.do(sh: U32, op: V.FsOp) -> IO(V.FsResult):
   match op:
     case V.FsStat{p}:
       Fs.call(sh, 0, p, "", U.U64.zero(), 0, [])
     case V.FsList{p, from, max}:
-      Fs.call(sh, 1, p, "", U.U64.from_u32(from), max, [])
+      IO.bind(V.FsResult, V.FsResult, Fs.call(sh, 1, p, "", U.U64.zero(), 0, []), r => IO.pure(V.FsResult, Fs.paged(r, from, max)))
     case V.FsRead{p, off, len}:
       Fs.call(sh, 2, p, "", off, len, [])
     case V.FsWrite{p, off, bs}:
