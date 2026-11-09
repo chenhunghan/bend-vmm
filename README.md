@@ -154,8 +154,8 @@ and notarized) and Linux arm64 and publishes both on a GitHub release
 ## As a library
 
 `main.bend` at the repository's root is a BendHub package (MIT):
-`import 0x9b8f2c0a3d76a7c0e967cd5ae59d1b06/main.bend as V` (bend-vmm as of
-cd1abf0; each publish of a change has a new hash), then `V.Vmm.run(prog, flags)` runs the VMM inside another Bend
+`import 0x6612f1a246de4bc93112c7667cc9966a/main.bend as V` (bend-vmm as of
+add1c56; each publish of a change has a new hash), then `V.Vmm.run(prog, flags)` runs the VMM inside another Bend
 program: `prog` is how that program starts the VMM again (on a guest reset,
 and in a snapshot's saved command line), e.g. `["vk8s", "vmm"]`, and `flags`
 are the options above. One VM per process (the host layer's state is the
