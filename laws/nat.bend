@@ -229,11 +229,22 @@ def est_mss(m: U32) -> N.Slirp:
 law nat.seg_size:
   {[N.Tcp.seg_size(0), N.Tcp.seg_size(1410), N.Tcp.seg_size(9000), N.Tcp.seg_size(10)] == [1460, 1410, 1460, 64] : +List<U32>}
 
+# (Small sizes keep the laws within the verdict kernel's fuel.)
 law nat.mss_cuts_data:
-  {frames(N.Slirp.host_event(est_mss(1410), V.TcpData{0, B.Bytes.zeros(2000n)})) == [host_tcp(24, 2, 1000, 0, B.Bytes.zeros(1410n)), host_tcp(24, 1412, 1000, 0, B.Bytes.zeros(590n))] : +List<+List<U32>>}
+  {frames(N.Slirp.host_event(est_mss(100), V.TcpData{0, B.Bytes.zeros(150n)})) == [host_tcp(24, 2, 1000, 0, B.Bytes.zeros(100n)), host_tcp(24, 102, 1000, 0, B.Bytes.zeros(50n))] : +List<+List<U32>>}
+
+# The segment size of the first connection.
+def seg_of(n: N.Slirp) -> U32:
+  match n:
+    case N.Slirp{cs, k}:
+      match cs:
+        case Con{c, t}:
+          N.Conn.seg(c)
+        case Nil{}:
+          0
 
 law nat.mss_past_1460:
-  {frames(N.Slirp.host_event(est_mss(9000), V.TcpData{0, B.Bytes.zeros(2000n)})) == [host_tcp(24, 2, 1000, 0, B.Bytes.zeros(1460n)), host_tcp(24, 1462, 1000, 0, B.Bytes.zeros(540n))] : +List<+List<U32>>}
+  {[seg_of(est_mss(1410)), seg_of(est_mss(9000)), seg_of(established())] == [1410, 1460, 1460] : +List<U32>}
 
 # The segment sizes of host frames.
 def segs_of(fs: +List<+List<U32>>) -> +List<U32>:
