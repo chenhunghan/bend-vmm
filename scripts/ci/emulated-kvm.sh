@@ -12,6 +12,13 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 [ "$(uname -s)-$(uname -m)" = Linux-aarch64 ] || { echo "emulated-kvm: needs Linux on arm64"; exit 2; }
 repo=$(pwd)
+# A runner that does have KVM (some hosted arm64 runners may, one day) runs
+# the check on it directly, in minutes.
+if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+  echo "== /dev/kvm is here: the check runs on it"
+  exec env SKIP_NATIVE=1 scripts/check-host.sh
+fi
+echo "== no usable /dev/kvm ($(ls -l /dev/kvm 2>&1)): emulating EL2"
 mem=${L1_MEM:-8192}
 cpus=${L1_CPUS:-$(nproc)}
 

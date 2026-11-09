@@ -159,7 +159,10 @@ floor (`Csum.small`, `Tcp.small`).
   M1/M2 Mac the KVM host is emulated by QEMU), snapshots included: vCPU
   registers by KVM_GET_REG_LIST, the vGIC as an ordered replay of its
   registers. CI runs the same check on an emulated KVM host
-  (`scripts/ci/emulated-kvm.sh`): GitHub's arm64 runners have no /dev/kvm.
+  (`scripts/ci/emulated-kvm.sh`, about an hour): GitHub's arm64 runners have
+  no /dev/kvm. A self-hosted arm64 Linux runner with KVM
+  (`scripts/ci/kvm-runner.sh`, then the repository variable KVM_RUNNER)
+  runs it on real KVM for pushes to main in minutes.
 - Data path: devices name guest memory (`V.Iov`) and the host moves bytes
   (disk, 9p, network); qcow2 images (src/disk) are walked in Bend.
 - `scripts/bench.sh` and `scripts/soak.sh` measure speed and long runs; a

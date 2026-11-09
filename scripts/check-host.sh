@@ -214,6 +214,26 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
     [ $code = 0 ] && grep -q "GUEST: power button" "$t/p.log" && grn "ok: $how powers the guest off (its power button)" || { red "failed: $how (exit $code)"; tail -5 "$t/p.log"; fail=1; }
   done
   rm -rf "$t"
+  # Where the VMM listens (src/vmm/hostfiles.bend): a file at the path is
+  # refused and kept; a running VMM's socket is refused (that VMM keeps
+  # answering on it); a dead one (its VMM killed) is replaced. A LAN
+  # directory others may enter is refused.
+  t=$(mktemp -d); echo keep > "$t/notes"; mkdir -m 755 "$t/lan"
+  vm() { ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --cmdline "console=ttyAMA0 quiet" "$@"; }
+  o1=$(alarm 20 ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --control "$t/notes" < /dev/null 2>&1 | head -3)
+  ( (slp 40) | vm --control "$t/c.sock" > "$t/a.log" 2>&1 & )
+  for _ in $(seq $((40 * SLOW))); do [ -S "$t/c.sock" ] && break; sleep 0.5; done
+  o2=$(alarm 20 ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --control "$t/c.sock" < /dev/null 2>&1 | head -3)
+  s2=$(echo status | nc -U "$t/c.sock" 2>/dev/null | head -1)
+  pkill -9 -f -- "--control $t/c.sock"; sleep 1
+  ( (slp 40) | vm --control "$t/c.sock" > "$t/b.log" 2>&1 & )
+  s3=""; for _ in $(seq $((40 * SLOW))); do s3=$(echo status | nc -U "$t/c.sock" 2>/dev/null | head -1); [ -n "$s3" ] && break; sleep 0.5; done
+  echo quit | nc -U "$t/c.sock" >/dev/null 2>&1
+  o4=$(alarm 20 ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --lan "$t/lan,ip=10.0.3.11/24" < /dev/null 2>&1 | head -3)
+  grep -q "is not a socket" <<<"$o1" && [ "$(cat "$t/notes")" = keep ] && grep -q "a running VMM listens there" <<<"$o2" && [ -n "$s2" ] && [ -n "$s3" ] && grep -q "cannot join the LAN" <<<"$o4" \
+    && grn "ok: listening paths: a file is kept, a live socket refused, a dead one replaced; an open LAN directory refused" \
+    || { red "failed: listening paths"; printf '%s\n' "file: $o1" "live: $o2 ($s2)" "dead: $s3" "lan: $o4"; fail=1; }
+  rm -rf "$t"
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then

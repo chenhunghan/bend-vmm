@@ -17,7 +17,7 @@ jobs:
       - name: Install Bend
         run: |
           name="bend-$BEND_VERSION-linux-x64.tar.gz"
-          curl --proto '=https' --tlsv1.2 -fsSL -o "/tmp/$name" "https://github.com/bendlang/bend/releases/download/v$BEND_VERSION/$name"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "/tmp/$name" "https://github.com/bendlang/bend/releases/download/v$BEND_VERSION/$name"
           echo "$BEND_SHA_LINUX_X64  /tmp/$name" | sha256sum -c -
           tar -xzf "/tmp/$name" -C /tmp
           mkdir -p "$HOME/.bend/bin"
@@ -49,7 +49,7 @@ jobs:
       - name: Install Bend
         run: |
           name="bend-$BEND_VERSION-linux-x64.tar.gz"
-          curl --proto '=https' --tlsv1.2 -fsSL -o "/tmp/$name" "https://github.com/bendlang/bend/releases/download/v$BEND_VERSION/$name"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "/tmp/$name" "https://github.com/bendlang/bend/releases/download/v$BEND_VERSION/$name"
           echo "$BEND_SHA_LINUX_X64  /tmp/$name" | sha256sum -c -
           tar -xzf "/tmp/$name" -C /tmp
           mkdir -p "$HOME/.bend/bin"
@@ -70,7 +70,10 @@ jobs:
   host-linux:
     # The host layer (KVM backend) builds on Linux arm64 and boots guests on
     # KVM. Hosted runners have no /dev/kvm, so scripts/ci/emulated-kvm.sh
-    # runs the guest check on a QEMU-emulated arm64 CPU with EL2 (slow).
+    # runs the guest check on a QEMU-emulated arm64 CPU with EL2 (slow, about
+    # an hour). With a KVM runner (host-linux-kvm) pushes to main use that
+    # instead; pull requests still come here.
+    if: vars.KVM_RUNNER != 'true' || github.event_name == 'pull_request'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 150
     env:
@@ -83,7 +86,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y clang lld libx11-dev zstd qemu-system-arm qemu-utils
           name="bend-$BEND_VERSION-linux-arm64.tar.gz"
-          curl --proto '=https' --tlsv1.2 -fsSL -o "/tmp/$name" "https://github.com/bendlang/bend/releases/download/v$BEND_VERSION/$name"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "/tmp/$name" "https://github.com/bendlang/bend/releases/download/v$BEND_VERSION/$name"
           echo "$BEND_SHA_LINUX_ARM64  /tmp/$name" | sha256sum -c -
           tar -xzf "/tmp/$name" -C /tmp
           mkdir -p "$HOME/.bend/bin"
@@ -92,6 +95,22 @@ jobs:
           echo "$HOME/.bend/bin" >> "$GITHUB_PATH"
       - name: Guests on KVM (emulated EL2)
         run: scripts/ci/emulated-kvm.sh
+
+  host-linux-kvm:
+    # Guests on real KVM, in minutes: a self-hosted Linux arm64 runner with
+    # /dev/kvm (labels self-hosted, Linux, ARM64, kvm; set up by
+    # scripts/ci/kvm-runner.sh), when the repository variable KVM_RUNNER is
+    # "true". Pushes to main only: a self-hosted runner must not run pull
+    # requests' code.
+    if: vars.KVM_RUNNER == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, ARM64, kvm]
+    timeout-minutes: 60
+    env:
+      BEND_NO_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guests on KVM
+        run: PATH="$HOME/.bend/bin:$PATH" SKIP_NATIVE=1 scripts/check-host.sh
 
   host-macos:
     # Guests on Hypervisor.framework. GitHub's macOS runners cannot nest, so

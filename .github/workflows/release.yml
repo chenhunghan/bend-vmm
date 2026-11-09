@@ -44,7 +44,7 @@ jobs:
       - name: Install Bend
         run: |
           name="bend-$BEND_VERSION-darwin-arm64.tar.gz"
-          curl --proto '=https' --tlsv1.2 -fsSL -o "/tmp/$name" "https://github.com/bendlang/bend/releases/download/v$BEND_VERSION/$name"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "/tmp/$name" "https://github.com/bendlang/bend/releases/download/v$BEND_VERSION/$name"
           echo "$BEND_SHA  /tmp/$name" | shasum -a 256 -c -
           tar -xzf "/tmp/$name" -C /tmp
           mkdir -p "$HOME/.bend/bin"
@@ -75,7 +75,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y clang libx11-dev
           name="bend-$BEND_VERSION-linux-arm64.tar.gz"
-          curl --proto '=https' --tlsv1.2 -fsSL -o "/tmp/$name" "https://github.com/bendlang/bend/releases/download/v$BEND_VERSION/$name"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "/tmp/$name" "https://github.com/bendlang/bend/releases/download/v$BEND_VERSION/$name"
           echo "$BEND_SHA  /tmp/$name" | sha256sum -c -
           tar -xzf "/tmp/$name" -C /tmp
           mkdir -p "$HOME/.bend/bin"

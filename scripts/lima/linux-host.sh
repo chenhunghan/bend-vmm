@@ -28,6 +28,16 @@ limactl list -f '{{.Status}}' "$vm" | grep -q Running || limactl start --tty=fal
 # builds in the guest never touch the Mac's tree.
 tar --no-xattrs -C "$repo" --exclude ./out --exclude ./openvmm --exclude ./.git -cf - . \
   | limactl shell "$vm" -- bash -c 'rm -rf ~/bend-vmm.new && mkdir ~/bend-vmm.new && tar -xf - -C ~/bend-vmm.new 2>/dev/null; mkdir -p ~/bend-vmm/out && rm -rf ~/bend-vmm.keep && mv ~/bend-vmm/out ~/bend-vmm.keep && rm -rf ~/bend-vmm && mv ~/bend-vmm.new ~/bend-vmm && mv ~/bend-vmm.keep ~/bend-vmm/out'
+# The Bend CI pins (.github/workflows/ci.yml, the host-linux job), installed
+# in the guest whenever its own differs: an older one fails on code CI passes.
+bv=$(awk '/BEND_VERSION:/ {print $2; exit}' "$repo/.github/workflows/ci.yml")
+bs=$(awk '/BEND_SHA_LINUX_ARM64:/ {print $2; exit}' "$repo/.github/workflows/ci.yml")
+limactl shell "$vm" -- bash -c "~/.bend/bin/bend 2>&1 | grep -q '^Bend $bv:' && exit 0
+  set -e; n=bend-$bv-linux-arm64.tar.gz; cd /tmp && rm -rf bend \$n
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o \$n https://github.com/bendlang/bend/releases/download/v$bv/\$n
+  echo '$bs  '\$n | sha256sum -c - >/dev/null && tar -xzf \$n
+  mkdir -p ~/.bend/bin && rm -rf ~/.bend/bend2 ~/.bend/guide && mv bend/bend2 bend/guide ~/.bend/ && mv bend/bin/bend ~/.bend/bin/bend
+  echo \"linux-host: Bend $bv installed\""
 if [ $# = 0 ]; then
   exec limactl shell --workdir "\$HOME/bend-vmm" "$vm"
 fi
