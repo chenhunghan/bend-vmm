@@ -15,7 +15,6 @@ import ../src/vmm/opts.bend as Op
 import ../src/disk/access.bend as Acc
 import ../src/net/limits.bend as Lim
 import ../src/net/flush.bend as Fl
-import ../src/net/fds.bend as Fds
 import ../src/net/udpflow.bend as Uf
 import ../src/net/nat.bend as Nt
 import ../src/arm64/psci.bend as Ps
@@ -1185,7 +1184,7 @@ def path_under(+dir: String, +name: String) -> String:
       do IO<St.Store>:
         name : +List<U32> <- H.Host.disk_read(id, off, len)
         +bpath : String = path_under(path_dir(path), bytes_str(name))
-        bid : U32 <- H.Hvf.disk_open_backing(bpath)
+        bid : U32 <- H.Hvf.disk_open_with(bpath, Acc.Access.flags(Acc.Backing{}))
         devices.chain(fuel, bpath, bid)
 
 # A disk image: qcow2 (its header says so) as a store over its backing
@@ -1207,13 +1206,9 @@ def path_under(+dir: String, +name: String) -> String:
     +head : +List<U32> <- H.Host.disk_read(id, U.U64.zero(), 512)
     devices.format(Qc.Qcow.parse(head), ro, path, id, head)
 
-# A :ro image is opened (and locked) only for reading.
+# A :ro image is opened (and locked) only for reading (src/disk/access.bend).
 @unsafe def devices.open_as(ro: Bool, path: String) -> IO(U32):
-  match ro:
-    case True{}:
-      H.Hvf.disk_open_ro(path)
-    case False{}:
-      H.Hvf.disk_open(path)
+  H.Hvf.disk_open_with(path, Acc.Access.flags(Acc.Access.use(ro)))
 
 # An image the host would not open for writing (src/disk/access.bend says
 # which refusals) is attached read-only, and said so.
@@ -1222,7 +1217,7 @@ def path_under(+dir: String, +name: String) -> String:
     case True{}:
       do IO<D.DevKind>:
         log_err("bend-vmm: " ++ path ++ " cannot be written: attached read-only")
-        rid : U32 <- H.Hvf.disk_open_ro(path)
+        rid : U32 <- H.Hvf.disk_open_with(path, Acc.Access.flags(Acc.Reader{}))
         devices.open(True{}, path, rid)
     case False{}:
       devices.open(ro, path, id)
@@ -1923,8 +1918,7 @@ def args_bytes(args: List<String>) -> +List<U32>:
     _ : U32 <- H.Hvf.set_args(List.append(&2, U32, args_bytes(prog), args_bytes(flags)))
     _ : U32 <- H.Hvf.set_prog(U32.from_nat(List.length(&1, String, prog)))
     _ : U32 <- H.Hvf.net_limits(Lim.Lim.wire(Lim.Lim.default()))
-    +fdl : U32 <- H.Hvf.fd_limit()
-    _ : U32 <- H.Hvf.fd_room(Fds.Fds.room(fdl))
+    _ : U32 <- H.Host.fds()
     main.go(main.info(flags), flags)
 
 @unsafe def main() -> IO(Unit):

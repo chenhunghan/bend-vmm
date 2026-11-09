@@ -5,6 +5,7 @@ import ./hvf.bend as H
 import ../src/fs/quota.bend as Qt
 import ../src/fs/contain.bend as Ct
 import ../src/fs/listing.bend as Ls
+import ../src/fs/entry.bend as En
 
 # Shared directories: V.FsOp on the host (host/hvf.c, "Shared directories").
 
@@ -73,11 +74,12 @@ def Fs.call(+sh: U32, +op: U32, +p: String, +p2: String, +a: U.U64, +b: U32, +by
   Bool.pick(IO(V.FsResult), Ct.Share.rel_ok(p) && (U32.is_ne(op, 7) || Ct.Share.rel_ok(p2)),
     Fs.run(sh, op, p, p2, a, b, bytes), IO.pure(V.FsResult, V.FsErr{Ct.Share.einval()}))
 
-# The page of a listing the guest asked for (src/fs/listing.bend).
+# The page of a listing the guest asked for (src/fs/entry.bend: which
+# entries, with what type; src/fs/listing.bend: in what order).
 def Fs.paged(r: V.FsResult, +from: U32, +max: U32) -> V.FsResult:
   match r:
     case V.FsEntries{es}:
-      V.FsEntries{Ls.Listing.page(es, from, max)}
+      V.FsEntries{Ls.Listing.page(En.Entry.view(es), from, max)}
     case _:
       r
 
@@ -92,9 +94,9 @@ def Host.fs.do(sh: U32, op: V.FsOp) -> IO(V.FsResult):
     case V.FsWrite{p, off, bs}:
       Fs.call(sh, 3, p, "", off, 0, bs)
     case V.FsCreate{p, mode}:
-      Fs.call(sh, 4, p, "", U.U64.zero(), mode, [])
+      Fs.call(sh, 4, p, "", U.U64.zero(), En.Entry.perm(mode), [])
     case V.FsMkdir{p, mode}:
-      Fs.call(sh, 5, p, "", U.U64.zero(), mode, [])
+      Fs.call(sh, 5, p, "", U.U64.zero(), En.Entry.perm(mode), [])
     case V.FsRemove{p, dir}:
       Fs.call(sh, 6, p, "", U.U64.zero(), Bool.to_u32(dir), [])
     case V.FsRename{from, to}:
@@ -102,7 +104,7 @@ def Host.fs.do(sh: U32, op: V.FsOp) -> IO(V.FsResult):
     case V.FsTruncate{p, size}:
       Fs.call(sh, 8, p, "", size, 0, [])
     case V.FsChmod{p, mode}:
-      Fs.call(sh, 9, p, "", U.U64.zero(), mode, [])
+      Fs.call(sh, 9, p, "", U.U64.zero(), En.Entry.perm(mode), [])
     case V.FsSymlink{p, target}:
       Fs.call(sh, 10, p, target, U.U64.zero(), 0, [])
     case V.FsReadlink{p}:

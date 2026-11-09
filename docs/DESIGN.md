@@ -224,9 +224,15 @@ floor (`Csum.small`, `Tcp.small`).
   KVM's facts, Bend builds the data-abort or HVC syndrome), and what a
   snapshot keeps: the vGIC's replay order (src/arm64/gicplan.bend) and the
   registers a Hypervisor.framework vCPU saves (src/arm64/regplan.bend),
-  handed over at startup. Still in C: the mechanisms (sockets, the send
-  buffers, parking, finding a datagram's flow, reading and writing the
-  registers a plan names). A send past the limits is
+  handed over at startup. Also: which share entries the guest sees and
+  as what type, and that a mode it sets keeps only its permission bits
+  (src/fs/entry.bend), how each disk use opens and locks its image
+  (Access.flags), the process's descriptor limit (Fds.soft) and whether a
+  display fits the framebuffer (Cli.display.fits). Still in C: the
+  mechanisms (system calls, sockets, the send buffers, parking, finding a
+  datagram's flow, the 9p descriptor cache, reading and writing the
+  registers a plan names, gzip's inflate, the window's drawing) and
+  memory-safety caps of its own. A send past the limits is
   queued before Bend's verdict drops it: the wall can be passed by the
   sends in flight (one segment each) before their verdicts.
   Moving anything: A/B scripts/bench.sh interleaved, since Bend compiles

@@ -1754,16 +1754,14 @@ Term hvf_stdin_wait_run(Env e, Term* f, IoWork* w) {
 static int hvf_disks[HVF_MAX_DISKS];
 static int hvf_ndisks;
 
-// Opens a disk image for the guest, read-write (read-only when ro; a
-// read-write open the host refuses is Bend's to retry read-only,
-// src/disk/access.bend, from Hvf.disk_err), and locks it the way its use needs: a writer
-// alone, readers together, so a second bend-vmm cannot write an image this
-// one reads or writes (two writers corrupt a qcow2 image at once). Its index,
-// or 0xFFFFFFFF.
+// Opens a disk image as src/disk/access.bend says for its use (flags:
+// read only, an exclusive or shared lock, a regular file only); a
+// read-write open the host refuses is Bend's to retry read-only (from
+// Hvf.disk_err). Its index, or 0xFFFFFFFF.
 static int hvf_disk_last_err;
 
-static Term hvf_disk_open_as(Env e, Term path_t, int kind) {
-  int   ro = kind != 0;
+static Term hvf_disk_open_as(Env e, Term path_t, u32 flags) {
+  int   ro = (flags & 1) != 0, excl = (flags & 2) != 0, reg = (flags & 4) != 0;
   u64   n;
   char* path = io_cstr(e, path_t, &n);
   int   fd   = -1;
@@ -1775,13 +1773,13 @@ static Term hvf_disk_open_as(Env e, Term path_t, int kind) {
   // a backing file named inside an image is a regular file, never a device
   // or a FIFO
   struct stat st;
-  if (fd >= 0 && kind == 2 && (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode))) {
+  if (fd >= 0 && reg && (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode))) {
     fprintf(stderr, "bend-vmm: %s: a backing file must be a regular file\n", path);
     close(fd);
     fd = -1;
   }
   // a file system without locks (some network ones) answers ENOTSUP: go on
-  if (fd >= 0 && flock(fd, (ro ? LOCK_SH : LOCK_EX) | LOCK_NB) != 0 && errno == EWOULDBLOCK) {
+  if (fd >= 0 && flock(fd, (excl ? LOCK_EX : LOCK_SH) | LOCK_NB) != 0 && errno == EWOULDBLOCK) {
     fprintf(stderr, "bend-vmm: %s is in use by another process\n", path);
     close(fd);
     fd = -1;
@@ -1799,20 +1797,11 @@ Term hvf_disk_err_run(Env e, Term* f, IoWork* w) {
   return (Term)(u32)hvf_disk_last_err;
 }
 
-// Hvf.disk_open(path) -> U32: a disk image the guest may write.
-Term hvf_disk_open_run(Env e, Term* f, IoWork* w) {
-  return hvf_disk_open_as(e, f[0], 0);
-}
-
-// Hvf.disk_open_ro(path) -> U32: a disk image only read (a :ro disk).
-Term hvf_disk_open_ro_run(Env e, Term* f, IoWork* w) {
-  return hvf_disk_open_as(e, f[0], 1);
-}
-
-// Hvf.disk_open_backing(path) -> U32: a qcow2 image's backing file, read
-// only, and a regular file.
-Term hvf_disk_open_backing_run(Env e, Term* f, IoWork* w) {
-  return hvf_disk_open_as(e, f[0], 2);
+// Hvf.disk_open_with(path, flags) -> U32: opens an image the way
+// src/disk/access.bend says for its use (Access.flags: 1 read only,
+// 2 an exclusive lock, else shared; 4 a regular file only).
+Term hvf_disk_open_with_run(Env e, Term* f, IoWork* w) {
+  return hvf_disk_open_as(e, f[0], (u32)f[1]);
 }
 
 // A failed host read or write of each image since the guest's device last
@@ -2252,11 +2241,11 @@ Term hvf_dns_run(Env e, Term* f, IoWork* w) {
 
 // Descriptors. Bend's runtime waits on parked effects with select(). On
 // Linux it sizes its fd sets by the top descriptor, so any descriptor is
-// fine and the soft limit is raised to min(hard, HVF_FD_TOP) (never
-// lowered). On macOS select() fails with EINVAL for nfds > FD_SETSIZE
-// (1024) and the runtime then aborts ("the poller failed"), so the soft
-// limit is min(hard, FD_SETSIZE), raised or lowered to it, and the kernel
-// never hands out a larger descriptor. Either way the socket table (NAT
+// fine; on macOS select() fails with EINVAL for nfds > FD_SETSIZE (1024)
+// and the runtime then aborts ("the poller failed"), so the kernel must
+// never hand out a larger descriptor. The soft limit is Bend's to choose
+// (src/net/fds.bend, Fds.soft, from Hvf.nofile), set by Hvf.set_nofile at
+// startup. Either way the socket table (NAT
 // connections and flows, vsock) holds at most hvf_fd_room descriptors: the
 // rest (src/net/fds.bend: 128, or half of a small limit) stays for disks, the control
 // socket, shares, pipes and the runtime. A new guest flow past hvf_fd_room
@@ -2274,32 +2263,41 @@ static int hvf_fd_limit = 1024;
 static int hvf_fd_room;
 static int hvf_fd_used;
 
-static void __attribute__((constructor)) hvf_nofile(void) {
-  struct rlimit r;
-  rlim_t        lim = 1024;
-  if (getrlimit(RLIMIT_NOFILE, &r) == 0) {
-    rlim_t want = r.rlim_max != RLIM_INFINITY && r.rlim_max < HVF_FD_TOP ? r.rlim_max : HVF_FD_TOP;
-#ifdef __APPLE__
-    int set = r.rlim_cur != want;
-#else
-    int set = r.rlim_cur == RLIM_INFINITY ? 0 : r.rlim_cur < want;
-#endif
-    if (set) {
-      r.rlim_cur = want;
-      if (setrlimit(RLIMIT_NOFILE, &r) != 0) {
-        getrlimit(RLIMIT_NOFILE, &r);
-      }
-    }
-    // The budget counts at most HVF_FD_TOP, even when Linux's soft limit is
-    // higher (the table, HVF_MAX_SOCKS, bounds it below that anyway).
-    lim = r.rlim_cur != RLIM_INFINITY && r.rlim_cur < HVF_FD_TOP ? r.rlim_cur : HVF_FD_TOP;
-  }
-  hvf_fd_limit = (int)lim;
+static u32 hvf_rlim32(rlim_t v) {
+  return v == RLIM_INFINITY || v > 0xffffffffu ? 0xffffffffu : (u32)v;
 }
 
-// Hvf.fd_limit() -> U32: the descriptors this process may hold (at most
-// HVF_FD_TOP).
-Term hvf_fd_limit_run(Env e, Term* f, IoWork* w) {
+// Hvf.nofile() -> List<U32>: [soft limit, hard limit (4294967295 for
+// unlimited or more), the poller's top (HVF_FD_TOP), 1 when the soft limit
+// must be no more than it (macOS)]; src/net/fds.bend (Fds.soft) decides.
+Term hvf_nofile_run(Env e, Term* f, IoWork* w) {
+  struct rlimit r = {1024, 1024};
+  getrlimit(RLIMIT_NOFILE, &r);
+#ifdef __APPLE__
+  uint32_t ws[4] = {hvf_rlim32(r.rlim_cur), hvf_rlim32(r.rlim_max), HVF_FD_TOP, 1};
+#else
+  uint32_t ws[4] = {hvf_rlim32(r.rlim_cur), hvf_rlim32(r.rlim_max), HVF_FD_TOP, 0};
+#endif
+  return hvf_words(e, ws, 4);
+}
+
+// Hvf.set_nofile(n) -> U32: sets the soft limit to n (4294967295:
+// unlimited) and answers the descriptors this process may then hold, at
+// most HVF_FD_TOP (the budget counts no more, even when Linux's soft limit
+// is higher: the table, HVF_MAX_SOCKS, bounds it below that anyway).
+Term hvf_set_nofile_run(Env e, Term* f, IoWork* w) {
+  struct rlimit r;
+  if (getrlimit(RLIMIT_NOFILE, &r) != 0) {
+    return (Term)(u32)1024;
+  }
+  rlim_t want = (u32)f[0] == 0xffffffffu ? RLIM_INFINITY : (rlim_t)(u32)f[0];
+  if (r.rlim_cur != want) {
+    r.rlim_cur = want;
+    if (setrlimit(RLIMIT_NOFILE, &r) != 0) {
+      getrlimit(RLIMIT_NOFILE, &r);
+    }
+  }
+  hvf_fd_limit = (int)(r.rlim_cur != RLIM_INFINITY && r.rlim_cur < HVF_FD_TOP ? r.rlim_cur : HVF_FD_TOP);
   return (Term)(u32)hvf_fd_limit;
 }
 
@@ -3378,23 +3376,21 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
       size_t         cnt = 0, cap = 0;
       struct dirent* de;
       while ((de = readdir(d))) {
-        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) {
-          continue;
-        }
         if (cnt == cap) {
           cap   = cap ? cap * 2 : 32;
           names = io_mem(realloc(names, cap * sizeof(char*)));
         }
         names[cnt++] = strdup(de->d_name);
       }
-      // every entry, as the file system keeps them: src/fs/listing.bend
-      // orders and pages them (Listing.page)
+      // every entry, as the file system keeps them ("." and ".." too):
+      // src/fs/entry.bend says which the guest sees and as what,
+      // src/fs/listing.bend orders and pages them
       hvf_w(&out, 5);
       for (size_t i = 0; i < cnt; i++) {
         struct stat st;
         int         ok = fstatat(dirfd(d), names[i], &st, AT_SYMLINK_NOFOLLOW) == 0;
         hvf_w64(&out, ok ? (uint64_t)st.st_ino : 0);
-        hvf_w(&out, !ok ? 0 : S_ISDIR(st.st_mode) ? 4 : S_ISLNK(st.st_mode) ? 10 : S_ISREG(st.st_mode) ? 8 : 0);
+        hvf_w(&out, ok ? ((uint32_t)st.st_mode >> 12) & 15 : 0); // the file type: Entry.kind
         size_t len = strlen(names[i]);
         hvf_w(&out, (uint32_t)len);
         for (size_t j = 0; j < len; j++) {
@@ -3461,10 +3457,10 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
       }
     }
   } else if (op == 4) {
-    int fd = openat(dfd, leaf, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, b & 0777);
+    int fd = openat(dfd, leaf, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, b /* Entry.perm */);
     res = fd < 0 ? hvf_fs_err(e, errno) : (close(fd), hvf_fs_ok(e));
   } else if (op == 5) {
-    res = mkdirat(dfd, leaf, b & 0777) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+    res = mkdirat(dfd, leaf, b /* Entry.perm */) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
   } else if (op == 6) {
     int64_t was = b ? 0 : hvf_lsizeat(dfd, leaf);
     res         = unlinkat(dfd, leaf, b ? AT_REMOVEDIR : 0) != 0 ? hvf_fs_err(e, errno) : (hvf_share_add(sh, -was), hvf_fs_ok(e));
@@ -3479,7 +3475,7 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
       close(t);
     }
   } else if (op == 9) {
-    res = fchmodat(dfd, leaf, b & 0777, AT_SYMLINK_NOFOLLOW) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
+    res = fchmodat(dfd, leaf, b /* Entry.perm */, AT_SYMLINK_NOFOLLOW) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
   } else if (op == 10) {
     res = symlinkat(rel2, dfd, leaf) != 0 ? hvf_fs_err(e, errno) : hvf_fs_ok(e);
   } else if (op == 11) {
@@ -5242,8 +5238,8 @@ static void __attribute__((constructor)) hvf_use(void) {
 #ifdef CID(Hvf.random)
   io_eff(CID(Hvf.random), hvf_random_run);
 #endif
-#ifdef CID(Hvf.disk_open)
-  io_eff(CID(Hvf.disk_open), hvf_disk_open_run);
+#ifdef CID(Hvf.disk_open_with)
+  io_eff(CID(Hvf.disk_open_with), hvf_disk_open_with_run);
 #endif
 #ifdef CID(Hvf.signal_wait)
   io_eff(CID(Hvf.signal_wait), hvf_signal_wait_run);
@@ -5254,8 +5250,11 @@ static void __attribute__((constructor)) hvf_use(void) {
 #ifdef CID(Hvf.tcp_close_facts)
   io_eff(CID(Hvf.tcp_close_facts), hvf_tcp_close_facts_run);
 #endif
-#ifdef CID(Hvf.fd_limit)
-  io_eff(CID(Hvf.fd_limit), hvf_fd_limit_run);
+#ifdef CID(Hvf.nofile)
+  io_eff(CID(Hvf.nofile), hvf_nofile_run);
+#endif
+#ifdef CID(Hvf.set_nofile)
+  io_eff(CID(Hvf.set_nofile), hvf_set_nofile_run);
 #endif
 #ifdef CID(Hvf.fd_room)
   io_eff(CID(Hvf.fd_room), hvf_fd_room_run);
@@ -5269,14 +5268,8 @@ static void __attribute__((constructor)) hvf_use(void) {
 #ifdef CID(Hvf.disk_status)
   io_eff(CID(Hvf.disk_status), hvf_disk_status_run);
 #endif
-#ifdef CID(Hvf.disk_open_backing)
-  io_eff(CID(Hvf.disk_open_backing), hvf_disk_open_backing_run);
-#endif
 #ifdef CID(Hvf.disk_err)
   io_eff(CID(Hvf.disk_err), hvf_disk_err_run);
-#endif
-#ifdef CID(Hvf.disk_open_ro)
-  io_eff(CID(Hvf.disk_open_ro), hvf_disk_open_ro_run);
 #endif
 #ifdef CID(Hvf.disk_size)
   io_eff(CID(Hvf.disk_size), hvf_disk_size_run);

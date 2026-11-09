@@ -19,3 +19,12 @@ def L.access.busy():
 def L.access.opened():
   {==}
 
+
+def L.access.writer():
+  {==}
+
+def L.access.reader():
+  {==}
+
+def L.access.backing():
+  {==}

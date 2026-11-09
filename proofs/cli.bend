@@ -142,3 +142,12 @@ def L.cli.fwd_specs():
 def L.cli.fwd_checked():
   {==}
 
+
+def L.cli.display_fits():
+  {==}
+
+def L.cli.display_too_big():
+  {==}
+
+def L.cli.display_overflow():
+  {==}

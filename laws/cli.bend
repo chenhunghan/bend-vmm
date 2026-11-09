@@ -152,3 +152,15 @@ law cli.fwd_specs:
 
 law cli.fwd_checked:
   {C.Cli.check(["--forward", "2222:22,80"]) == "--forward takes [ADDR:]HOSTPORT:GUESTPORT[,...] (ports 1 to 65535) (not 2222:22,80)" : String}
+
+# Proposed: a display must fit the 16 MiB framebuffer (4 bytes a pixel):
+# 2048x2048 does, 2048x2049 does not, and a size whose product overflows 32
+# bits is refused rather than wrapped.
+law cli.display_fits:
+  {C.Cli.display("2048x2048") == Some{T.Display{2048, 2048}} : Maybe<&2, T.Display>}
+
+law cli.display_too_big:
+  {C.Cli.display("2048x2049") == None{} : Maybe<&2, T.Display>}
+
+law cli.display_overflow:
+  {C.Cli.display("65536x65537") == None{} : Maybe<&2, T.Display>}

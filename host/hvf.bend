@@ -9,6 +9,7 @@ import ../src/net/limits.bend as Lm
 import ../src/arm64/kvmexit.bend as Kx
 import ../src/arm64/gicplan.bend as Gp
 import ../src/arm64/regplan.bend as Rp
+import ../src/net/fds.bend as Fd
 
 # Hypervisor.framework effects (host/hvf.c) and their typed wrappers.
 # Words cross the boundary as U32; 64-bit values as (hi, lo) pairs.
@@ -65,7 +66,11 @@ def Hvf.out_flush() -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.fd_limit() -> IO(U32):
+def Hvf.nofile() -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.set_nofile(n: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -111,19 +116,11 @@ def Hvf.random(len: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.disk_open(path: String) -> IO(U32):
+def Hvf.disk_open_with(path: String, flags: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
 def Hvf.disk_err() -> IO(U32):
-  import "./hvf.c"
-  import "./hvf.js"
-
-def Hvf.disk_open_ro(path: String) -> IO(U32):
-  import "./hvf.c"
-  import "./hvf.js"
-
-def Hvf.disk_open_backing(path: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -707,3 +704,18 @@ def Host.tcp_close(+conn: U32) -> IO(U32):
   do IO<U32>:
     +ws : +List<U32> <- Hvf.tcp_close_facts(conn)
     Hvf.tcp_close(conn, Fl.Flush.close.code(Fl.Flush.close(U32.is_ne(Fl.Flush.word(ws, 0n), 0), Fl.Flush.word(ws, 1n), Lm.Lim.default())))
+
+# Sets the descriptor limit Bend chooses (src/net/fds.bend, Fds.soft) from
+# what the host reports, then hands over the guest flows' budget (Fds.room).
+def Host.nofile.set(ws: +List<U32>) -> IO(U32):
+  match ws:
+    case Con{+cur, Con{+max, Con{+top, Con{x, rest}}}}:
+      Hvf.set_nofile(Fd.Fds.soft(cur, max, top, U32.is_ne(x, 0)))
+    case _:
+      Hvf.set_nofile(1024)
+
+def Host.fds() -> IO(U32):
+  do IO<U32>:
+    +ws : +List<U32> <- Hvf.nofile()
+    +lim : U32 <- Host.nofile.set(ws)
+    Hvf.fd_room(Fd.Fds.room(lim))

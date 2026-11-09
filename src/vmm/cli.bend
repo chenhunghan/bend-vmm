@@ -2,6 +2,7 @@ import Base
 import ../boot/dtb.bend as T
 import ../net/addr.bend as Ad
 import ../lib/u64.bend as U
+import ./layout.bend as Ly
 
 # The command line (laws/cli.bend): which arguments are valid, and the
 # --display spec. host/main.bend fills its options from flag and value pairs
@@ -18,11 +19,17 @@ def Cli.known(+flag: String, fs: +List<String>) -> Bool:
     case Con{f, rest}:
       String.eq(f, flag) || Cli.known(flag, rest)
 
-# "WxH" as a display; None for anything malformed.
+# Whether a WxH display (4 bytes a pixel) fits the framebuffer
+# (Layout.fb_size), without overflowing 32 bits.
+def Cli.display.fits(+w: U32, +h: U32) -> Bool:
+  +px = (Ly.Layout.fb_size() / 4 : U32)
+  Bool.not(U32.is_zero(w) || U32.is_zero(h)) && U32.is_le(w, px) && U32.is_le(h, (px / w : U32))
+
+# "WxH" as a display; None for anything malformed or too large.
 def Cli.display.mk(w: Maybe<&2, U32>, h: Maybe<&2, U32>) -> Maybe<&2, T.Display>:
   match w h:
     case Some{+x} Some{+y}:
-      Bool.pick(Maybe<&2, T.Display>, U32.is_zero(x) || U32.is_zero(y), None{}, Some{T.Display{x, y}})
+      Bool.pick(Maybe<&2, T.Display>, Cli.display.fits(x, y), Some{T.Display{x, y}}, None{})
     case _ _:
       None{}
 

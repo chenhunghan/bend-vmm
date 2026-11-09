@@ -54,3 +54,4 @@ import ./proofs/listing.bend as Proofs_listing
 import ./proofs/kvmexit.bend as Proofs_kvmexit
 import ./proofs/gicplan.bend as Proofs_gicplan
 import ./proofs/regplan.bend as Proofs_regplan
+import ./proofs/entry.bend as Proofs_entry
