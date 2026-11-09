@@ -350,9 +350,12 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
     ok=1
     for i in 1 2 3; do
       # a pipe, not < <(...): the CI chroot has no /dev/fd ($! is the VMM)
-      (sleep $((2 * SLOW)); echo 'while :; do dd if=/dev/urandom of=/dev/vda bs=64k seek=$((RANDOM % 1000)) count=4 oflag=direct 2>/dev/null; done'; sleep $((30 * SLOW))) \
-        | ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/crash.qcow2" --cmdline "console=ttyAMA0 quiet" > /dev/null 2>&1 & p=$!
-      sleep $(((3 + i) * SLOW)); kill -9 $p; wait $p 2>/dev/null
+      # the writes start once the shell is up (boot time varies, on an
+      # emulated host most of all); the kill comes 1 + i seconds into them
+      (for _ in $(seq $((60 * SLOW))); do grep -aq "busybox shell" "$t/crash.log" 2>/dev/null && break; sleep 0.5; done; echo 'while :; do dd if=/dev/urandom of=/dev/vda bs=64k seek=$((RANDOM % 1000)) count=4 oflag=direct 2>/dev/null; done'; sleep $((30 * SLOW))) \
+        | ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/crash.qcow2" --cmdline "console=ttyAMA0 quiet" > "$t/crash.log" 2>&1 & p=$!
+      for _ in $(seq $((60 * SLOW))); do grep -aq "busybox shell" "$t/crash.log" 2>/dev/null && break; sleep 0.5; done
+      sleep $(((1 + i) * SLOW)); kill -9 $p; wait $p 2>/dev/null; rm -f "$t/crash.log"
       qemu-img check -q "$t/crash.qcow2"; rc=$?
       [ $rc = 0 ] || [ $rc = 3 ] || ok=0
     done

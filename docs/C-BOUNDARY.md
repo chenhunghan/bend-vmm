@@ -38,7 +38,11 @@ with the reason it stays.
 - The snapshot format version: `Snapf.version`, from the hypervisor C
   reports (0 Hypervisor.framework, 1 KVM).
 
-## Decisions still in C, and why (accepted 2026-11-09)
+## Decisions still in C, and why
+
+The project owner accepted this list on 2026-11-09 as the end state of
+"move to pure Bend without sacrificing performance": each stays for
+performance, or as defence beneath Bend's own checks.
 
 | Decision | Where | Why it stays |
 |---|---|---|
