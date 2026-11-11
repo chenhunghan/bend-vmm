@@ -28,6 +28,8 @@ io_eff(CID(Hvf.disk_copy), hvf_unavailable);
 io_eff(CID(Hvf.tcp_fill), () => 0);
 io_eff(CID(Hvf.net_copy), hvf_unavailable);
 io_eff(CID(Hvf.stage), hvf_unavailable);
+io_eff(CID(Hvf.disk_short), () => ({ $: CID(Nil) }));
+io_eff(CID(Hvf.disk_mark), () => 0);
 io_eff(CID(Hvf.zero_ram), hvf_unavailable);
 io_eff(CID(Hvf.disk_alloc), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.disk_xcopy), hvf_unavailable);

@@ -2015,9 +2015,17 @@ static int64_t hvf_iov_io(int fd, int out, off_t off, uint8_t** hva, u64* len, i
 
 // Hvf.disk_copy(disk, dir, off_hi, off_lo, iovs) -> U32: moves bytes between
 // disk image `disk` from the offset and the pieces of guest memory iovs, none
-// of them through Bend: dir 0 reads the disk into RAM (zeros past the
-// image's end), 1 writes RAM to the disk. 0, or 0xFFFFFFFF (a piece leaves
-// RAM, or an IO error).
+// of them through Bend: dir 0 reads the disk into RAM, 1 writes RAM to the
+// disk. One vectored call: 0 when it moved every byte; else 0xFFFFFFFF, and
+// what it did waits in Hvf.disk_short (Bend decides what follows:
+// src/host/transfer.bend).
+// (on cache lines of their own, as hvf_con: no hot global shares them)
+static struct {
+  uint32_t moved[HVF_MAX_DISKS], err[HVF_MAX_DISKS];
+  int64_t  lim;
+  u64      calls;
+} hvf_dshort __attribute__((aligned(128))) = {{0}, {0}, -1, 0};
+static u64 hvf_short_cap(void);
 Term hvf_disk_copy_run(Env e, Term* f, IoWork* w) {
   static uint8_t* hva[HVF_MAX_IOVS];
   static u64      len[HVF_MAX_IOVS];
@@ -2028,15 +2036,29 @@ Term hvf_disk_copy_run(Env e, Term* f, IoWork* w) {
   char*           b = io_cbuf(e, f[4], &nb, CID(Con));
   int             n = hvf_iovs(b, nb, hva, len, HVF_MAX_IOVS);
   free(b);
-  if (fd < 0 || n < 0) {
-    return hvf_disk_mark(f[0], (Term)HVF_ERR);
+  ssize_t k   = -1;
+  int     err = fd < 0 ? EBADF : EINVAL;
+  if (fd >= 0 && n >= 0) {
+    struct iovec v[HVF_MAX_IOVS];
+    u64          want = 0, cap = hvf_short_cap(), cap0 = cap;
+    for (int i = 0; i < n; i++) {
+      v[i].iov_base = hva[i];
+      v[i].iov_len  = len[i] < cap ? len[i] : cap;
+      cap -= v[i].iov_len;
+      want += len[i];
+    }
+    k   = cap0 == 0 && (errno = EINTR) ? -1 : out ? pwritev(fd, v, n, off) : preadv(fd, v, n, off);
+    err = errno;
+    if (k >= 0 && (u64)k == want) {
+      return (Term)0;
+    }
   }
-  u64 want = 0;
-  for (int i = 0; i < n; i++) {
-    want += len[i];
+  u32 d = (u32)f[0];
+  if (d < HVF_MAX_DISKS) {
+    hvf_dshort.moved[d] = k > 0 ? (uint32_t)k : 0;
+    hvf_dshort.err[d] = k < 0 ? (uint32_t)err : 0;
   }
-  int64_t k = hvf_iov_io(fd, out, off, hva, len, n, !out);
-  return hvf_disk_mark(f[0], (Term)(k < 0 || (out && (u64)k < want) ? HVF_ERR : 0));
+  return (Term)HVF_ERR;
 }
 
 // Disk images by layout (src/disk)
@@ -5089,6 +5111,32 @@ Term hvf_sock_path_max_run(Env e, Term* f, IoWork* w) {
   return (Term)(u32)(sizeof a.sun_path - 1);
 }
 
+// Fault injection for tests (Hvf.disk_copy): BEND_VMM_SHORT_IO=N lets an
+// attempt move at most N bytes, and every third one fails with EINTR (a cap
+// of 0 left: hvf_disk_copy_run takes it as EINTR). Unset: no cap.
+static u64 hvf_short_cap(void) {
+  if (hvf_dshort.lim < 0) {
+    const char* s  = getenv("BEND_VMM_SHORT_IO");
+    hvf_dshort.lim = s ? strtoll(s, NULL, 10) : 0;
+  }
+  return hvf_dshort.lim <= 0 ? UINT64_MAX : ++hvf_dshort.calls % 3 == 0 ? 0 : (u64)hvf_dshort.lim;
+}
+
+// Hvf.disk_short(disk) -> List<U32>: what the last attempt that fell short
+// did: [bytes moved, errno (0: none; with nothing moved, the end of the
+// file)].
+Term hvf_disk_short_run(Env e, Term* f, IoWork* w) {
+  u32      d     = (u32)f[0];
+  uint32_t ws[2] = {d < HVF_MAX_DISKS ? hvf_dshort.moved[d] : 0, d < HVF_MAX_DISKS ? hvf_dshort.err[d] : EBADF};
+  return hvf_words(e, ws, 2);
+}
+
+// Hvf.disk_mark(disk) -> U32: latches a failure for Hvf.disk_status. 0.
+Term hvf_disk_mark_run(Env e, Term* f, IoWork* w) {
+  hvf_disk_mark(f[0], (Term)HVF_ERR);
+  return (Term)0;
+}
+
 // The console log and share quotas (Hvf.console_log, Hvf.share_quota):
 // placed after the hot paths.
 
@@ -5513,6 +5561,12 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.disk_copy)
   io_eff(CID(Hvf.disk_copy), hvf_disk_copy_run);
+#endif
+#ifdef CID(Hvf.disk_short)
+  io_eff(CID(Hvf.disk_short), hvf_disk_short_run);
+#endif
+#ifdef CID(Hvf.disk_mark)
+  io_eff(CID(Hvf.disk_mark), hvf_disk_mark_run);
 #endif
 #ifdef CID(Hvf.zero_ram)
   io_eff(CID(Hvf.zero_ram), hvf_zero_ram_run);

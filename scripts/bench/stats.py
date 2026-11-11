@@ -16,8 +16,9 @@ contract:
   faster        the upper bound of degradation is at most zero
   slower        the lower bound of degradation is above zero
   inconclusive  the interval spans both
-  equivalent    (only with --margin) inconclusive, but the interval of
-                degradation lies inside [-margin, +margin]: a pass
+  equivalent    (only with --margin) inconclusive, but the upper bound of
+                degradation is at most the margin (no worse than it, however
+                much faster it may be): a pass
 A later --margin for the same metric wins.
 
 Exit status: 0 when no metric is slower, 1 when one is, 2 on bad input.
@@ -87,7 +88,7 @@ def main(argv):
             v = "SLOWER"; worst = 1
         else:
             v = "inconclusive"
-            if m in margins and -margins[m] <= lb and ub <= margins[m]:
+            if m in margins and ub <= margins[m]:
                 v = "equivalent (±%g)" % margins[m]
         print("%-18s %3d %9.4g %9.4g %+9.3g [%+9.3g,%+9.3g] %+9.3g [%+9.3g,%+9.3g] %+9.3g  %s %s" % (
             m, n, statistics.median(a for a, _ in ps), statistics.median(b for _, b in ps),

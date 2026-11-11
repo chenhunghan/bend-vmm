@@ -11,6 +11,8 @@ import ../src/arm64/gicplan.bend as Gp
 import ../src/arm64/regplan.bend as Rp
 import ../src/net/fds.bend as Fd
 import ../src/vmm/hostfiles.bend as Hf
+import ../src/host/range.bend as Rg
+import ../src/host/transfer.bend as Xf
 
 # Hypervisor.framework effects (host/hvf.c) and their typed wrappers.
 # Words cross the boundary as U32; 64-bit values as (hi, lo) pairs.
@@ -182,6 +184,14 @@ def Hvf.disk_write(disk: U32, off_hi: U32, off_lo: U32, bytes: +List<U32>) -> IO
   import "./hvf.js"
 
 def Hvf.disk_copy(disk: U32, dir: U32, off_hi: U32, off_lo: U32, iovs: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.disk_short(disk: U32) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.disk_mark(disk: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -686,12 +696,82 @@ def Host.iovs(xs: +List<V.Iov>) -> +List<U32>:
     case V.Iov{a, l} <> t:
       List.append(&2, U32, B.Bytes.le64(a), List.append(&2, U32, B.Bytes.le32(l), Host.iovs(t)))
 
+# Pieces as src/host/range.bend has them, and back as the host takes them.
+def Host.pieces(xs: +List<V.Iov>) -> +List<Rg.Piece>:
+  match xs:
+    case Nil{}:
+      []
+    case V.Iov{a, l} <> t:
+      Con{Rg.Piece{a, l}, Host.pieces(t)}
+
+def Host.piece_bytes(xs: +List<Rg.Piece>) -> +List<U32>:
+  match xs:
+    case Nil{}:
+      []
+    case Rg.Piece{a, l} <> t:
+      List.append(&2, U32, B.Bytes.le64(a), List.append(&2, U32, B.Bytes.le32(l), Host.piece_bytes(t)))
+
+# What an attempt that fell short did (Hvf.disk_short).
+def Host.io_of(+ws: +List<U32>) -> Xf.Io:
+  +moved = Host.first(ws)
+  +errno = Host.first(List.drop(&2, U32, ws, 1n))
+  Bool.pick(Xf.Io, U32.is_lt(0, moved), Xf.IoGot{moved}, Bool.pick(Xf.Io, U32.is_eq(errno, 0), Xf.IoEof{}, Xf.IoErr{errno}))
+
+# A failure is latched for Hvf.disk_status.
+def Host.disk_fail(+disk: U32, +rc: U32) -> IO(U32):
+  do IO<U32>:
+    _ : U32 <- Bool.pick(IO(U32), U32.is_eq(rc, 0), IO.pure(U32, 0), Hvf.disk_mark(disk))
+    return rc
+
+# A transfer that fell short, as src/host/transfer.bend decides: another
+# attempt from the next byte (Range.advance), until every byte moved, a
+# stop (a read zero-fills the rest; a write that stopped short fails) or a
+# failure. fuel: the most attempts.
+def Host.disk_go(fuel: Nat, nx: Xf.Next, +disk: U32, +dir: U32, +off: U.U64, +ps: +List<Rg.Piece>, +want: U32) -> IO(U32):
+  match fuel:
+    case 0n:
+      Host.disk_fail(disk, 4294967295)
+    case 1n+k:
+      match nx:
+        case Xf.XMore{+d}:
+          do IO<U32>:
+            +at : U.U64 = U.U64.add_u32(off, d)
+            +rc : U32 <- Hvf.disk_copy(disk, dir, U.U64.hi(at), U.U64.lo(at), Host.piece_bytes(Rg.Range.advance(ps, d)))
+            +ws : +List<U32> <- Hvf.disk_short(disk)
+            Host.disk_go(k, Bool.pick(Xf.Next, U32.is_eq(rc, 0), Xf.XStop{want}, Xf.Xfer.retry_at(d, Xf.Xfer.after(want, d, Host.io_of(ws)))), disk, dir, off, ps, want)
+        case Xf.XRetry{}:
+          Host.disk_fail(disk, 4294967295)
+        case Xf.XStop{+d}:
+          +read = U32.is_eq(dir, 0)
+          do IO<U32>:
+            _ : U32 <- Bool.pick(IO(U32), read && U32.is_lt(d, want), Hvf.zero_ram(Host.piece_bytes(Rg.Range.advance(ps, d))), IO.pure(U32, 0))
+            Host.disk_fail(disk, Xf.Xfer.status(Bool.not(read), want, Xf.XStop{d}))
+        case Xf.XFail{e}:
+          Host.disk_fail(disk, 4294967295)
+
+def Host.disk_copy.after(ok: Bool, +disk: U32, +dir: U32, +off: U.U64, +iovs: +List<V.Iov>) -> IO(U32):
+  match ok:
+    case True{}:
+      IO.pure(U32, 0)
+    case False{}:
+      do IO<U32>:
+        +ws : +List<U32> <- Hvf.disk_short(disk)
+        +want : U32 = V.Iov.total(iovs)
+        Host.disk_go(4096n, Xf.Xfer.retry_at(0, Xf.Xfer.after(want, 0, Host.io_of(ws))), disk, dir, off, Host.pieces(iovs), want)
+
+def Host.disk_copy.at(+disk: U32, +dir: U32, +oh: U32, +ol: U32, +iovs: +List<V.Iov>) -> IO(U32):
+  do IO<U32>:
+    +rc : U32 <- Hvf.disk_copy(disk, dir, oh, ol, Host.iovs(iovs))
+    Host.disk_copy.after(U32.is_eq(rc, 0), disk, dir, U.U64{oh, ol}, iovs)
+
 # Moves bytes between a disk and pieces of guest RAM on the host: dir 0 disk
-# to RAM, 1 RAM to disk.
+# to RAM, 1 RAM to disk. A complete transfer is one host call; one that falls
+# short comes back to Bend (Host.disk_go). (The signature and shape stay as
+# they were: interp calls this on the exit path's dispatch.)
 def Host.disk_copy(disk: U32, dir: U32, off: U.U64, iovs: +List<V.Iov>) -> IO(U32):
   match off:
     case U.U64{oh, ol}:
-      Hvf.disk_copy(disk, dir, oh, ol, Host.iovs(iovs))
+      Host.disk_copy.at(disk, dir, oh, ol, iovs)
 
 # Copies the bytes from offset off of what the host holds for TCP connection
 # conn into pieces of guest RAM.

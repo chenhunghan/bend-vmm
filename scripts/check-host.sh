@@ -429,6 +429,20 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   fi
 fi
 
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 8b. short disk transfers: every host read or write moves at most 1000 bytes, every third is interrupted (BEND_VMM_SHORT_IO)"
+  # src/host/transfer.bend decides what follows a short attempt (Host.disk_go):
+  # the guest must still read every byte and write where it asked
+  t=$(mktemp -d)
+  head -c 8388608 /dev/urandom > "$t/d.img"
+  want=$(python3 -c 'import hashlib, sys; print(hashlib.md5(open(sys.argv[1], "rb").read()).hexdigest())' "$t/d.img")
+  out=$(BEND_VMM_SHORT_IO=1000 drive 120 "busybox shell" 'md5sum /dev/vda; dd if=/dev/vda of=/dev/vda bs=65536 count=32 seek=64 iflag=direct oflag=direct 2>/dev/null; sync; echo SHORT-DONE\n' "SHORT-DONE" 'poweroff -f\n' -- \
+    ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/d.img" --cmdline "console=ttyAMA0 quiet" 2>&1 | tr -d '\r')
+  same=$(python3 -c 'import sys; b=open(sys.argv[1], "rb").read(); print(int(b[:2097152] == b[4194304:6291456]))' "$t/d.img")
+  grep -q "^$want  /dev/vda" <<<"$out" && [ "$same" = 1 ] && grn "ok: short and interrupted host transfers: the guest reads every byte and writes where it asked" || { red "failed: short disk transfers (copy $same)"; grep -a "vda\|SHORT\|error" <<<"$out" | tail -5; fail=1; }
+  rm -rf "$t"
+fi
+
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && command -v hdiutil >/dev/null; then
   echo "== 9. a full host disk: the guest sees I/O errors, not lost writes"
   t=$(mktemp -d)
