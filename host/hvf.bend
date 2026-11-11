@@ -55,6 +55,18 @@ def Hvf.exe_path() -> IO(String):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.out_limits(backlog: U32, batch_us: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.tty_mode(raw: U32, crlf: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.sock_path_max() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.set_exec(path: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
@@ -785,10 +797,20 @@ def Host.listen.clear(l: Hf.Listen, path: String) -> IO(String):
     case _:
       IO.pure(String, Hf.Files.listen.why(l))
 
+def Host.listen.facts(fits: Bool, +path: String, +max: U32) -> IO(String):
+  match fits:
+    case False{}:
+      IO.pure(String, Hf.Files.sock_path_why(path, max))
+    case True{}:
+      do IO<String>:
+        +ws : +List<U32> <- Hvf.sock_facts(path)
+        Host.listen.clear(Host.listen.of(ws), path)
+
+# (a path too long for a socket's address is refused first, saying so)
 def Host.listen.ok(+path: String) -> IO(String):
   do IO<String>:
-    +ws : +List<U32> <- Hvf.sock_facts(path)
-    Host.listen.clear(Host.listen.of(ws), path)
+    +max : U32 <- Hvf.sock_path_max()
+    Host.listen.facts(Hf.Files.sock_path_fits(path, max), path, max)
 
 # Whether the LAN directory may be used (Files.dir_trusted), made 0700 when
 # missing.

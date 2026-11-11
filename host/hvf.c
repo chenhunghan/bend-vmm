@@ -215,7 +215,7 @@ typedef struct {
 #endif
 } HvfCpu;
 
-static HvfCpu hvf_cpus[HVF_MAX_CPUS];
+static HvfCpu hvf_cpus[HVF_MAX_CPUS] __attribute__((aligned(128)));
 
 // BEND_VMM_TRACE: bit 1 prints every exception exit on stderr, bit 2 the
 // console input, interrupt line changes and TCP holds, bit 4 staged
@@ -1498,26 +1498,34 @@ Term hvf_kick_run(Env e, Term* f, IoWork* w) {
 // Console and disks
 // =================
 
-// Console output is buffered and written by a flusher thread within a
-// millisecond, so a guest printing byte by byte costs no syscall per byte.
-static pthread_mutex_t hvf_out_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  hvf_out_cv = PTHREAD_COND_INITIALIZER;
-#define HVF_OUT_MAX ((size_t)16 << 20)
-static char*           hvf_obuf;
-static size_t          hvf_on, hvf_ocap;
-static int             hvf_out_started;
+// Console output is buffered and written by a flusher thread within
+// hvf_con.us (Out.batch_us), so a guest printing byte by byte costs no
+// syscall per byte; past hvf_con.max waiting (Out.backlog) it is dropped.
+// src/dev/conlog.bend decides both (Hvf.out_limits).
+// (one struct on cache lines of its own: the event loop and the flusher
+// thread share it, and no other global may share its lines; Apple's lines
+// are 128 bytes)
+static struct {
+  pthread_mutex_t mu;
+  pthread_cond_t  cv;
+  size_t          max;
+  useconds_t      us;
+  char*           buf;
+  size_t          n, cap;
+  int             started;
+} hvf_con __attribute__((aligned(128))) = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, (size_t)16 << 20, 1000, NULL, 0, 0, 0};
 
 // Serializes writers, so the flush at exit waits for one in flight.
-static pthread_mutex_t hvf_out_wmu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t hvf_out_wmu __attribute__((aligned(128))) = PTHREAD_MUTEX_INITIALIZER;
 
 static void hvf_out_flush(void) {
   pthread_mutex_lock(&hvf_out_wmu);
-  pthread_mutex_lock(&hvf_out_mu);
-  char*  buf = hvf_obuf;
-  size_t n   = hvf_on;
-  hvf_obuf = NULL;
-  hvf_on = hvf_ocap = 0;
-  pthread_mutex_unlock(&hvf_out_mu);
+  pthread_mutex_lock(&hvf_con.mu);
+  char*  buf = hvf_con.buf;
+  size_t n   = hvf_con.n;
+  hvf_con.buf = NULL;
+  hvf_con.n = hvf_con.cap = 0;
+  pthread_mutex_unlock(&hvf_con.mu);
   // stdout may be non-blocking (the runtime's IO loop) and a slow pipe
   // reader fills it: wait until it drains rather than drop output.
   for (size_t at = 0; at < n;) {
@@ -1538,12 +1546,12 @@ static void hvf_out_flush(void) {
 
 static void* hvf_out_thread(void* arg) {
   for (;;) {
-    pthread_mutex_lock(&hvf_out_mu);
-    while (hvf_on == 0) {
-      pthread_cond_wait(&hvf_out_cv, &hvf_out_mu);
+    pthread_mutex_lock(&hvf_con.mu);
+    while (hvf_con.n == 0) {
+      pthread_cond_wait(&hvf_con.cv, &hvf_con.mu);
     }
-    pthread_mutex_unlock(&hvf_out_mu);
-    usleep(1000);
+    pthread_mutex_unlock(&hvf_con.mu);
+    usleep(hvf_con.us);
     hvf_out_flush();
   }
   return NULL;
@@ -1557,28 +1565,28 @@ Term hvf_out_run(Env e, Term* f, IoWork* w) {
   if (buf == NULL) {
     return (Term)HVF_ERR;
   }
-  pthread_mutex_lock(&hvf_out_mu);
-  if (!hvf_out_started) {
+  pthread_mutex_lock(&hvf_con.mu);
+  if (!hvf_con.started) {
     pthread_t t;
-    hvf_out_started = 1;
+    hvf_con.started = 1;
     pthread_create(&t, NULL, hvf_out_thread, NULL);
     atexit(hvf_out_flush);
   }
   // nobody draining stdout (a stalled pipe) must not grow the VMM without
   // bound: past 16 MiB waiting, console output is dropped
-  if (hvf_on + n > HVF_OUT_MAX) {
+  if (hvf_con.n + n > hvf_con.max) {
     n = 0;
   }
-  if (hvf_on + n > hvf_ocap) {
-    hvf_ocap = (hvf_on + n) * 2 + 4096;
-    hvf_obuf = io_mem(realloc(hvf_obuf, hvf_ocap));
+  if (hvf_con.n + n > hvf_con.cap) {
+    hvf_con.cap = (hvf_con.n + n) * 2 + 4096;
+    hvf_con.buf = io_mem(realloc(hvf_con.buf, hvf_con.cap));
   }
   if (n) {
-    memcpy(hvf_obuf + hvf_on, buf, n);
-    hvf_on += n;
+    memcpy(hvf_con.buf + hvf_con.n, buf, n);
+    hvf_con.n += n;
   }
-  pthread_cond_signal(&hvf_out_cv);
-  pthread_mutex_unlock(&hvf_out_mu);
+  pthread_cond_signal(&hvf_con.cv);
+  pthread_mutex_unlock(&hvf_con.mu);
   free(buf);
   return (Term)0;
 }
@@ -1652,13 +1660,19 @@ static void hvf_tty_restore(void) {
   }
 }
 
+// What raw means (Hvf.tty_mode, src/dev/escape.bend): raw input, and CR LF
+// kept on output.
+static int hvf_tty_in_raw = 1, hvf_tty_crlf = 1;
+
 static void hvf_tty_raw(void) {
-  if (hvf_raw || !isatty(0) || tcgetattr(0, &hvf_tty) != 0) {
+  if (hvf_raw || !hvf_tty_in_raw || !isatty(0) || tcgetattr(0, &hvf_tty) != 0) {
     return;
   }
   struct termios t = hvf_tty;
   cfmakeraw(&t);
-  t.c_oflag |= OPOST | ONLCR;
+  if (hvf_tty_crlf) {
+    t.c_oflag |= OPOST | ONLCR;
+  }
   if (tcsetattr(0, TCSANOW, &t) == 0) {
     hvf_raw = 1;
     atexit(hvf_tty_restore);
@@ -5049,6 +5063,32 @@ Term hvf_fb_present_run(Env e, Term* f, IoWork* w) {
 
 #endif
 
+// Hvf.out_limits(backlog, batch_us) -> U32: console output's limits
+// (src/dev/conlog.bend: Out.backlog, Out.batch_us). 0.
+Term hvf_out_limits_run(Env e, Term* f, IoWork* w) {
+  pthread_mutex_lock(&hvf_con.mu);
+  hvf_con.max = (size_t)(u32)f[0];
+  hvf_con.us  = (useconds_t)(u32)f[1];
+  pthread_mutex_unlock(&hvf_con.mu);
+  return (Term)0;
+}
+
+// Hvf.tty_mode(raw, crlf) -> U32: what a terminal console becomes
+// (src/dev/escape.bend: Esc.raw_input, Esc.out_crlf). 0.
+Term hvf_tty_mode_run(Env e, Term* f, IoWork* w) {
+  hvf_tty_in_raw = (u32)f[0] != 0;
+  hvf_tty_crlf   = (u32)f[1] != 0;
+  return (Term)0;
+}
+
+// Hvf.sock_path_max() -> U32: the bytes a Unix socket's path may have (its
+// address field less the closing 0); Bend checks paths against it
+// (Files.sock_path_fits).
+Term hvf_sock_path_max_run(Env e, Term* f, IoWork* w) {
+  struct sockaddr_un a;
+  return (Term)(u32)(sizeof a.sun_path - 1);
+}
+
 // The console log and share quotas (Hvf.console_log, Hvf.share_quota):
 // placed after the hot paths.
 
@@ -5386,6 +5426,15 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.reexec)
   io_eff(CID(Hvf.reexec), hvf_reexec_run);
+#endif
+#ifdef CID(Hvf.out_limits)
+  io_eff(CID(Hvf.out_limits), hvf_out_limits_run);
+#endif
+#ifdef CID(Hvf.tty_mode)
+  io_eff(CID(Hvf.tty_mode), hvf_tty_mode_run);
+#endif
+#ifdef CID(Hvf.sock_path_max)
+  io_eff(CID(Hvf.sock_path_max), hvf_sock_path_max_run);
 #endif
 #ifdef CID(Hvf.exe_path)
   io_eff(CID(Hvf.exe_path), hvf_exe_path_run);

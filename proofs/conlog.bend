@@ -19,3 +19,9 @@ def L.conlog.moves_keep1():
 
 def L.conlog.moves_keep0():
   {==}
+
+def L.conlog.out_batch():
+  {==}
+
+def L.conlog.out_backlog():
+  {==}

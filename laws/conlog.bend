@@ -24,3 +24,11 @@ law conlog.moves_keep1:
 
 law conlog.moves_keep0:
   {L.Log.moves("log", 0) == [] : List<L.Rename>}
+
+# Proposed: console output waits at most 1 ms, and past 16 MiB waiting it
+# is dropped.
+law conlog.out_batch:
+  {L.Out.batch_us() == 1000 : U32}
+
+law conlog.out_backlog:
+  {L.Out.backlog() == 16777216 : U32}

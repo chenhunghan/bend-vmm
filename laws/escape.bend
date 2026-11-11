@@ -32,3 +32,7 @@ law escape.armed_then_key:
 
 law escape.piped_passes_ctrl_a:
   {E.Esc.feed([1, 120], E.Esc.new(False{})) == (E.Esc{False{}, False{}}, [E.KBytes{[1, 120]}]) : E.Esc & +List<E.Key>}
+
+# Proposed: a terminal console takes raw input and keeps CR LF on output.
+law escape.tty_mode:
+  {E.Esc.raw_input() && E.Esc.out_crlf() == True{} : Bool}

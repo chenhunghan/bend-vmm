@@ -1956,6 +1956,8 @@ def args_bytes(args: List<String>) -> +List<U32>:
     +sys : String <- H.Hvf.exe_path()
     _ : U32 <- H.Hvf.set_exec(Hf.Files.exec_path(sys, Maybe.default(&1, String, List.head(&1, String, prog), "")))
     _ : U32 <- H.Hvf.net_limits(Lim.Lim.wire(Lim.Lim.default()))
+    _ : U32 <- H.Hvf.out_limits(Cl.Out.backlog(), Cl.Out.batch_us())
+    _ : U32 <- H.Hvf.tty_mode(Bool.to_u32(Es.Esc.raw_input()), Bool.to_u32(Es.Esc.out_crlf()))
     _ : U32 <- H.Host.fds()
     _ : U32 <- H.Hvf.signals(Ck.Clients.mask(Ck.Clients.signals()))
     _ : U32 <- H.Hvf.accept_retry(Ck.Clients.full_retry_ms())

@@ -9,7 +9,7 @@ carries out plans that Bend hands it.
 This file is the audit of that boundary. It covered all 113 effects in
 host/hvf.c as of 2026-11-09 and says, for each group, where the
 decisions are made; the migration ledger at the end lists every effect
-(118 as of 2026-11-11) with its target in the C-to-Bend plan. The
+(121 as of 2026-11-11) with its target in the C-to-Bend plan. The
 section before it lists every decision still in C, with the reason it
 stays.
 
@@ -41,6 +41,20 @@ stays.
   reports (0 Hypervisor.framework, 1 KVM).
 
 ## Moved on 2026-11-11 (C_TO_BEND.md, stages 2 and 4)
+
+- Console output's limits: it waits at most 1 ms (`Out.batch_us`) and past
+  16 MiB waiting it is dropped (`Out.backlog`), src/dev/conlog.bend, handed
+  to C at startup (`Hvf.out_limits`). The console buffer's globals now sit
+  on 128-byte cache lines of their own (as do the vCPU slots): moving the
+  limits into variables first cost +0.06 to +0.12 us per exit through what
+  shared their lines.
+- The terminal console's mode: raw input and CR LF kept on output
+  (`Esc.raw_input`, `Esc.out_crlf`, src/dev/escape.bend; `Hvf.tty_mode`).
+- A socket path too long for the address: refused by Bend before
+  listening, saying so (`Files.sock_path_fits` against
+  `Hvf.sock_path_max`); C's own check stays beneath it.
+- A/B (30 pairs): exit +0.02 us median against 1547f10 (within +-0.05);
+  against f8983a4 exit +0.0125 us, boot -1 ms (within the drift caps).
 
 - The 9p descriptor cache's policy: which operations empty a share's open
   files (`Fdc.invalidates`, passed as bit 256 of the operation) and which
@@ -93,7 +107,7 @@ from the hot path can still move exit latency
 
 ## Migration ledger (C_TO_BEND.md)
 
-Every effect host/hvf.c registers, as of 2026-11-11 (118; regenerate the
+Every effect host/hvf.c registers, as of 2026-11-11 (121; regenerate the
 list with `grep -o 'io_eff(CID(Hvf\.[a-z_0-9]*)' host/hvf.c`). Target and
 primitive are the plan's proposals, not existing modules; line numbers are
 host/hvf.c's at the commit that changed this table. Test names what checks
@@ -106,121 +120,124 @@ row but the decisions listed as moved above.
 | `init` | `hvf_init_run` (1141) | host/vcpu.bend, host/platform/{hvf,kvm}.bend | dedicated workers, ABI bindings | 1, 5 | check-host boot and SMP; model: tests/handoff.bend | exit, guest mmio-exit | C; blocked: toolchain |
 | `vcpu` | `hvf_vcpu_run` (1413) | host/vcpu.bend, host/platform/{hvf,kvm}.bend | dedicated workers, ABI bindings | 1, 5 | check-host boot and SMP; model: tests/handoff.bend | exit, guest mmio-exit | C; blocked: toolchain |
 | `vcpu_queue` | `hvf_vcpu_queue_run` (1462) | host/vcpu.bend, host/platform/{hvf,kvm}.bend | dedicated workers, ABI bindings | 1, 5 | check-host boot and SMP; model: tests/handoff.bend | exit, guest mmio-exit | C; blocked: toolchain |
-| `pause` | `hvf_pause_run` (3604) | host/vcpu.bend, host/platform/{hvf,kvm}.bend | dedicated workers, ABI bindings | 1, 5 | check-host boot and SMP; model: tests/handoff.bend | exit, guest mmio-exit | C; blocked: toolchain |
-| `resume` | `hvf_resume_run` (3621) | host/vcpu.bend, host/platform/{hvf,kvm}.bend | dedicated workers, ABI bindings | 1, 5 | check-host boot and SMP; model: tests/handoff.bend | exit, guest mmio-exit | C; blocked: toolchain |
-| `pause_state` | `hvf_pause_state_run` (3637) | host/vcpu.bend, host/platform/{hvf,kvm}.bend | dedicated workers, ABI bindings | 1, 5 | check-host boot and SMP; model: tests/handoff.bend | exit, guest mmio-exit | C; blocked: toolchain |
+| `pause` | `hvf_pause_run` (3618) | host/vcpu.bend, host/platform/{hvf,kvm}.bend | dedicated workers, ABI bindings | 1, 5 | check-host boot and SMP; model: tests/handoff.bend | exit, guest mmio-exit | C; blocked: toolchain |
+| `resume` | `hvf_resume_run` (3635) | host/vcpu.bend, host/platform/{hvf,kvm}.bend | dedicated workers, ABI bindings | 1, 5 | check-host boot and SMP; model: tests/handoff.bend | exit, guest mmio-exit | C; blocked: toolchain |
+| `pause_state` | `hvf_pause_state_run` (3651) | host/vcpu.bend, host/platform/{hvf,kvm}.bend | dedicated workers, ABI bindings | 1, 5 | check-host boot and SMP; model: tests/handoff.bend | exit, guest mmio-exit | C; blocked: toolchain |
 | `irq` | `hvf_irq_run` (1481) | host/vcpu.bend, host/platform/{hvf,kvm}.bend | dedicated workers, ABI bindings | 1, 5 | check-host boot and SMP; model: tests/handoff.bend | exit, guest mmio-exit | C; blocked: toolchain |
 | `kick` | `hvf_kick_run` (1490) | host/vcpu.bend, host/platform/{hvf,kvm}.bend | dedicated workers, ABI bindings | 1, 5 | check-host boot and SMP; model: tests/handoff.bend | exit, guest mmio-exit | C; blocked: toolchain |
-| `snap_plans` | `hvf_snap_plans_run` (2185) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
-| `snap_save` | `hvf_snap_save_run` (3722) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
-| `snap_commit` | `hvf_snap_commit_run` (3816) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
-| `rename` | `hvf_rename_run` (3852) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C renames; also runs the console log renames |
-| `snap_drop` | `hvf_snap_drop_run` (3765) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
-| `snap_peek` | `hvf_snap_peek_run` (3895) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
-| `snap_load` | `hvf_snap_load_run` (3927) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
-| `snap_open` | `hvf_snap_open_run` (3870) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
-| `snap_info` | `hvf_snap_info_run` (3993) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
-| `snap_args` | `hvf_snap_args_run` (4002) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
-| `snap_machine` | `hvf_snap_machine_run` (4017) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
-| `snap_gic` | `hvf_snap_gic_run` (4022) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
+| `snap_plans` | `hvf_snap_plans_run` (2199) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
+| `snap_save` | `hvf_snap_save_run` (3736) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
+| `snap_commit` | `hvf_snap_commit_run` (3830) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
+| `rename` | `hvf_rename_run` (3866) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C renames; also runs the console log renames |
+| `snap_drop` | `hvf_snap_drop_run` (3779) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
+| `snap_peek` | `hvf_snap_peek_run` (3909) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
+| `snap_load` | `hvf_snap_load_run` (3941) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
+| `snap_open` | `hvf_snap_open_run` (3884) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
+| `snap_info` | `hvf_snap_info_run` (4007) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
+| `snap_args` | `hvf_snap_args_run` (4016) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
+| `snap_machine` | `hvf_snap_machine_run` (4031) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
+| `snap_gic` | `hvf_snap_gic_run` (4036) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
 | `load` | `hvf_load_run` (1249) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |
 | `write` | `hvf_write_run` (1376) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |
 | `read` | `hvf_read_run` (1391) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |
-| `fw_load` | `hvf_fw_load_run` (4788) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |
-| `flash` | `hvf_flash_run` (4826) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |
+| `fw_load` | `hvf_fw_load_run` (4802) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |
+| `flash` | `hvf_flash_run` (4840) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |
 | `file_size` | `hvf_file_size_run` (1366) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |
-| `zero_ram` | `hvf_zero_ram_run` (2032) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |
-| `inflate_ram` | `hvf_inflate_ram_run` (2099) | host/memory.bend over src/lib/inflate.bend | packed buffers, efficient loops | 6 | tests/inflate.bend, tests/oracles/inflate.py; check-host gzip kernel | boot (gzip kernel), compressed qcow2 | C (zlib); Bend spec and oracle done |
-| `inflate_disk` | `hvf_inflate_disk_run` (2125) | host/memory.bend over src/lib/inflate.bend | packed buffers, efficient loops | 6 | tests/inflate.bend, tests/oracles/inflate.py; check-host gzip kernel | boot (gzip kernel), compressed qcow2 | C (zlib); Bend spec and oracle done |
-| `disk_open_with` | `hvf_disk_open_with_run` (1829) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
-| `disk_status` | `hvf_disk_status_run` (1847) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
-| `disk_err` | `hvf_disk_err_run` (1822) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
-| `disk_size` | `hvf_disk_size_run` (1863) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
-| `disk_flush` | `hvf_disk_flush_run` (1875) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
-| `disk_read` | `hvf_disk_read_run` (1894) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
-| `disk_write` | `hvf_disk_write_run` (1906) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
-| `disk_copy` | `hvf_disk_copy_run` (2007) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: tried 2026-11-11, blocked on code layout |
-| `disk_alloc` | `hvf_disk_alloc_run` (2048) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
-| `disk_xcopy` | `hvf_disk_xcopy_run` (2067) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
-| `signals` | `hvf_signals_run` (1731) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `console_log` | `hvf_console_log_run` (5075) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `console_size` | `hvf_console_size_run` (5085) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `console_reopen` | `hvf_console_reopen_run` (5094) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C opens; Bend plans the renames (Log.moves, 2026-11-11) |
-| `err_text` | `hvf_err_text_run` (4650) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `zero_ram` | `hvf_zero_ram_run` (2046) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |
+| `inflate_ram` | `hvf_inflate_ram_run` (2113) | host/memory.bend over src/lib/inflate.bend | packed buffers, efficient loops | 6 | tests/inflate.bend, tests/oracles/inflate.py; check-host gzip kernel | boot (gzip kernel), compressed qcow2 | C (zlib); Bend spec and oracle done |
+| `inflate_disk` | `hvf_inflate_disk_run` (2139) | host/memory.bend over src/lib/inflate.bend | packed buffers, efficient loops | 6 | tests/inflate.bend, tests/oracles/inflate.py; check-host gzip kernel | boot (gzip kernel), compressed qcow2 | C (zlib); Bend spec and oracle done |
+| `disk_open_with` | `hvf_disk_open_with_run` (1843) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
+| `disk_status` | `hvf_disk_status_run` (1861) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
+| `disk_err` | `hvf_disk_err_run` (1836) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
+| `disk_size` | `hvf_disk_size_run` (1877) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
+| `disk_flush` | `hvf_disk_flush_run` (1889) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
+| `disk_read` | `hvf_disk_read_run` (1908) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
+| `disk_write` | `hvf_disk_write_run` (1920) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
+| `disk_copy` | `hvf_disk_copy_run` (2021) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: tried 2026-11-11, blocked on code layout |
+| `disk_alloc` | `hvf_disk_alloc_run` (2062) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
+| `disk_xcopy` | `hvf_disk_xcopy_run` (2081) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
+| `signals` | `hvf_signals_run` (1745) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `console_log` | `hvf_console_log_run` (5115) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `console_size` | `hvf_console_size_run` (5125) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `console_reopen` | `hvf_console_reopen_run` (5134) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C opens; Bend plans the renames (Log.moves, 2026-11-11) |
+| `err_text` | `hvf_err_text_run` (4664) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
 | `set_args` | `hvf_set_args_run` (1306) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
 | `set_prog` | `hvf_set_prog_run` (1297) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
 | `prog` | `hvf_prog_run` (1302) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
 | `reexec` | `hvf_reexec_run` (1347) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C runs execv; Bend chose the path (2026-11-11) |
 | `exe_path` | `hvf_exe_path_run` (1318) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C reports a fact (2026-11-11) |
 | `set_exec` | `hvf_set_exec_run` (1336) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C keeps what Bend chose (Files.exec_path, 2026-11-11) |
-| `out` | `hvf_out_run` (1554) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `out_flush` | `hvf_out_flush_run` (1610) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `stdin` | `hvf_stdin_run` (1617) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `stdin_tty` | `hvf_stdin_tty_run` (1765) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `stdin_wait` | `hvf_stdin_wait_run` (1772) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `random` | `hvf_random_run` (1633) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `signal_wait` | `hvf_signal_wait_run` (1739) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `log_state` | `hvf_log_state_run` (1592) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `log_put` | `hvf_log_put_run` (1601) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `now` | `hvf_now_run` (1886) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `nofile` | `hvf_nofile_run` (2299) | host/main.bend | OS-call bindings only | 2 | check-host descriptor budget | exit (layout) | C acts; Bend decides (Fds) |
-| `set_nofile` | `hvf_set_nofile_run` (2314) | host/main.bend | OS-call bindings only | 2 | check-host descriptor budget | exit (layout) | C acts; Bend decides (Fds) |
-| `fd_room` | `hvf_fd_room_run` (2331) | host/main.bend | OS-call bindings only | 2 | check-host descriptor budget | exit (layout) | C acts; Bend decides (Fds) |
-| `accept_retry` | `hvf_accept_retry_run` (4370) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
-| `sock_facts` | `hvf_sock_facts_run` (4049) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
-| `sock_remove` | `hvf_sock_remove_run` (4073) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
-| `ctl_listen` | `hvf_ctl_listen_run` (4330) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
-| `ctl_next` | `hvf_ctl_next_run` (4427) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
-| `ctl_reply` | `hvf_ctl_reply_run` (4439) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
-| `vsock_base` | `hvf_vsock_base_run` (4466) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
-| `unix_connect` | `hvf_unix_connect_run` (4481) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
-| `vsock_listen` | `hvf_vsock_listen_run` (4522) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
-| `vsock_accept` | `hvf_vsock_accept_run` (4626) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
-| `fwd_listen` | `hvf_fwd_listen_run` (4658) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
-| `fwd_accept` | `hvf_fwd_accept_run` (4744) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
-| `vsock_file` | `hvf_vsock_file_run` (4609) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
-| `net_limits` | `hvf_net_limits_run` (2196) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `tcp_connect` | `hvf_tcp_connect_run` (2437) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `tcp_wait` | `hvf_tcp_wait_run` (2479) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `tcp_recv` | `hvf_tcp_recv_run` (2505) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `tcp_release` | `hvf_tcp_release_run` (2612) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `net_holds` | `hvf_net_holds_run` (2868) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `tcp_fill` | `hvf_tcp_fill_run` (2558) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `stage` | `hvf_stage_run` (2633) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `stage_drop` | `hvf_stage_drop_run` (2674) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `tcp_send_staged` | `hvf_tcp_send_staged_run` (2770) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `net_copy` | `hvf_net_copy_run` (2586) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `tcp_shutdown` | `hvf_tcp_shutdown_run` (2912) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `tcp_flush` | `hvf_tcp_flush_run` (2808) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `udp_ages` | `hvf_udp_ages_run` (3006) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `udp_close` | `hvf_udp_close_run` (3023) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `tcp_over` | `hvf_tcp_over_run` (2896) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `tcp_flush_act` | `hvf_tcp_flush_act_run` (2828) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `nat_send` | `hvf_nat_send_run` (2884) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `tcp_close` | `hvf_tcp_close_run` (2952) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `tcp_abort` | `hvf_tcp_abort_run` (2975) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `udp_send` | `hvf_udp_send_run` (3036) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C sends; Bend picks the flow (Udp.find, 2026-11-11) |
-| `udp_flows` | `hvf_udp_flows_run` (2988) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C reports a fact (2026-11-11) |
-| `set_dns` | `hvf_set_dns_run` (2258) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `dns` | `hvf_dns_run` (2264) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `udp_recv` | `hvf_udp_recv_run` (3119) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `tcp_close_facts` | `hvf_tcp_close_facts_run` (2943) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
-| `mkdir` | `hvf_mkdir_run` (4082) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
-| `dir_facts` | `hvf_dir_facts_run` (4093) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
-| `lan_open` | `hvf_lan_open_run` (4156) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
-| `lan_send` | `hvf_lan_send_run` (4215) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
-| `lan_recv` | `hvf_lan_recv_run` (4278) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
-| `lan_to_ram` | `hvf_lan_to_ram_run` (4287) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
-| `lan_release` | `hvf_lan_release_run` (4308) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
-| `share_quota` | `hvf_share_quota_run` (5100) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
-| `share_usage` | `hvf_share_usage_run` (5116) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
-| `share_open` | `hvf_share_open_run` (3183) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
-| `fs` | `hvf_fs_run` (3377) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
-| `fdc_stamps` | `hvf_fdc_stamps_run` (3297) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | Bend decides eviction (2026-11-11) |
-| `fdc_put` | `hvf_fdc_put_run` (3308) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | Bend decides eviction (2026-11-11) |
-| `fb_init` | `hvf_fb_init_run` (4882) | host/display.bend | window buffer presentation | 5 | check-host screendump | display (to add) | C and Objective-C; blocked: toolchain |
-| `fb_dump` | `hvf_fb_dump_run` (4902) | host/display.bend | window buffer presentation | 5 | check-host screendump | display (to add) | C and Objective-C; blocked: toolchain |
-| `fb_present` | `hvf_fb_present_run` (5000) | host/display.bend | window buffer presentation | 5 | check-host screendump | display (to add) | C and Objective-C; blocked: toolchain |
+| `out_limits` | `hvf_out_limits_run` (5068) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C keeps what Bend chose (Out.backlog, Out.batch_us, 2026-11-11) |
+| `tty_mode` | `hvf_tty_mode_run` (5078) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C applies what Bend chose (Esc.raw_input, Esc.out_crlf, 2026-11-11) |
+| `out` | `hvf_out_run` (1562) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `out_flush` | `hvf_out_flush_run` (1618) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `stdin` | `hvf_stdin_run` (1625) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `stdin_tty` | `hvf_stdin_tty_run` (1779) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `stdin_wait` | `hvf_stdin_wait_run` (1786) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `random` | `hvf_random_run` (1641) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `signal_wait` | `hvf_signal_wait_run` (1753) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `log_state` | `hvf_log_state_run` (1600) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `log_put` | `hvf_log_put_run` (1609) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `now` | `hvf_now_run` (1900) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `nofile` | `hvf_nofile_run` (2313) | host/main.bend | OS-call bindings only | 2 | check-host descriptor budget | exit (layout) | C acts; Bend decides (Fds) |
+| `set_nofile` | `hvf_set_nofile_run` (2328) | host/main.bend | OS-call bindings only | 2 | check-host descriptor budget | exit (layout) | C acts; Bend decides (Fds) |
+| `fd_room` | `hvf_fd_room_run` (2345) | host/main.bend | OS-call bindings only | 2 | check-host descriptor budget | exit (layout) | C acts; Bend decides (Fds) |
+| `accept_retry` | `hvf_accept_retry_run` (4384) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
+| `sock_facts` | `hvf_sock_facts_run` (4063) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
+| `sock_path_max` | `hvf_sock_path_max_run` (5087) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C reports a fact; Bend checks paths (Files.sock_path_fits, 2026-11-11) |
+| `sock_remove` | `hvf_sock_remove_run` (4087) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
+| `ctl_listen` | `hvf_ctl_listen_run` (4344) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
+| `ctl_next` | `hvf_ctl_next_run` (4441) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
+| `ctl_reply` | `hvf_ctl_reply_run` (4453) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
+| `vsock_base` | `hvf_vsock_base_run` (4480) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
+| `unix_connect` | `hvf_unix_connect_run` (4495) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
+| `vsock_listen` | `hvf_vsock_listen_run` (4536) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
+| `vsock_accept` | `hvf_vsock_accept_run` (4640) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
+| `fwd_listen` | `hvf_fwd_listen_run` (4672) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
+| `fwd_accept` | `hvf_fwd_accept_run` (4758) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
+| `vsock_file` | `hvf_vsock_file_run` (4623) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
+| `net_limits` | `hvf_net_limits_run` (2210) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `tcp_connect` | `hvf_tcp_connect_run` (2451) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `tcp_wait` | `hvf_tcp_wait_run` (2493) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `tcp_recv` | `hvf_tcp_recv_run` (2519) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `tcp_release` | `hvf_tcp_release_run` (2626) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `net_holds` | `hvf_net_holds_run` (2882) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `tcp_fill` | `hvf_tcp_fill_run` (2572) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `stage` | `hvf_stage_run` (2647) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `stage_drop` | `hvf_stage_drop_run` (2688) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `tcp_send_staged` | `hvf_tcp_send_staged_run` (2784) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `net_copy` | `hvf_net_copy_run` (2600) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `tcp_shutdown` | `hvf_tcp_shutdown_run` (2926) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `tcp_flush` | `hvf_tcp_flush_run` (2822) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `udp_ages` | `hvf_udp_ages_run` (3020) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `udp_close` | `hvf_udp_close_run` (3037) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `tcp_over` | `hvf_tcp_over_run` (2910) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `tcp_flush_act` | `hvf_tcp_flush_act_run` (2842) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `nat_send` | `hvf_nat_send_run` (2898) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `tcp_close` | `hvf_tcp_close_run` (2966) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `tcp_abort` | `hvf_tcp_abort_run` (2989) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `udp_send` | `hvf_udp_send_run` (3050) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C sends; Bend picks the flow (Udp.find, 2026-11-11) |
+| `udp_flows` | `hvf_udp_flows_run` (3002) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C reports a fact (2026-11-11) |
+| `set_dns` | `hvf_set_dns_run` (2272) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `dns` | `hvf_dns_run` (2278) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `udp_recv` | `hvf_udp_recv_run` (3133) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `tcp_close_facts` | `hvf_tcp_close_facts_run` (2957) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
+| `mkdir` | `hvf_mkdir_run` (4096) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
+| `dir_facts` | `hvf_dir_facts_run` (4107) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
+| `lan_open` | `hvf_lan_open_run` (4170) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
+| `lan_send` | `hvf_lan_send_run` (4229) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
+| `lan_recv` | `hvf_lan_recv_run` (4292) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
+| `lan_to_ram` | `hvf_lan_to_ram_run` (4301) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
+| `lan_release` | `hvf_lan_release_run` (4322) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
+| `share_quota` | `hvf_share_quota_run` (5140) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
+| `share_usage` | `hvf_share_usage_run` (5156) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
+| `share_open` | `hvf_share_open_run` (3197) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
+| `fs` | `hvf_fs_run` (3391) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
+| `fdc_stamps` | `hvf_fdc_stamps_run` (3311) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | Bend decides eviction (2026-11-11) |
+| `fdc_put` | `hvf_fdc_put_run` (3322) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | Bend decides eviction (2026-11-11) |
+| `fb_init` | `hvf_fb_init_run` (4896) | host/display.bend | window buffer presentation | 5 | check-host screendump | display (to add) | C and Objective-C; blocked: toolchain |
+| `fb_dump` | `hvf_fb_dump_run` (4916) | host/display.bend | window buffer presentation | 5 | check-host screendump | display (to add) | C and Objective-C; blocked: toolchain |
+| `fb_present` | `hvf_fb_present_run` (5014) | host/display.bend | window buffer presentation | 5 | check-host screendump | display (to add) | C and Objective-C; blocked: toolchain |
 
 ### Baseline (stage 0, Apple M2 Pro, macOS 27.2, Bend 2.0.40)
 

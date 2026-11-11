@@ -235,6 +235,11 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   grep -q "is not a socket" <<<"$o1" && [ "$(cat "$t/notes")" = keep ] && grep -q "a running VMM listens there" <<<"$o2" && [ -n "$s2" ] && [ -n "$s3" ] && grep -q "cannot join the LAN" <<<"$o4" \
     && grn "ok: listening paths: a file is kept, a live socket refused, a dead one replaced; an open LAN directory refused" \
     || { red "failed: listening paths"; printf '%s\n' "file: $o1" "live: $o2 ($s2)" "dead: $s3" "lan: $o4"; fail=1; }
+  # a socket path longer than the address holds is refused by Bend, saying so
+  long=$(mktemp -d)/$(printf 'x%.0s' $(seq 1 120)).sock
+  o5=$(./out/bend-vmm --kernel out/linux/linux --initrd out/linux/initrd.cpio --control "$long" < /dev/null 2>&1)
+  grep -q "the path is too long for a socket" <<<"$o5" && grn "ok: a socket path too long for the address is refused, saying so" || { red "failed: long socket path"; tail -2 <<<"$o5"; fail=1; }
+  rm -rf "$(dirname "$long")"
   rm -rf "$t"
 fi
 

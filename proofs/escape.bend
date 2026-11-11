@@ -27,3 +27,6 @@ def L.escape.armed_then_key():
 
 def L.escape.piped_passes_ctrl_a():
   {==}
+
+def L.escape.tty_mode():
+  {==}

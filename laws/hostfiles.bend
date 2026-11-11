@@ -54,3 +54,14 @@ law hostfiles.exec_system:
 
 law hostfiles.exec_argv0:
   {F.Files.exec_path("", "./out/bend-vmm") == "./out/bend-vmm" : String}
+
+# Proposed: a socket path fits the address when its UTF-8 bytes are at most
+# the field's room (a 2-byte character counts 2).
+law hostfiles.sock_fits:
+  {F.Files.sock_path_fits("/tmp/vm.sock", 103) == True{} : Bool}
+
+law hostfiles.sock_too_long:
+  {F.Files.sock_path_fits("/tmp/abcde", 9) == False{} : Bool}
+
+law hostfiles.sock_utf8:
+  {F.Files.utf8_len("é/x") == 4 : U32}

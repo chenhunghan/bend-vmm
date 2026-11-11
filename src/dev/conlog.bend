@@ -47,3 +47,13 @@ def Log.moves.of(n: Nat, +path: String) -> List<Rename>:
 # (keep is at most 99: Cli.conlog.)
 def Log.moves(+path: String, +keep: U32) -> List<Rename>:
   Log.moves.of(Log.nat(16n, keep), path)
+
+# Console output on stdout (the host's flusher writes it): output waits at
+# most batch_us so a guest printing byte by byte costs no write per byte,
+# and past backlog bytes waiting (nobody draining stdout: a stalled pipe)
+# more is dropped rather than growing the VMM without bound.
+def Out.batch_us() -> U32:
+  1000
+
+def Out.backlog() -> U32:
+  16777216

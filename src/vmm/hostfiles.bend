@@ -92,3 +92,22 @@ def Files.lan_sock(+mac: +List<U32>) -> String:
 # neither, and the reset fails.
 def Files.exec_path(+sys: String, +argv0: String) -> String:
   Bool.pick(String, String.is_empty(sys), argv0, sys)
+
+# A socket path's bytes (UTF-8, as the host passes it to bind).
+def Files.utf8_len(s: String) -> U32:
+  match s:
+    case SNil{}:
+      0
+    case SCon{c, rest}:
+      +x = Char.to_u32(c)
+      (Bool.pick(U32, U32.is_lt(x, 128), 1, Bool.pick(U32, U32.is_lt(x, 2048), 2, Bool.pick(U32, U32.is_lt(x, 65536), 3, 4))) + Files.utf8_len(rest) : U32)
+
+# Whether a Unix socket can be bound at path: its bytes fit the address's
+# path field, which holds max of them and the closing 0 (Hvf.sock_path_max:
+# 103 on macOS, 107 on Linux). Checked before listening, so a long path is
+# an error that says so.
+def Files.sock_path_fits(+path: String, +max: U32) -> Bool:
+  U32.is_le(Files.utf8_len(path), max)
+
+def Files.sock_path_why(+path: String, +max: U32) -> String:
+  "the path is too long for a socket (" ++ U32.show(Files.utf8_len(path)) ++ " bytes; at most " ++ U32.show(max) ++ ")"

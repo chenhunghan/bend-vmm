@@ -81,3 +81,13 @@ def Esc.feed(bs: +List<U32>, e: Esc) -> Esc & +List<Key>:
   match e:
     case Esc{active, armed}:
       Esc.feed.go(bs, active, armed)
+
+# The terminal, when stdin is one: raw input (every key, Ctrl-C included,
+# goes to the guest; the Ctrl-A keys above act on the VMM), and output still
+# turns each newline into CR LF (the guest's console may send a bare LF).
+# Restored when the VMM exits.
+def Esc.raw_input() -> Bool:
+  True{}
+
+def Esc.out_crlf() -> Bool:
+  True{}

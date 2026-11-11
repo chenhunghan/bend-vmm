@@ -45,3 +45,12 @@ def L.hostfiles.exec_system():
 
 def L.hostfiles.exec_argv0():
   {==}
+
+def L.hostfiles.sock_fits():
+  {==}
+
+def L.hostfiles.sock_too_long():
+  {==}
+
+def L.hostfiles.sock_utf8():
+  {==}
