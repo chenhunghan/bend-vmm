@@ -51,6 +51,14 @@ def Hvf.set_args(bytes: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.exe_path() -> IO(String):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.set_exec(path: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.reexec() -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
@@ -251,7 +259,7 @@ def Hvf.console_size() -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.console_rotate(keep: U32) -> IO(U32):
+def Hvf.console_reopen() -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 

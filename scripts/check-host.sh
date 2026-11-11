@@ -267,8 +267,8 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   out=$(cat "$t/stdout")
   # (wc -c, not stat: GNU stat -f is about the file system)
   b=$(wc -c < "$t/sh/b" | tr -d ' '); c=$(wc -c < "$t/sh/c" | tr -d ' ')
-  [ "$b" -lt 716800 ] && [ "$b" -gt 524288 ] && [ "$c" = 204800 ] && [ -f "$t/console.log.1" ] && ! grep -q "LIM-DONE" <<<"$out" && cat "$t"/console.log* | grep -aq "LIM-DONE" \
-    && grn "ok: share quota stops a write at 1 MiB (b: $b bytes) and frees with rm; the console log rotates" || { red "failed: limits (b $b, c $c)"; ls -la "$t"; tail -3 <<<"$out"; fail=1; }
+  [ "$b" -lt 716800 ] && [ "$b" -gt 524288 ] && [ "$c" = 204800 ] && [ -f "$t/console.log.1" ] && [ ! -e "$t/console.log.3" ] && ! grep -q "LIM-DONE" <<<"$out" && cat "$t"/console.log* | grep -aq "LIM-DONE" \
+    && grn "ok: share quota stops a write at 1 MiB (b: $b bytes) and frees with rm; the console log rotates, keeping 2" || { red "failed: limits (b $b, c $c)"; ls -la "$t"; tail -3 <<<"$out"; fail=1; }
   rm -rf "$t"
 fi
 

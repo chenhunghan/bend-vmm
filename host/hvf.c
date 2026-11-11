@@ -1312,11 +1312,39 @@ Term hvf_set_args_run(Env e, Term* f, IoWork* w) {
   return (Term)0;
 }
 
-// Hvf.reexec() -> U32: restarts this program with its original arguments
-// (PSCI SYSTEM_RESET: a fresh VM is the simplest correct reset).
+// Hvf.exe_path() -> String: this executable as the system names it
+// (_NSGetExecutablePath, /proc/self/exe), or "" when it cannot. Bend picks
+// what a reset runs (Files.exec_path).
+Term hvf_exe_path_run(Env e, Term* f, IoWork* w) {
+  char path[4096] = "";
+#ifdef __APPLE__
+  uint32_t size = sizeof path;
+  if (_NSGetExecutablePath(path, &size) != 0) {
+    path[0] = 0;
+  }
+#else
+  ssize_t pl = readlink("/proc/self/exe", path, sizeof path - 1);
+  path[pl > 0 ? pl : 0] = 0; // readlink does not end the string
+#endif
+  return io_str(e, path, strlen(path));
+}
+
+// What a reset runs (Hvf.set_exec: Bend picks it, Files.exec_path).
+static char* hvf_exec;
+
+// Hvf.set_exec(path) -> U32: the program Hvf.reexec runs. 0.
+Term hvf_set_exec_run(Env e, Term* f, IoWork* w) {
+  u64 n;
+  free(hvf_exec);
+  hvf_exec = io_cstr(e, f[0], &n);
+  return (Term)0;
+}
+
+// Hvf.reexec() -> U32: restarts this program (Hvf.set_exec) with its
+// original arguments (PSCI SYSTEM_RESET: a fresh VM is the simplest correct
+// reset); the terminal is restored and stdout flushed first. Answers only
+// when it cannot (an errno).
 Term hvf_reexec_run(Env e, Term* f, IoWork* w) {
-  char     path[4096] = "";
-  uint32_t size       = sizeof path;
   hvf_tty_restore();
   fflush(stdout);
   char* argv[1024];
@@ -1325,24 +1353,13 @@ Term hvf_reexec_run(Env e, Term* f, IoWork* w) {
     argv[argc++] = hvf_argbuf + at;
   }
   argv[argc] = NULL;
-#ifdef __APPLE__
-  if (_NSGetExecutablePath(path, &size) != 0) {
-    path[0] = 0;
+  int ok = argc > 0 && hvf_exec && hvf_exec[0];
+  if (ok) {
+    execv(hvf_exec, argv);
   }
-#else
-  (void)size;
-  ssize_t pl = readlink("/proc/self/exe", path, sizeof path - 1);
-  path[pl > 0 ? pl : 0] = 0; // readlink does not end the string
-#endif
-  if (!path[0] && argc > 0) {
-    // no executable path from the system: argv[0], from this cwd
-    snprintf(path, sizeof path, "%s", argv[0]);
-  }
-  if (argc > 0 && path[0]) {
-    execv(path, argv);
-  }
-  fprintf(stderr, "bend-vmm: cannot re-execute %s: %s\n", path, strerror(errno));
-  return (Term)HVF_ERR;
+  int err = ok ? errno : ENOENT;
+  fprintf(stderr, "bend-vmm: cannot re-execute %s: %s\n", hvf_exec ? hvf_exec : "", strerror(err));
+  return (Term)(u32)err;
 }
 
 // Hvf.file_size(path) -> U32: a file's size, or 0xFFFFFFFF (also past 4 GiB).
@@ -5031,28 +5048,10 @@ Term hvf_console_size_run(Env e, Term* f, IoWork* w) {
   return hvf_words(e, ws, 2);
 }
 
-// Hvf.console_rotate(keep) -> U32: PATH.(keep-1) .. PATH.1 move up one,
-// PATH becomes PATH.1 (with keep 0 it is dropped) and a new PATH starts.
-// 0, or an errno.
-Term hvf_console_rotate_run(Env e, Term* f, IoWork* w) {
-  u32 keep = (u32)f[0];
-  if (!hvf_clog_path) {
-    return (Term)0;
-  }
-  size_t n = strlen(hvf_clog_path) + 16;
-  char * a = io_mem(malloc(n)), *b = io_mem(malloc(n));
-  for (u32 i = keep; i > 1; i--) {
-    snprintf(a, n, "%s.%u", hvf_clog_path, i - 1);
-    snprintf(b, n, "%s.%u", hvf_clog_path, i);
-    rename(a, b);
-  }
-  if (keep >= 1) {
-    snprintf(b, n, "%s.1", hvf_clog_path);
-    rename(hvf_clog_path, b);
-  }
-  free(a);
-  free(b);
-  return (Term)(u32)hvf_clog_open(1);
+// Hvf.console_reopen() -> U32: a new, empty log at the console log's path
+// (after Bend's renames: src/dev/conlog.bend, Log.moves). 0, or an errno.
+Term hvf_console_reopen_run(Env e, Term* f, IoWork* w) {
+  return (Term)(u32)(hvf_clog_path ? hvf_clog_open(1) : 0);
 }
 
 // Hvf.share_quota(share, hi, lo) -> U32: the share's quota in bytes (0:
@@ -5170,8 +5169,8 @@ static void __attribute__((constructor)) hvf_use(void) {
 #ifdef CID(Hvf.console_size)
   io_eff(CID(Hvf.console_size), hvf_console_size_run);
 #endif
-#ifdef CID(Hvf.console_rotate)
-  io_eff(CID(Hvf.console_rotate), hvf_console_rotate_run);
+#ifdef CID(Hvf.console_reopen)
+  io_eff(CID(Hvf.console_reopen), hvf_console_reopen_run);
 #endif
 #ifdef CID(Hvf.share_quota)
   io_eff(CID(Hvf.share_quota), hvf_share_quota_run);
@@ -5337,6 +5336,12 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.reexec)
   io_eff(CID(Hvf.reexec), hvf_reexec_run);
+#endif
+#ifdef CID(Hvf.exe_path)
+  io_eff(CID(Hvf.exe_path), hvf_exe_path_run);
+#endif
+#ifdef CID(Hvf.set_exec)
+  io_eff(CID(Hvf.set_exec), hvf_set_exec_run);
 #endif
 #ifdef CID(Hvf.file_size)
   io_eff(CID(Hvf.file_size), hvf_file_size_run);

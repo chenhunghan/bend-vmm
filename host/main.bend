@@ -1884,21 +1884,33 @@ def main.info(args: List<String>) -> Maybe<&2, String>:
 # --console-log PATH,max=SIZE[,keep=N]: the guest's console goes to PATH,
 # which rotates once it holds max bytes (src/dev/conlog.bend decides,
 # looking every 250 ms: it may pass max by what the guest prints meanwhile).
-@unsafe def console_log.loop(+max: U.U64, +keep: U32) -> IO(Unit):
+# A rotation: Bend's renames (Log.moves), then a new log.
+def console_log.renames(ms: List<Cl.Rename>) -> IO(Unit):
+  match ms:
+    case Nil{}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.console_reopen()
+        return Unit{}
+    case Con{m, rest}:
+      match m:
+        case Cl.Rename{from, to}:
+          do IO<Unit>:
+            _ : U32 <- H.Hvf.rename(from, to)
+            console_log.renames(rest)
+
+def console_log.rotate(go: Bool, +path: String, keep: U32) -> IO(Unit):
+  match go:
+    case True{}:
+      console_log.renames(Cl.Log.moves(path, keep))
+    case False{}:
+      IO.pure(Unit, Unit{})
+
+@unsafe def console_log.loop(+path: String, +max: U.U64, +keep: U32) -> IO(Unit):
   do IO<Unit>:
     IO.sleep(250)
     +ws : +List<U32> <- H.Hvf.console_size()
-    console_log.rotate(Cl.Log.rotate(U.U64{H.Host.first(ws), H.Host.first(List.drop(&2, U32, ws, 1n))}, max), keep)
-    console_log.loop(max, keep)
-
-def console_log.rotate(go: Bool, keep: U32) -> IO(Unit):
-  match go:
-    case True{}:
-      do IO<Unit>:
-        _ : U32 <- H.Hvf.console_rotate(keep)
-        return Unit{}
-    case False{}:
-      IO.pure(Unit, Unit{})
+    console_log.rotate(Cl.Log.rotate(U.U64{H.Host.first(ws), H.Host.first(List.drop(&2, U32, ws, 1n))}, max), path, keep)
+    console_log.loop(path, max, keep)
 
 @unsafe def console_log(spec: Maybe<&2, Cli.ConLog>) -> IO(Unit):
   match spec:
@@ -1908,7 +1920,7 @@ def console_log.rotate(go: Bool, keep: U32) -> IO(Unit):
       do IO<Unit>:
         +rc : U32 <- H.Hvf.console_log(path, Hf.Files.private())
         die_if(U32.is_ne(rc, 0), "cannot open the console log " ++ path ++ " (" ++ U32.show(rc) ++ ")")
-        IO.spawn(Unit, console_log.loop(max, keep))
+        IO.spawn(Unit, console_log.loop(path, max, keep))
 
 @unsafe def main.go(info: Maybe<&2, String>, +args: List<String>) -> IO(Unit):
   match info:
@@ -1939,6 +1951,8 @@ def args_bytes(args: List<String>) -> +List<U32>:
   do IO<Unit>:
     _ : U32 <- H.Hvf.set_args(List.append(&2, U32, args_bytes(prog), args_bytes(flags)))
     _ : U32 <- H.Hvf.set_prog(U32.from_nat(List.length(&1, String, prog)))
+    +sys : String <- H.Hvf.exe_path()
+    _ : U32 <- H.Hvf.set_exec(Hf.Files.exec_path(sys, Maybe.default(&1, String, List.head(&1, String, prog), "")))
     _ : U32 <- H.Hvf.net_limits(Lim.Lim.wire(Lim.Lim.default()))
     _ : U32 <- H.Host.fds()
     _ : U32 <- H.Hvf.signals(Ck.Clients.mask(Ck.Clients.signals()))

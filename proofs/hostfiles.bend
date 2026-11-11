@@ -39,3 +39,9 @@ def L.hostfiles.lan_symlink():
 
 def L.hostfiles.lan_sock():
   {==}
+
+def L.hostfiles.exec_system():
+  {==}
+
+def L.hostfiles.exec_argv0():
+  {==}

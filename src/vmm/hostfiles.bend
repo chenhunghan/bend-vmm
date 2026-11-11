@@ -85,3 +85,10 @@ def Files.mac.go(bs: +List<U32>) -> String:
 
 def Files.lan_sock(+mac: +List<U32>) -> String:
   Files.mac.go(mac) ++ ".sock"
+
+# The program a guest reset starts again (Hvf.reexec): this executable as
+# the system names it (Hvf.exe_path; "" when it cannot), else the first
+# argument as given, found from the working directory; "" when there is
+# neither, and the reset fails.
+def Files.exec_path(+sys: String, +argv0: String) -> String:
+  Bool.pick(String, String.is_empty(sys), argv0, sys)

@@ -46,3 +46,11 @@ law hostfiles.lan_symlink:
 # A VM's socket in the LAN directory is named by its MAC.
 law hostfiles.lan_sock:
   {F.Files.lan_sock([2, 0, 0, 171, 205, 239]) == "02-00-00-ab-cd-ef.sock" : String}
+
+# Proposed: the program a reset starts again: the system's name for this
+# executable, else the first argument.
+law hostfiles.exec_system:
+  {F.Files.exec_path("/usr/local/bin/bend-vmm", "bend-vmm") == "/usr/local/bin/bend-vmm" : String}
+
+law hostfiles.exec_argv0:
+  {F.Files.exec_path("", "./out/bend-vmm") == "./out/bend-vmm" : String}
