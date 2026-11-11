@@ -62,3 +62,4 @@ import ./proofs/fdcache.bend as Proofs_fdcache
 import ./proofs/transfer.bend as Proofs_transfer
 import ./proofs/inflate.bend as Proofs_inflate
 import ./proofs/disksnap.bend as Proofs_disksnap
+import ./proofs/snapdir.bend as Proofs_snapdir
