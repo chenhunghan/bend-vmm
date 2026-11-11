@@ -35,3 +35,15 @@ law udpflow.not_idle:
 
 law udpflow.ages_wire:
   {F.Udp.ages([7, 0, 5, 9, 1, 2]) == [F.Age{7, U.U64{0, 5}}, F.Age{9, U.U64{1, 2}}] : +List<F.Age>}
+
+# Proposed: a datagram's flow is chosen in Bend from the host's open flows
+# ([id, guest port, address, port]*): the one with the same three, else 0
+# (the host opens one).
+law udpflow.find_match:
+  {F.Udp.find([7, 5353, 16843009, 53, 9, 4000, 16843009, 53], 4000, 16843009, 53) == 9 : U32}
+
+law udpflow.find_none:
+  {F.Udp.find([7, 5353, 16843009, 53], 5353, 16843009, 54) == 0 : U32}
+
+law udpflow.find_empty:
+  {F.Udp.find([], 1, 2, 3) == 0 : U32}

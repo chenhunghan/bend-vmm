@@ -57,3 +57,18 @@ law fdcache.flush_keeps_others:
 
 law fdcache.flush_then_miss:
   {find_fd(F.Fdc.done_cache(F.Fdc.flush(opened(2n), 0)), 0, "0", False{}) == 4294967295 : U32}
+
+# The host's side: which operations drop a share's open files, and which
+# slot a new file takes from the uses the host reports (an empty slot
+# first, else the least recently used, the first of equals).
+law fdcache.invalidates:
+  {F.Fdc.invalidates(7) && F.Fdc.invalidates(10) && Bool.not(F.Fdc.invalidates(2)) && Bool.not(F.Fdc.invalidates(8)) == True{} : Bool}
+
+law fdcache.victim_empty:
+  {F.Fdc.victim([0, 9, 0, 0, 0, 3, 0, 0]) == 1 : U32}
+
+law fdcache.victim_least:
+  {F.Fdc.victim([0, 9, 0, 4, 1, 0, 0, 4]) == 1 : U32}
+
+law fdcache.victim_hi_word:
+  {F.Fdc.victim([1, 0, 0, 4294967295]) == 1 : U32}

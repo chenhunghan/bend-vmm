@@ -309,7 +309,19 @@ def Hvf.tcp_abort(conn: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.udp_send(sport: U32, ip: U32, port: U32, bytes: +List<U32>) -> IO(U32):
+def Hvf.udp_flows() -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.fdc_stamps() -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.fdc_put(slot: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.udp_send(flow: U32, sport: U32, ip: U32, port: U32, bytes: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 

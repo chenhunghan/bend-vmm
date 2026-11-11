@@ -178,3 +178,30 @@ def Fdc.look_cache(+l: Found) -> Cache:
   match l:
     case Found{fd, c}:
       c
+
+# What the host acts on (C keeps the descriptors and finds an entry by its
+# key; these are Bend's decisions, host/fs.bend):
+
+# The host operations that can change what a path names, so the share's
+# open files are dropped first (hvf_fs_run's op numbers: 4 create, 5 mkdir,
+# 6 remove, 7 rename, 10 symlink).
+def Fdc.invalidates(+op: U32) -> Bool:
+  U32.is_eq(op, 4) || U32.is_eq(op, 5) || U32.is_eq(op, 6) || U32.is_eq(op, 7) || U32.is_eq(op, 10)
+
+# The slot a newly opened file takes, from each slot's last use as the host
+# reports it ([hi, lo] per slot; 0 is an empty slot): the least recently
+# used, the first such (as Fdc.replace).
+def Fdc.victim.go(ws: +List<U32>, +i: U32, +best: U32, +bhi: U32, +blo: U32) -> U32:
+  match ws:
+    case Nil{}:
+      best
+    case Con{+hi, rest}:
+      match rest:
+        case Nil{}:
+          best
+        case Con{+lo, more}:
+          +less = U32.is_lt(hi, bhi) || (U32.is_eq(hi, bhi) && U32.is_lt(lo, blo))
+          Fdc.victim.go(more, (i + 1 : U32), Bool.pick(U32, less, i, best), Bool.pick(U32, less, hi, bhi), Bool.pick(U32, less, lo, blo))
+
+def Fdc.victim(+ws: +List<U32>) -> U32:
+  Fdc.victim.go(ws, 0, 0, 4294967295, 4294967295)

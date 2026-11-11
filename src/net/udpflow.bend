@@ -63,3 +63,26 @@ def Udp.ages(ws: +List<U32>) -> +List<Age>:
       Age{id, U.U64{h, lo}} <> Udp.ages(rest)
     case _:
       []
+
+# The flow a datagram goes out on, from the open flows as the host reports
+# them ([id, guest port, address, port]* on the host's side, Hvf.udp_flows):
+# the one connected to the same address and port from the same guest port,
+# or 0, none (the host opens one).
+def Udp.find(ws: +List<U32>, +sport: U32, +ip: U32, +port: U32) -> U32:
+  match ws:
+    case Nil{}:
+      0
+    case Con{+id, r1}:
+      match r1:
+        case Nil{}:
+          0
+        case Con{+s, r2}:
+          match r2:
+            case Nil{}:
+              0
+            case Con{+a, r3}:
+              match r3:
+                case Nil{}:
+                  0
+                case Con{+p, more}:
+                  Bool.pick(U32, U32.is_eq(s, sport) && U32.is_eq(a, ip) && U32.is_eq(p, port), id, Udp.find(more, sport, ip, port))

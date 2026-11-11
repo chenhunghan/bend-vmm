@@ -306,6 +306,23 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5e. Bend's host choices: the share's open-file slots, UDP flows"
+  # 20 files read twice through 16 slots (Bend picks each eviction,
+  # src/host/fdcache.bend), a file renamed over one held open (the rename
+  # empties the share's slots: the next read sees the new file), and DNS
+  # through three guest ports and back to the first (Bend picks the flow,
+  # Udp.find)
+  t=$(mktemp -d); mkdir "$t/sh"
+  for i in $(seq 1 20); do echo "file-$i" > "$t/sh/f$i"; done; echo NEW-CONTENT > "$t/sh/new"
+  cmd='cd /mnt/share; ok=0; for r in 1 2; do for i in $(seq 1 20); do [ "$(cat f$i)" = "file-$i" ] && ok=$((ok+1)); done; done; echo FILES-$ok; cat f1 >/dev/null; mv new f1; echo RENAMED-$(cat f1); for p in 1 2 3 1 1; do nslookup example.com >/dev/null 2>&1 && echo DNS-OK; done; echo P9U-DONE\n'
+  out=$(drive 120 "busybox shell" "mkdir -p /mnt/share; mount -t 9p -o trans=virtio,version=9p2000.L share /mnt/share; $cmd" "P9U-DONE" 'poweroff -f\n' -- \
+    ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --share "$t/sh" --cmdline "console=ttyAMA0 quiet" 2>&1 | tr -d '\r')
+  grep -aq "^FILES-40" <<<"$out" && grep -aq "^RENAMED-NEW-CONTENT" <<<"$out" && grn "ok: 20 files through 16 slots read back, a rename drops the old file" || { red "failed: share slots"; grep -a "FILES\|RENAMED\|mount" <<<"$out" | tail -3; fail=1; }
+  [ "$(grep -ac '^DNS-OK' <<<"$out")" -ge 4 ] && grn "ok: DNS over the NAT's UDP flows ($(grep -ac '^DNS-OK' <<<"$out") of 5)" || { red "failed: UDP flows (DNS)"; grep -a "DNS\|nslookup" <<<"$out" | tail -3; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 6. display: framebuffer, virtio keyboard and tablet"
   t=$(mktemp -d); sock=$t/vm.sock
   ( (slp 40) | alarm 40 ./out/bend-vmm --mem 512 --cpus 2 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --control "$sock" --display 640x480,headless --cmdline "console=ttyAMA0 quiet" > "$t/run.log" 2>&1 & )

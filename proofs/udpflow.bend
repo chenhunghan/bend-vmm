@@ -19,3 +19,12 @@ def L.udpflow.not_idle():
 def L.udpflow.ages_wire():
   {==}
 
+
+def L.udpflow.find_match():
+  {==}
+
+def L.udpflow.find_none():
+  {==}
+
+def L.udpflow.find_empty():
+  {==}

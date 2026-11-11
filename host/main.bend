@@ -549,10 +549,12 @@ def nat_dns(+ip: U32) -> IO(U32):
       do IO<Unit>:
         _ : U32 <- H.Hvf.tcp_abort(conn)
         return Unit{}
-    case V.UdpSend{+sport, +ip, port, bs}:
+    case V.UdpSend{+sport, +ip, +port, bs}:
       do IO<Unit>:
         dns : U32 <- nat_dns(ip)
-        +rc : U32 <- H.Hvf.udp_send(sport, Ad.Addr.to_host(ip, dns), port, bs)
+        +hip : U32 = Ad.Addr.to_host(ip, dns)
+        +flows : +List<U32> <- H.Hvf.udp_flows()
+        +rc : U32 <- H.Hvf.udp_send(Uf.Udp.find(flows, sport, hip, port), sport, hip, port, bs)
         net_cmd.udp(U32.is_ne(rc, 0) && U32.is_ne(rc, 4294967295), mc, done, rc, sport)
     case V.TcpSendStaged{+conn, slot}:
       do IO<Unit>:

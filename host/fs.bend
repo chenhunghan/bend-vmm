@@ -6,6 +6,7 @@ import ../src/fs/quota.bend as Qt
 import ../src/fs/contain.bend as Ct
 import ../src/fs/listing.bend as Ls
 import ../src/fs/entry.bend as En
+import ../src/host/fdcache.bend as Fc
 
 # Shared directories: V.FsOp on the host (host/hvf.c, "Shared directories").
 
@@ -57,18 +58,35 @@ def Fs.decode.go(+tag: U32, +ws: +List<U32>) -> V.FsResult:
   Bool.pick(V.FsResult, U32.is_eq(tag, 7), V.FsStatfsOk{Fs.w(ws, 1n), Fs.w64(ws, 2n), Fs.w64(ws, 4n), Fs.w64(ws, 6n), Fs.w64(ws, 8n), Fs.w64(ws, 10n)},
     V.FsErr{Fs.w(ws, 1n)})))))))
 
+# (tags 8 and 9 are 3 and 4 when the host opened a file for the operation)
+def Fs.tag(+t: U32) -> U32:
+  Bool.pick(U32, U32.is_eq(t, 8), 3, Bool.pick(U32, U32.is_eq(t, 9), 4, t))
+
 def Fs.decode(+ws: +List<U32>) -> V.FsResult:
-  Fs.decode.go(Fs.w(ws, 0n), ws)
+  Fs.decode.go(Fs.tag(Fs.w(ws, 0n)), ws)
+
+# A file the host opened for an operation takes the slot Bend picks
+# (src/host/fdcache.bend: the least recently used).
+def Fs.placed(opened: Bool, +ws: +List<U32>) -> IO(V.FsResult):
+  match opened:
+    case False{}:
+      IO.pure(V.FsResult, Fs.decode(ws))
+    case True{}:
+      do IO<V.FsResult>:
+        +st : +List<U32> <- H.Hvf.fdc_stamps()
+        _ : U32 <- H.Hvf.fdc_put(Fc.Fdc.victim(st))
+        return Fs.decode(ws)
 
 # A host operation on a share: its paths' names vetted first
 # (src/fs/contain.bend: no empty part, no "." or ".."; the host walks them
 # without following a symlink).
-def Fs.run(sh: U32, op: U32, p: String, p2: String, a: U.U64, b: U32, bytes: +List<U32>) -> IO(V.FsResult):
+def Fs.run(sh: U32, +op: U32, p: String, p2: String, a: U.U64, b: U32, bytes: +List<U32>) -> IO(V.FsResult):
   match a:
     case U.U64{ah, al}:
       do IO<V.FsResult>:
-        +ws : +List<U32> <- H.Hvf.fs(sh, op, p, p2, ah, al, b, bytes)
-        return Fs.decode(ws)
+        +ws : +List<U32> <- H.Hvf.fs(sh, (op .|. Bool.pick(U32, Fc.Fdc.invalidates(op), 256, 0) : U32), p, p2, ah, al, b, bytes)
+        +t : U32 = Fs.w(ws, 0n)
+        Fs.placed(U32.is_eq(t, 8) || U32.is_eq(t, 9), ws)
 
 def Fs.call(+sh: U32, +op: U32, +p: String, +p2: String, +a: U.U64, +b: U32, +bytes: +List<U32>) -> IO(V.FsResult):
   Bool.pick(IO(V.FsResult), Ct.Share.rel_ok(p) && (U32.is_ne(op, 7) || Ct.Share.rel_ok(p2)),

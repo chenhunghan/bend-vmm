@@ -30,3 +30,15 @@ def L.fdcache.flush_keeps_others():
 
 def L.fdcache.flush_then_miss():
   {==}
+
+def L.fdcache.invalidates():
+  {==}
+
+def L.fdcache.victim_empty():
+  {==}
+
+def L.fdcache.victim_least():
+  {==}
+
+def L.fdcache.victim_hi_word():
+  {==}

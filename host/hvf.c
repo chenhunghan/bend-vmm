@@ -2983,14 +2983,21 @@ Term hvf_tcp_abort_run(Env e, Term* f, IoWork* w) {
 static uint32_t hvf_udp_next;
 
 // The UDP flow of guest port sport to host address ip:port, if open.
-static HvfSock* hvf_udp_flow(uint32_t sport, uint32_t ip, uint32_t port) {
+// Hvf.udp_flows() -> List<U32>: the open UDP flows, [id, guest port,
+// address, port]* (Bend picks a datagram's: src/net/udpflow.bend, Udp.find).
+Term hvf_udp_flows_run(Env e, Term* f, IoWork* w) {
+  static uint32_t ws[4 * HVF_MAX_SOCKS];
+  int             n = 0;
   for (int i = 0; i < HVF_MAX_SOCKS; i++) {
     HvfSock* k = &hvf_socks[i];
-    if (k->used && k->udp && !k->closing && k->uport == sport && k->uip == ip && k->urport == port) {
-      return k;
+    if (k->used && k->udp && !k->closing) {
+      ws[n++] = k->key;
+      ws[n++] = k->uport;
+      ws[n++] = k->uip;
+      ws[n++] = k->urport;
     }
   }
-  return NULL;
+  return hvf_words(e, ws, (u64)n);
 }
 
 // Hvf.udp_ages() -> List<U32>: every open UDP flow, [id, ns since a
@@ -3027,13 +3034,17 @@ Term hvf_udp_close_run(Env e, Term* f, IoWork* w) {
 // (the caller starts its receiver, Hvf.udp_recv), 0 otherwise, 0xFFFFFFFF
 // on failure.
 Term hvf_udp_send_run(Env e, Term* f, IoWork* w) {
-  u32   sport = (u32)f[0], ip = (u32)f[1], port = (u32)f[2];
+  u32   flow = (u32)f[0], sport = (u32)f[1], ip = (u32)f[2], port = (u32)f[3];
   u64   n;
-  char* buf = io_cbuf(e, f[3], &n, CID(Con));
+  char* buf = io_cbuf(e, f[4], &n, CID(Con));
   if (!buf) {
     return (Term)HVF_ERR;
   }
-  HvfSock* k     = hvf_udp_flow(sport, ip, port);
+  // Bend's choice (0: none); a flow that is not this one's is refused
+  HvfSock* k = flow ? hvf_sock(flow, 1) : NULL;
+  if (k && (k->uport != sport || k->uip != ip || k->urport != port)) {
+    k = NULL;
+  }
   u32      fresh = 0;
   if (!k) {
     int fd = hvf_fd_has(1) ? socket(AF_INET, SOCK_DGRAM, 0) : -1;
@@ -3243,8 +3254,10 @@ static int64_t hvf_lsizeat(int dfd, const char* leaf) {
 // Open files for reads and writes, by share, relative path and direction:
 // resolving and opening a path costs more than moving a 512 KiB block, and a
 // guest reads a file in many requests. An entry stays bound to the file it
-// opened, so every operation that can change what a path names (create,
-// mkdir, remove, rename, symlink) empties the share's entries first.
+// opened. Bend decides (src/host/fdcache.bend): which operations empty the
+// share's entries first (Fdc.invalidates: the op word's bit 256), and which
+// slot a newly opened file takes (Fdc.victim, from Hvf.fdc_stamps, then
+// Hvf.fdc_put). C finds an entry by its key and keeps the descriptors.
 #define HVF_FDC 16
 typedef struct {
   int      fd, wr;
@@ -3253,6 +3266,7 @@ typedef struct {
   char     rel[PATH_MAX];
 } HvfFdc;
 static HvfFdc   hvf_fdc[HVF_FDC];
+static HvfFdc   hvf_fdc_new; // opened by the last operation, until Hvf.fdc_put places it
 static uint64_t hvf_fdc_tick;
 
 static int hvf_fdc_find(u32 sh, const char* rel, int wr) {
@@ -3266,24 +3280,50 @@ static int hvf_fdc_find(u32 sh, const char* rel, int wr) {
   return -1;
 }
 
-static void hvf_fdc_put(u32 sh, const char* rel, int wr, int fd) {
-  HvfFdc* lru = &hvf_fdc[0];
+// A file just opened waits for Bend's choice of slot (one at a time: an
+// earlier one never placed closes).
+static void hvf_fdc_hold(u32 sh, const char* rel, int wr, int fd) {
+  if (hvf_fdc_new.used) {
+    close(hvf_fdc_new.fd);
+  }
+  hvf_fdc_new.fd   = fd;
+  hvf_fdc_new.wr   = wr;
+  hvf_fdc_new.sh   = sh;
+  hvf_fdc_new.used = 1;
+  snprintf(hvf_fdc_new.rel, PATH_MAX, "%s", rel);
+}
+
+// Hvf.fdc_stamps() -> List<U32>: each slot's last use, [hi, lo] (0: empty).
+Term hvf_fdc_stamps_run(Env e, Term* f, IoWork* w) {
+  uint32_t ws[2 * HVF_FDC];
   for (int i = 0; i < HVF_FDC; i++) {
-    if (hvf_fdc[i].used < lru->used) {
-      lru = &hvf_fdc[i];
-    }
+    ws[2 * i]     = (uint32_t)(hvf_fdc[i].used >> 32);
+    ws[2 * i + 1] = (uint32_t)hvf_fdc[i].used;
   }
-  if (lru->used) {
-    close(lru->fd);
+  return hvf_words(e, ws, 2 * HVF_FDC);
+}
+
+// Hvf.fdc_put(slot) -> U32: the file just opened takes the slot (Fdc.victim),
+// closing the one it held. 0, or 0xFFFFFFFF (no such slot, or no new file).
+Term hvf_fdc_put_run(Env e, Term* f, IoWork* w) {
+  u32 i = (u32)f[0];
+  if (i >= HVF_FDC || !hvf_fdc_new.used) {
+    return (Term)HVF_ERR;
   }
-  lru->fd   = fd;
-  lru->wr   = wr;
-  lru->sh   = sh;
-  lru->used = ++hvf_fdc_tick;
-  snprintf(lru->rel, PATH_MAX, "%s", rel);
+  if (hvf_fdc[i].used) {
+    close(hvf_fdc[i].fd);
+  }
+  hvf_fdc[i]      = hvf_fdc_new;
+  hvf_fdc[i].used = ++hvf_fdc_tick;
+  hvf_fdc_new.used = 0;
+  return (Term)0;
 }
 
 static void hvf_fdc_flush(u32 sh) {
+  if (hvf_fdc_new.used && hvf_fdc_new.sh == sh) {
+    close(hvf_fdc_new.fd);
+    hvf_fdc_new.used = 0;
+  }
   for (int i = 0; i < HVF_FDC; i++) {
     if (hvf_fdc[i].used && hvf_fdc[i].sh == sh) {
       close(hvf_fdc[i].fd);
@@ -3335,7 +3375,7 @@ static Term hvf_fs_ok(Env e) {
 // 14 write them at offset a: both answer the count moved, and no byte passes
 // through Bend.
 Term hvf_fs_run(Env e, Term* f, IoWork* w) {
-  u32      sh = (u32)f[0], op = (u32)f[1];
+  u32      sh = (u32)f[0], op = (u32)f[1] & 255, flush = (u32)f[1] & 256, opened = 0;
   u64      n1, n2, nb;
   char*    rel   = io_cstr(e, f[2], &n1);
   char*    rel2  = io_cstr(e, f[3], &n2);
@@ -3352,7 +3392,7 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
   int      dfd = -1, dfd2 = -1;
   const char *leaf = ".", *leaf2 = ".";
   int      err   = sh >= (u32)hvf_nshares ? EINVAL : fd >= 0 ? 0 : hvf_fs_at(sh, rel, path, &dfd, &leaf);
-  if (!err && (op == 4 || op == 5 || op == 6 || op == 7 || op == 10)) {
+  if (!err && flush) {
     hvf_fdc_flush(sh);
   }
   if (!err && io && fd < 0) {
@@ -3367,7 +3407,8 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
       close(fd);
       fd = -1;
     } else {
-      hvf_fdc_put(sh, rel, wr, fd);
+      hvf_fdc_hold(sh, rel, wr, fd);
+      opened = 1;
     }
   }
   if (!err && (op == 7)) {
@@ -3443,7 +3484,7 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
       if (k < 0) {
         res = hvf_fs_err(e, errno);
       } else {
-        hvf_w(&out, 3);
+        hvf_w(&out, opened ? 8 : 3);
         for (ssize_t i = 0; i < k; i++) {
           hvf_w(&out, (uint8_t)buf[i]);
         }
@@ -3460,7 +3501,7 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
       if (k < 0) {
         res = hvf_fs_err(e, bytes ? errno : EINVAL);
       } else {
-        uint32_t ws[2] = {4, (uint32_t)k};
+        uint32_t ws[2] = {opened ? 9 : 4, (uint32_t)k};
         res = hvf_words(e, ws, 2);
       }
     }
@@ -3484,7 +3525,7 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
       if (k < 0) {
         res = hvf_fs_err(e, errno);
       } else {
-        uint32_t ws[2] = {4, (uint32_t)k};
+        uint32_t ws[2] = {opened ? 9 : 4, (uint32_t)k};
         res = hvf_words(e, ws, 2);
       }
     }
@@ -5201,6 +5242,15 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.udp_send)
   io_eff(CID(Hvf.udp_send), hvf_udp_send_run);
+#endif
+#ifdef CID(Hvf.udp_flows)
+  io_eff(CID(Hvf.udp_flows), hvf_udp_flows_run);
+#endif
+#ifdef CID(Hvf.fdc_stamps)
+  io_eff(CID(Hvf.fdc_stamps), hvf_fdc_stamps_run);
+#endif
+#ifdef CID(Hvf.fdc_put)
+  io_eff(CID(Hvf.fdc_put), hvf_fdc_put_run);
 #endif
 #ifdef CID(Hvf.set_dns)
   io_eff(CID(Hvf.set_dns), hvf_set_dns_run);

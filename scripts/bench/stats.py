@@ -17,7 +17,8 @@ contract:
   slower        the lower bound of degradation is above zero
   inconclusive  the interval spans both
   equivalent    (only with --margin) inconclusive, but the interval of
-                degradation lies inside [-margin, +margin]
+                degradation lies inside [-margin, +margin]: a pass
+A later --margin for the same metric wins.
 
 Exit status: 0 when no metric is slower, 1 when one is, 2 on bad input.
 """

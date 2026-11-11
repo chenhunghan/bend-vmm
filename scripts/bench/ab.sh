@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Paired A/B benchmark of two bend-vmm builds (C_TO_BEND.md, stage 0).
-#   scripts/bench/ab.sh [-n PAIRS] [-m METRICS] [--margin M=V ...] A B
+#   scripts/bench/ab.sh [-n PAIRS] [-m METRICS] [--margin M=V ...] [--baseline] A B
 # A and B are built binaries or git revisions (a revision is checked out in
 # a worktree and built once into out/c-to-bend/bin/<sha>). METRICS is a
 # comma list (default exit):
@@ -13,21 +13,26 @@
 # out/c-to-bend/ab-<time>/obs.tsv; scripts/bench/stats.py prints the paired
 # report (report.txt) and decides: exit 1 when a metric is slower. A
 # missing value, a timeout or a guest failure stops the run with status 2:
-# a broken run never reads as a comparison. Each pair waits for an idle
+# a broken run never reads as a comparison. The equivalence margins
+# (C_TO_BEND.md, performance contract, decided 2026-11-11) are the defaults:
+# exit and mmio-exit 0.05 us, boot 5 ms per change; --baseline (B against
+# the original baseline A, f8983a4) uses the drift caps instead: 0.15 us,
+# 15 ms. --margin M=V overrides one. Each pair waits for an idle
 # host (1-minute load under AB_MAXLOAD, default half the logical CPUs).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 root=$PWD
-pairs=30; metrics=exit; margins=()
+pairs=30; metrics=exit; margins=(); drift=0
 while [ $# -gt 2 ]; do
   case $1 in
     -n) pairs=$2; shift 2 ;;
     -m) metrics=$2; shift 2 ;;
     --margin) margins+=(--margin "$2"); shift 2 ;;
+    --baseline) drift=1; shift ;;
     *) echo "ab.sh: unknown option $1" >&2; exit 2 ;;
   esac
 done
-[ $# = 2 ] || { sed -n '2,18p' "$0"; exit 2; }
+[ $# = 2 ] || { sed -n '2,23p' "$0"; exit 2; }
 mkdir -p out/c-to-bend/bin
 die() { echo "ab.sh: $*" >&2; exit 2; }
 
@@ -132,7 +137,8 @@ for i in $(seq "$pairs"); do
   printf '\rpair %d/%d' "$i" "$pairs" >&2
 done
 echo >&2
-python3 scripts/bench/stats.py "$obs" "${margins[@]}" | tee "$run/report.txt"
+if [ $drift = 1 ]; then defaults=(--margin exit=0.15 --margin mmio-exit=0.15 --margin boot=15); else defaults=(--margin exit=0.05 --margin mmio-exit=0.05 --margin boot=5); fi
+python3 scripts/bench/stats.py "$obs" "${defaults[@]}" ${margins[@]+"${margins[@]}"} | tee "$run/report.txt"
 status=${PIPESTATUS[0]}
 echo "observations: $obs"
 exit "$status"
