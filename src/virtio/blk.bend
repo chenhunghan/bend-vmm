@@ -114,7 +114,8 @@ def Blk.offset(sector: U.U64) -> U.U64:
 
 # Discard (VIRTIO_BLK_F_DISCARD, bit 13), offered for a writable disk: the
 # guest names sectors it no longer needs and the host frees them (a hole in
-# a raw image: they then read as zeros; a qcow2 image keeps its clusters).
+# a raw image: they then read as zeros; whole qcow2 clusters that are the
+# image's alone, src/disk/store.bend).
 # One request holds 1 to discard_max_seg segments of 16 bytes {sector u64,
 # num_sectors u32, flags u32}; a segment covers at most
 # discard_max_sectors (2 GiB); flags other than UNMAP (bit 0) answer

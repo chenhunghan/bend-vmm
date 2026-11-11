@@ -393,9 +393,93 @@ def Store.status(-R: Type, st: Store) -> V.Op<R, U32>:
         return (a .|. b : U32)
 
 # Makes the top image's writes durable.
-# Frees [off, off+len) of a raw image (a hole on the host). A qcow2 image
-# keeps its clusters (discard is advisory; freeing them would rewrite its
-# tables).
+# Discard in a qcow2 image: each whole cluster inside [off, off+len) that is
+# mapped and the image's alone (COPIED: reference count 1) is let go: its L2
+# entry first reads as zeros (0, unallocated, when nothing lies below; the
+# zero flag, version 3, when a backing file does: a discarded cluster must
+# not show the backing file's older data), then its reference count is 0,
+# then its host cluster is a hole. A VMM that stops between leaks the
+# cluster at worst (unreferenced but counted; qemu-img check repairs it),
+# never maps freed data. Shared, compressed, zero and unallocated clusters
+# stay; so does every cluster of a version 2 image over a backing file (no
+# zero flag) or of one whose counts are not 16-bit.
+
+def Store.dis.clear(-R: Type, +disk: U32, +q: Q.Qcow, +h: U.U64) -> V.Op<R, Unit>:
+  +rti = Q.Qcow.ref_rti(q, h)
+  +slot = Q.Qcow.ref_slot(q, h)
+  do V.Op<R, Unit>:
+    e : U.U64 <- Store.read8(R, disk, U.U64.add(Qcow.rt(q), U.U64.from_u32((rti * 8 : U32))))
+    +rb : U.U64 = Q.Qcow.entry_off(e)
+    Bool.pick(V.Op<R, Unit>, U.U64.is_zero(rb), V.Op.pure(R, Unit, Unit{}),
+      V.Op.disk_write(R, disk, U.U64.add(rb, U.U64.from_u32((slot * 2 : U32))), [0, 0]))
+
+def Store.dis.entry(-R: Type, e: Q.Entry, +disk: U32, +q: Q.Qcow, +slot: U.U64, +zv: U.U64) -> V.Op<R, Unit>:
+  match e:
+    case Q.Mapped{+off, copied}:
+      Bool.pick(V.Op<R, Unit>, copied,
+        V.Op.bind(R, Unit, Unit, Store.write8(R, disk, slot, zv), u =>
+          V.Op.bind(R, Unit, Unit, Store.dis.clear(R, disk, q, off), v =>
+            V.Op.disk_discard(R, disk, off, U.U64.from_u32(Q.Qcow.csize(q))))),
+        V.Op.pure(R, Unit, Unit{}))
+    case _:
+      V.Op.pure(R, Unit, Unit{})
+
+def Store.dis.l2(-R: Type, none: Bool, +disk: U32, +q: Q.Qcow, +l2: U.U64, +c: U.U64, +zv: U.U64) -> V.Op<R, Unit>:
+  match none:
+    case True{}:
+      V.Op.pure(R, Unit, Unit{})
+    case False{}:
+      +slot = U.U64.add(l2, U.U64.from_u32((Q.Qcow.l2_index(q, c) * 8 : U32)))
+      do V.Op<R, Unit>:
+        e : U.U64 <- Store.read8(R, disk, slot)
+        Store.dis.entry(R, Q.Qcow.decode(q, e), disk, q, slot, zv)
+
+def Store.dis.cluster(-R: Type, past: Bool, +disk: U32, +q: Q.Qcow, +c: U.U64, +zv: U.U64) -> V.Op<R, Unit>:
+  match past:
+    case True{}:
+      V.Op.pure(R, Unit, Unit{})
+    case False{}:
+      do V.Op<R, Unit>:
+        e1 : U.U64 <- Store.read8(R, disk, U.U64.add(Qcow.l1(q), U.U64.from_u32((Q.Qcow.l1_index(q, c) * 8 : U32))))
+        +l2 : U.U64 = Q.Qcow.entry_off(e1)
+        Store.dis.l2(R, U.U64.is_zero(l2), disk, q, l2, c, zv)
+
+# The clusters from c to end, one at a time (fuel: the most clusters).
+def Store.dis.go(fuel: Nat, -R: Type, +disk: U32, +q: Q.Qcow, +c: U.U64, +end: U.U64, +zv: U.U64) -> V.Op<R, Unit>:
+  match fuel:
+    case 0n:
+      V.Op.pure(R, Unit, Unit{})
+    case 1n+f:
+      Bool.pick(V.Op<R, Unit>, U.U64.is_lt(c, end),
+        V.Op.bind(R, Unit, Unit, Store.dis.cluster(R, U32.is_le(Qcow.l1_size(q), Q.Qcow.l1_index(q, c)), disk, q, c, zv), u =>
+          Store.dis.go(f, R, disk, q, U.U64.add_u32(c, Q.Qcow.csize(q)), end, zv)),
+        V.Op.pure(R, Unit, Unit{}))
+
+def Store.dis.below(st: Store) -> Bool:
+  match st:
+    case NoStore{}:
+      False{}
+    case _:
+      True{}
+
+# The whole clusters of [off, off+len), on an image that allows it.
+def Store.dis.qcow(-R: Type, ok: Bool, +disk: U32, +q: Q.Qcow, +backed: Bool, +off: U.U64, +len: U.U64) -> V.Op<R, Unit>:
+  match ok:
+    case False{}:
+      V.Op.pure(R, Unit, Unit{})
+    case True{}:
+      +bits = Q.Qcow.bits(q)
+      +first = U.U64.align_up(U32.to_nat(bits), off)
+      +end = U.U64.and(U.U64.add(off, len), U.U64.not(U.U64.from_u32((Q.Qcow.csize(q) - 1 : U32))))
+      Store.dis.go(4194304n, R, disk, q, first, end, Bool.pick(U.U64, backed, U.U64.from_u32(1), U.U64.zero()))
+
+def Store.dis.version(-R: Type, +disk: U32, +q: Q.Qcow, +backed: Bool, +off: U.U64, +len: U.U64) -> V.Op<R, Unit>:
+  do V.Op<R, Unit>:
+    +bs : +List<U32> <- V.Op.disk_read(R, disk, U.U64.from_u32(4), 4)
+    Store.dis.qcow(R, U32.is_eq(Qcow.refbits(q), 16) && (Bool.not(backed) || U32.is_le(3, Q.Qcow.be32(bs, 0n))), disk, q, backed, off, len)
+
+# Frees [off, off+len): a hole in a raw image; whole clusters let go in a
+# qcow2 image (above). Discard is advisory: what cannot be freed stays.
 def Store.discard(-R: Type, st: Store, off: U.U64, len: U.U64) -> V.Op<R, Unit>:
   match st:
     case NoStore{}:
@@ -403,7 +487,7 @@ def Store.discard(-R: Type, st: Store, off: U.U64, len: U.U64) -> V.Op<R, Unit>:
     case RawStore{disk}:
       V.Op.disk_discard(R, disk, off, len)
     case QcowStore{disk, q, below}:
-      V.Op.pure(R, Unit, Unit{})
+      Store.dis.version(R, disk, q, Store.dis.below(below), off, len)
 
 def Store.flush(-R: Type, st: Store) -> V.Op<R, Unit>:
   match st:

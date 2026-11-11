@@ -137,8 +137,11 @@ connections through the NAT do not survive a restore.
 
 Discard (TRIM): a writable disk offers virtio-blk DISCARD, so what the guest
 frees (`fstrim`, `mount -o discard`, `blkdiscard`) goes back to the host: the
-VMM punches holes in a raw image (whole 4 KiB blocks; they read as zeros).
-A qcow2 image keeps its clusters.
+VMM punches holes in a raw image (whole 4 KiB blocks; they read as zeros),
+and in a qcow2 image lets go of whole clusters that are its alone (their
+entries read as zeros, their counts drop to 0, their host clusters become
+holes; `qemu-img check` stays clean). Shared and compressed clusters stay,
+and so does a version 2 image over a backing file (it has no zero flag).
 
 Disk snapshots: a snapshot also keeps each writable `--disk` image as it was,
 next to it (`PATH.GEN.disk0`, ...: a copy-on-write clone on APFS, btrfs or

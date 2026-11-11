@@ -87,10 +87,44 @@ def ok_after(r: Maybe<&1, S.Sim & Bool>) -> Bool:
     case Some{(s, ok)}:
       ok
 
+# Discard on the qcow2 image: the disk after it.
+def discarded.got(r: Maybe<&1, S.Sim & Unit>) -> +List<U32>:
+  match r:
+    case None{}:
+      []
+    case Some{(s, u)}:
+      S.Sim.disk(s)
+
+def discarded(st: St.Store, off: U32, len: U32) -> +List<U32>:
+  discarded.got(S.Sim.exec(Unit, sim(), St.Store.discard(Unit, st, u64(off), u64(len))))
+
+# The image as version 3 (header bytes 4..7).
+def sim_v3() -> S.Sim:
+  S.Sim.with_disk(S.Sim.new(u64(0), 8192n), cat([81, 70, 73, 251, 0, 0, 0, 3], List.drop(&2, U32, image(), 8n)))
+
 def main() -> IO(Unit):
   +d = disk_after(written(sim(), 1100, [5, 5, 5, 5]))
   +d2 = disk_after(written(sim(), 600, [4, 4]))
+  +x = discarded(store(), 512, 512)
+  +below = discarded(St.QcowStore{0, q(), St.RawStore{1}}, 512, 512)
+  +v3 = discarded.got(S.Sim.exec(Unit, sim_v3(), St.Store.discard(Unit, St.QcowStore{0, q(), St.RawStore{1}}, u64(512), u64(512))))
   do IO<Unit>:
+    # discard of guest cluster 1 (mapped at 2560, COPIED): its L2 entry 0, its
+    # count 0, its host cluster a hole (the simulator zeros it), and it reads
+    # as zeros; the image keeps its size
+    T.eq_str("qcow2 discard: l2 entry unallocated", show(B.Bytes.slice(x, 2056n, 8n)), show(be64(0)))
+    T.eq_str("qcow2 discard: count 0", show(B.Bytes.slice(x, 1546n, 2n)), "[0, 0]")
+    T.eq_str("qcow2 discard: host cluster freed", show(B.Bytes.slice(x, 2560n, 4n)), "[0, 0, 0, 0]")
+    T.eq_u32("qcow2 discard: same size", U32.from_nat(List.length(&2, U32, x)), 3584)
+    T.eq_str("qcow2 discard: reads zeros", show(read(S.Sim.with_disk(sim(), x), 512, 4)), "[0, 0, 0, 0]")
+    # only whole clusters: a range inside cluster 1 changes nothing
+    T.eq_str("qcow2 discard of part of a cluster keeps it", show(B.Bytes.slice(discarded(store(), 600, 300), 2056n, 8n)), show(copied(2560)))
+    # over a backing file, a version 2 image (this one) cannot mark zeros: kept
+    T.eq_str("qcow2 discard over a backing file, version 2: kept", show(B.Bytes.slice(below, 2056n, 8n)), show(copied(2560)))
+    # version 3 over a backing file: the zero flag (it must not read the
+    # backing file's older data), the count 0, the cluster freed
+    T.eq_str("qcow2 discard over a backing file, version 3: zero flag", show(B.Bytes.slice(v3, 2056n, 8n)), show(be64(1)))
+    T.eq_str("qcow2 discard over a backing file, version 3: count 0", show(B.Bytes.slice(v3, 1546n, 2n)), "[0, 0]")
     T.eq_str("qcow2 read mapped", show(read(sim(), 512, 4)), "[7, 7, 7, 7]")
     T.eq_str("qcow2 read across clusters", show(read(sim(), 1020, 8)), "[7, 7, 7, 7, 0, 0, 0, 0]")
     T.eq_str("qcow2 read zeroed", show(read(sim(), 1024, 4)), "[0, 0, 0, 0]")

@@ -43,8 +43,8 @@ stays.
 ## Moved on 2026-11-11 (C_TO_BEND.md, stages 2, 3 and 4)
 
 - Discard (TRIM), new: which requests are valid, which blocks a segment
-  frees (whole 4 KiB blocks) and what a qcow2 image does (keeps its
-  clusters) are src/virtio/blk.bend and src/disk/store.bend (with laws); C
+  frees (whole 4 KiB blocks) and which qcow2 clusters let go (and in what
+  order: entry, count, hole) are src/virtio/blk.bend and src/disk/store.bend (with laws); C
   punches the hole (`Hvf.disk_discard`: F_PUNCHHOLE, fallocate).
 - VM folders and named snapshots, new (bend-vmm create, run, snapshot,
   restore, ...): the commands, vm.conf, snapshot names, folders, metadata,
