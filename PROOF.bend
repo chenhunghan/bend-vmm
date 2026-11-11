@@ -56,3 +56,7 @@ import ./proofs/gicplan.bend as Proofs_gicplan
 import ./proofs/regplan.bend as Proofs_regplan
 import ./proofs/entry.bend as Proofs_entry
 import ./proofs/hostfiles.bend as Proofs_hostfiles
+import ./proofs/range.bend as Proofs_range
+import ./proofs/handoff.bend as Proofs_handoff
+import ./proofs/fdcache.bend as Proofs_fdcache
+import ./proofs/transfer.bend as Proofs_transfer

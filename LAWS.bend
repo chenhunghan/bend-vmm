@@ -55,3 +55,7 @@ import ./laws/gicplan.bend as Laws_gicplan
 import ./laws/regplan.bend as Laws_regplan
 import ./laws/entry.bend as Laws_entry
 import ./laws/hostfiles.bend as Laws_hostfiles
+import ./laws/range.bend as Laws_range
+import ./laws/handoff.bend as Laws_handoff
+import ./laws/fdcache.bend as Laws_fdcache
+import ./laws/transfer.bend as Laws_transfer
