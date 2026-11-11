@@ -273,6 +273,39 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5d. NAT faults: a slow host reader, a connection reset midway"
+  # 16 MiB to a host program that reads 16 KiB every 10 ms: every byte
+  # arrives, and the NAT holds the guest back (src/net/flush.bend: blocked
+  # past 4 MiB pending) instead of buffering it, so the VMM's memory grows
+  # by less than 24 MiB. Then a host program that resets the connection
+  # after 1 MiB: the guest's sender gets an error, and the next connection
+  # works.
+  t=$(mktemp -d); sport=$((20000 + RANDOM % 20000)); dport=$((sport + 1))
+  python3 scripts/netfault.py slow "$sport" 16777216 "$t/slow" & slow=$!
+  python3 scripts/netfault.py drop "$dport" 1048576 "$t/drop" & drop=$!
+  slp 1
+  ( peak=0; base=0; while :; do
+      p=$(pgrep -f '^./out/bend-vmm .*bendnetfault' | head -1); [ -n "$p" ] || { sleep 0.2; continue; }
+      r=$(ps -o rss= -p "$p" 2>/dev/null | tr -d ' '); [ -n "$r" ] || break
+      [ -f "$t/slow.start" ] && [ "$base" = 0 ] && base=$r
+      [ "$r" -gt "$peak" ] && peak=$r
+      echo "$base $peak" > "$t/rss"; sleep 0.2
+    done ) & mon=$!
+  out=$(drive 150 "busybox shell" "head -c 16777216 /dev/zero | nc 10.0.2.2 $sport; echo SLOW-DONE\n" "SLOW-DONE" "head -c 8388608 /dev/zero | nc 10.0.2.2 $dport; echo DROP-EXIT-\$?\n" "DROP-EXIT" "head -c 1048576 /dev/zero | nc 10.0.2.2 $dport; echo DROP-DONE\n" "DROP-DONE" 'poweroff -f\n' -- \
+    ./out/bend-vmm --mem 512 --cpus 2 --kernel out/guest/Image --initrd out/guest/guest.cpio --cmdline "console=ttyAMA0 quiet bendnetfault" 2>&1 | tr -d '\r')
+  kill $mon $slow $drop 2>/dev/null; wait $slow $drop 2>/dev/null
+  read -r base peak < "$t/rss" 2>/dev/null || { base=0; peak=0; }
+  grow=$(( (peak - base) / 1024 ))
+  [ "$(cat "$t/slow" 2>/dev/null)" = 16777216 ] && [ "$base" -gt 0 ] && [ "$grow" -lt 24 ] \
+    && grn "ok: a slow host reader gets every byte; the VMM grew by $grow MiB (held back, not buffered)" \
+    || { red "failed: slow host reader (got $(cat "$t/slow" 2>/dev/null), grew $grow MiB)"; grep -a "SLOW\|nc:" <<<"$out" | tail -3; fail=1; }
+  [ "$(cat "$t/drop" 2>/dev/null)" = "dropped 1048576" ] && grep -aq "DROP-EXIT-" <<<"$out" && grep -aq "DROP-DONE" <<<"$out" \
+    && grn "ok: a connection reset midway ends the guest's sender; the next connection works" \
+    || { red "failed: connection reset ($(cat "$t/drop" 2>/dev/null))"; grep -a "DROP\|nc:" <<<"$out" | tail -3; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 6. display: framebuffer, virtio keyboard and tablet"
   t=$(mktemp -d); sock=$t/vm.sock
   ( (slp 40) | alarm 40 ./out/bend-vmm --mem 512 --cpus 2 --kernel out/guest/vmlinuz --initrd out/guest/guest.cpio --control "$sock" --display 640x480,headless --cmdline "console=ttyAMA0 quiet" > "$t/run.log" 2>&1 & )

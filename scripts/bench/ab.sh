@@ -14,7 +14,7 @@
 # report (report.txt) and decides: exit 1 when a metric is slower. A
 # missing value, a timeout or a guest failure stops the run with status 2:
 # a broken run never reads as a comparison. Each pair waits for an idle
-# host (1-minute load under AB_MAXLOAD, default 4).
+# host (1-minute load under AB_MAXLOAD, default half the logical CPUs).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 root=$PWD
@@ -57,7 +57,7 @@ printf 'pair\torder\tmetric\tunit\tA\tB\n' > "$obs"
   echo "bend $(bend version 2>/dev/null | head -1)"
   echo "clang $(clang --version 2>/dev/null | head -1)"
   echo "host $(uname -srm) $(sysctl -n machdep.cpu.brand_string 2>/dev/null || grep -m1 'model name' /proc/cpuinfo 2>/dev/null)"
-  echo "metrics $metrics pairs $pairs date $(date -u +%FT%TZ)"
+  echo "metrics $metrics pairs $pairs date $(date -u +%FT%TZ) load $(sysctl -n vm.loadavg 2>/dev/null || cat /proc/loadavg)"
 } > "$run/meta.txt"
 cat "$run/meta.txt"
 
@@ -118,10 +118,12 @@ pair() { # pair number, order: append both observations, joined by metric
   [ "$(awk -F'\t' -v i="$i" '$1 == i' "$obs" | wc -l)" -eq "$(wc -l <<<"$x")" ] || die "pair $i: A and B gave different metrics"
 }
 
-# an idle host: wait until the 1-minute load is under AB_MAXLOAD (default 4)
+# an idle host: wait until the 1-minute load is under AB_MAXLOAD (default
+# half the logical CPUs)
+maxload=${AB_MAXLOAD:-$(( $(sysctl -n hw.ncpu 2>/dev/null || nproc) / 2 ))}
 load() { sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}' || cut -d' ' -f1 /proc/loadavg; }
-idle() { local w=0; until awk -v l="$(load)" -v m="${AB_MAXLOAD:-4}" 'BEGIN { exit !(l < m) }'; do
-  [ $w = 0 ] && echo "ab.sh: waiting for load $(load) < ${AB_MAXLOAD:-4}" >&2; w=1; sleep 20; done; }
+idle() { local w=0; until awk -v l="$(load)" -v m="$maxload" 'BEGIN { exit !(l < m) }'; do
+  [ $w = 0 ] && echo "ab.sh: waiting for load $(load) < $maxload" >&2; w=1; sleep 20; done; }
 idle
 observe "$A" >/dev/null || exit 2; observe "$B" >/dev/null || exit 2   # warmup
 for i in $(seq "$pairs"); do
