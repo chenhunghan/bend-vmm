@@ -344,6 +344,9 @@ def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
           Sim.run(f, A, s, k(Sim.now(s)))
         case V.VmDiskFlush{dk, next}:
           Sim.run(f, A, Sim.flush(s), next)
+        case V.VmDiskDiscard{dk, off, len, next}:
+          # a hole reads as zeros
+          Sim.run(f, A, Sim.disk_write(s, dk, off, B.Bytes.zeros(U32.to_nat(U.U64.lo(len)))), next)
         case V.VmNet{cmd, next}:
           Sim.run(f, A, Sim.net_cmd(s, cmd), next)
         case V.VmVsock{cmd, next}:

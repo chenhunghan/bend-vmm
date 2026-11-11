@@ -112,13 +112,107 @@ def Blk.fits(+sectors: U.U64, +sector: U.U64, len: U32) -> Bool:
 def Blk.offset(sector: U.U64) -> U.U64:
   U.U64.shl(9n, sector)
 
+# Discard (VIRTIO_BLK_F_DISCARD, bit 13), offered for a writable disk: the
+# guest names sectors it no longer needs and the host frees them (a hole in
+# a raw image: they then read as zeros; a qcow2 image keeps its clusters).
+# One request holds 1 to discard_max_seg segments of 16 bytes {sector u64,
+# num_sectors u32, flags u32}; a segment covers at most
+# discard_max_sectors (2 GiB); flags other than UNMAP (bit 0) answer
+# UNSUPP, a segment past the end IOERR. The host frees whole 4 KiB blocks
+# (discard_align sectors) inside each segment: a partial block stays.
+# Config: after capacity, size_max and seg_max, geometry, blk_size,
+# topology, writeback and num_queues are 0 (their features are not
+# offered), then max_discard_sectors, max_discard_seg and
+# discard_sector_alignment (offsets 36, 40, 44).
+def Blk.discard_max_sectors() -> U32:
+  4194304
+
+def Blk.discard_max_seg() -> U32:
+  32
+
+def Blk.discard_align() -> U32:
+  8
+
+def Blk.offered_dis.go(ro: Bool, f: U.U64) -> U.U64:
+  match ro f:
+    case True{} _:
+      f
+    case False{} U.U64{h, l}:
+      U.U64{h, (l .|. 8192 : U32)}
+
+# What the device offers: Blk.offered, plus DISCARD when writable.
+def Blk.offered_dis(+ro: Bool) -> U.U64:
+  Blk.offered_dis.go(ro, Blk.offered(ro))
+
+def Blk.config_dis(sectors: U.U64) -> +List<U32>:
+  List.append(&2, U32, Blk.config_limits(sectors), List.append(&2, U32, B.Bytes.zeros(20n),
+    List.append(&2, U32, B.Bytes.le32(Blk.discard_max_sectors()), List.append(&2, U32, B.Bytes.le32(Blk.discard_max_seg()), B.Bytes.le32(Blk.discard_align())))))
+
+type Dseg is Data:
+  Dseg{sector: U.U64, num: U32, flags: U32}
+
+# The segments of a discard request's data (16 bytes each).
+def Blk.dis.segs(fuel: Nat, bs: +List<U32>) -> +List<Dseg>:
+  match fuel:
+    case 0n:
+      []
+    case 1n+f:
+      match bs:
+        case Nil{}:
+          []
+        case Con{b, rest}:
+          +all : +List<U32> = Con{b, rest}
+          Con{Dseg{B.Bytes.read_le64(all), B.Bytes.read_le32(List.drop(&2, U32, all, 8n)), B.Bytes.read_le32(List.drop(&2, U32, all, 12n))},
+            Blk.dis.segs(f, List.drop(&2, U32, all, 16n))}
+
+def Blk.dis.ok1(+sectors: U.U64, d: Dseg) -> U32:
+  match d:
+    case Dseg{+sector, +num, +flags}:
+      Bool.pick(U32, U32.is_ne((flags .&. 4294967294 : U32), 0), Blk.s_unsupp(),
+        Bool.pick(U32, U32.is_le(num, Blk.discard_max_sectors()) && Blk.fits(sectors, sector, (num * 512 : U32)), Blk.s_ok(), Blk.s_ioerr()))
+
+# A request's status before anything is freed: the first segment's that is
+# not OK, else OK.
+def Blk.dis.status(ds: +List<Dseg>, +sectors: U.U64) -> U32:
+  match ds:
+    case Nil{}:
+      Blk.s_ok()
+    case Con{d, rest}:
+      +s = Blk.dis.ok1(sectors, d)
+      Bool.pick(U32, U32.is_eq(s, Blk.s_ok()), Blk.dis.status(rest, sectors), s)
+
+# The whole 4 KiB blocks inside a segment: their offset and length (0: none).
+def Blk.dis.range(+sector: U.U64, +num: U32) -> U.U64 & U.U64:
+  +off = Blk.offset(sector)
+  +end = U.U64.add(off, U.U64.shl(9n, U.U64{0, num}))
+  +a = U.U64.align_up(12n, off)
+  +e = U.U64.and(end, U.U64.not(U.U64{0, 4095}))
+  (a, Bool.pick(U.U64, U.U64.is_lt(a, e), U.U64.sub(e, a), U.U64.zero()))
+
+def Blk.dis.free(-R: Type, st: S.Store, r: U.U64 & U.U64) -> V.Op<R, Unit>:
+  match r:
+    case (+off, +len):
+      Bool.pick(V.Op<R, Unit>, U.U64.is_zero(len), V.Op.pure(R, Unit, Unit{}), S.Store.discard(R, st, off, len))
+
+def Blk.dis.run(-R: Type, ds: +List<Dseg>, +st: S.Store) -> V.Op<R, Unit>:
+  match ds:
+    case Nil{}:
+      V.Op.pure(R, Unit, Unit{})
+    case Con{d, rest}:
+      match d:
+        case Dseg{sector, num, flags}:
+          do V.Op<R, Unit>:
+            Blk.dis.free(R, st, Blk.dis.range(sector, num))
+            Blk.dis.run(R, rest, st)
+
 # The request kind of a type field: 0 IN, 1 OUT, 2 GET_ID, 3 FLUSH,
-# 4 unsupported.
+# 5 DISCARD (type 11), 4 unsupported.
 def Blk.kind(+t: U32) -> Nat:
   Bool.pick(Nat, U32.is_eq(t, 0), 0n,
     Bool.pick(Nat, U32.is_eq(t, 1), 1n,
       Bool.pick(Nat, U32.is_eq(t, 8), 2n,
-        Bool.pick(Nat, U32.is_eq(t, 4), 3n, 4n))))
+        Bool.pick(Nat, U32.is_eq(t, 4), 3n,
+          Bool.pick(Nat, U32.is_eq(t, 11), 5n, 4n)))))
 
 # Writes byte b at offset off of the writable area ds.
 def Blk.put(-R: Type, ds: +List<Q.Desc>, +off: U32, +b: U32) -> V.Op<R, Unit>:
@@ -195,6 +289,31 @@ def Blk.flush(-R: Type, +st: S.Store, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, 
     s : U32 <- Blk.status(R, st, True{})
     Blk.reply(R, w, room, (s, []))
 
+# DISCARD: the readable data after the header, 1 to discard_max_seg
+# segments; read through Bend (16 bytes each), checked, then freed.
+def Blk.discard.go(-R: Type, +bs: +List<U32>, st: S.Store, +sectors: U.U64, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
+  +ds = Blk.dis.segs(33n, bs)
+  +s = Blk.dis.status(ds, sectors)
+  Bool.pick(V.Op<R, U32>, U32.is_eq(s, Blk.s_ok()),
+    V.Op.bind(R, Unit, U32, Blk.dis.run(R, ds, st), u => Blk.reply(R, w, room, (Blk.s_ok(), []))),
+    Blk.reply(R, w, room, (s, [])))
+
+def Blk.discard.read(-R: Type, ok: Bool, st: S.Store, +sectors: U.U64, +ss: +List<V.Iov>, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
+  match ok:
+    case False{}:
+      Blk.reply(R, w, room, (Blk.s_ioerr(), []))
+    case True{}:
+      V.Op.bind(R, +List<U32>, U32, Q.Vq.read_segs(R, ss), bs => Blk.discard.go(R, bs, st, sectors, w, room))
+
+def Blk.discard(-R: Type, ro: Bool, st: S.Store, +sectors: U.U64, +r: +List<Q.Desc>, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
+  match ro:
+    case True{}:
+      Blk.reply(R, w, room, (Blk.s_unsupp(), []))
+    case False{}:
+      +ss = Q.Vq.segs(r, 16, ((Blk.discard_max_seg() * 16 : U32) + 1 : U32))
+      +n = V.Iov.total(ss)
+      Blk.discard.read(R, U32.is_lt(0, n) && U32.is_eq((n % 16 : U32), 0) && U32.is_le(n, (Blk.discard_max_seg() * 16 : U32)), st, sectors, ss, w, room)
+
 def Blk.exec.kind(
   -R: Type, k: Nat, ro: Bool, st: S.Store, +sectors: U.U64, +sector: U.U64, +r: +List<Q.Desc>, +w: +List<Q.Desc>, +room: U32
 ) -> V.Op<R, U32>:
@@ -208,6 +327,8 @@ def Blk.exec.kind(
       Blk.reply(R, w, room, (Blk.s_ok(), Blk.id_bytes()))
     case 3n:
       Blk.flush(R, st, w, room)
+    case 5n:
+      Blk.discard(R, ro, st, sectors, r, w, room)
     case _:
       Blk.reply(R, w, room, (Blk.s_unsupp(), []))
 

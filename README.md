@@ -135,6 +135,11 @@ of its own next to PATH and renamed over it, so a failed write keeps what
 PATH held, and a restored VM may snapshot over the file it came from. TCP
 connections through the NAT do not survive a restore.
 
+Discard (TRIM): a writable disk offers virtio-blk DISCARD, so what the guest
+frees (`fstrim`, `mount -o discard`, `blkdiscard`) goes back to the host: the
+VMM punches holes in a raw image (whole 4 KiB blocks; they read as zeros).
+A qcow2 image keeps its clusters.
+
 Disk snapshots: a snapshot also keeps each writable `--disk` image as it was,
 next to it (`PATH.GEN.disk0`, ...: a copy-on-write clone on APFS, btrfs or
 XFS, which costs only the blocks the guest changes later; a full copy on

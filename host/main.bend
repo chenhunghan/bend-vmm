@@ -248,6 +248,10 @@ def vkey(+conn: U32) -> U32:
       do IO<A>:
         _ : U32 <- H.Hvf.disk_flush(d)
         interp(cpu, mc, done, A, next)
+    case V.VmDiskDiscard{d, off, len, next}:
+      do IO<A>:
+        _ : U32 <- H.Host.disk_discard(d, off, len)
+        interp(cpu, mc, done, A, next)
     case V.VmNet{cmd, next}:
       do IO<A>:
         net_cmd(mc, done, cmd)

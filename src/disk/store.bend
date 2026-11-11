@@ -393,6 +393,18 @@ def Store.status(-R: Type, st: Store) -> V.Op<R, U32>:
         return (a .|. b : U32)
 
 # Makes the top image's writes durable.
+# Frees [off, off+len) of a raw image (a hole on the host). A qcow2 image
+# keeps its clusters (discard is advisory; freeing them would rewrite its
+# tables).
+def Store.discard(-R: Type, st: Store, off: U.U64, len: U.U64) -> V.Op<R, Unit>:
+  match st:
+    case NoStore{}:
+      V.Op.pure(R, Unit, Unit{})
+    case RawStore{disk}:
+      V.Op.disk_discard(R, disk, off, len)
+    case QcowStore{disk, q, below}:
+      V.Op.pure(R, Unit, Unit{})
+
 def Store.flush(-R: Type, st: Store) -> V.Op<R, Unit>:
   match st:
     case NoStore{}:

@@ -50,6 +50,7 @@ io_eff(CID(Hvf.now), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.reexec), hvf_unavailable);
 io_eff(CID(Hvf.exe_path), () => "");
 io_eff(CID(Hvf.set_exec), () => 0);
+io_eff(CID(Hvf.disk_discard), () => 0);
 io_eff(CID(Hvf.ctl_call), () => ({ $: CID(Con), head: 1, tail: { $: CID(Con), head: 2, tail: { $: CID(Nil) } } }));
 io_eff(CID(Hvf.ls), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.rmdir), hvf_unavailable);

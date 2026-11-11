@@ -30,3 +30,21 @@ def L.blk.offered_ro():
 
 def L.blk.config_limits():
   {==}
+
+def L.blk.kind_discard():
+  {==}
+
+def L.blk.discard_range():
+  {==}
+
+def L.blk.discard_range_none():
+  {==}
+
+def L.blk.offered_discard():
+  {==}
+
+def L.blk.offered_discard_ro():
+  {==}
+
+def L.blk.config_discard():
+  {==}

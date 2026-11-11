@@ -316,6 +316,38 @@ def host_errors() -> IO(Unit):
     check("blk host write error", run_on(1, w), 16912, [1], used(1, [0, 1]), True{}, 1, disk())
     check("blk host flush error", run_on(1, fl), 16400, [1], used(1, [0, 1]), True{}, 1, disk())
 
+# DISCARD (type 11): one segment {sector u64, num u32, flags u32} per 16
+# bytes after the header. Whole 4 KiB blocks inside it are freed (a hole:
+# zeros); the 4-sector disk has none, so nothing changes there.
+def dseg(sector: U32, num: U32, flags: U32) -> +List<U32>:
+  cat(B.Bytes.le64(u64(sector)), cat(B.Bytes.le32(num), B.Bytes.le32(flags)))
+
+def dis_sim(+data: +List<U32>) -> S.Sim:
+  +n = U32.from_nat(List.length(&2, U32, data))
+  +t = cat(desc(16384, 16, 1, 1), cat(desc(16400, n, 1, 2), desc(16900, 1, 2, 0)))
+  +s = S.Sim.write(machine(t, 1, [0]), u64(16384), hdr(11, 0))
+  S.Sim.write(s, u64(16400), data)
+
+# A 16-sector disk (8 KiB) of the pattern: sectors 1..15 free the second
+# 4 KiB block only (the first is cut at sector 1).
+def big_disk() -> +List<U32>:
+  pattern(8192n, 0)
+
+def run_big(s: S.Sim) -> Maybe<&1, S.Sim & (Q.Vq & Bool)>:
+  S.Sim.exec(Q.Vq & Bool, S.Sim.with_disk(s, big_disk()), K.Blk.process(Q.Vq & Bool, 0, u64(16), queue()))
+
+def discard() -> IO(Unit):
+  do IO<Unit>:
+    check("blk discard inside one block frees nothing", run(dis_sim(dseg(0, 4, 0))), 16900, [0], used(1, [0, 1]), True{}, 1, disk())
+    check("blk discard frees whole blocks", run_big(dis_sim(dseg(1, 15, 1))), 16900, [0], used(1, [0, 1]), True{}, 1, cat(slice(big_disk(), 0n, 4096n), List.replicate(U32, 4096n, 0)))
+    check("blk discard of other flags is UNSUPP", run(dis_sim(dseg(0, 4, 2))), 16900, [2], used(1, [0, 1]), True{}, 1, disk())
+    check("blk discard past the end is IOERR", run(dis_sim(dseg(2, 4, 0))), 16900, [1], used(1, [0, 1]), True{}, 1, disk())
+    check("blk discard of a broken segment is IOERR", run(dis_sim(List.take(&2, U32, dseg(0, 4, 0), 15n))), 16900, [1], used(1, [0, 1]), True{}, 1, disk())
+    check("blk discard on a read-only disk is UNSUPP", run_ro(dis_sim(dseg(0, 4, 0))), 16900, [2], used(1, [0, 1]), True{}, 1, disk())
+    T.eq_str("blk features with discard", show(feats(K.Blk.offered_dis(False{}))), "[1, 8710]")
+    T.eq_str("blk read-only: no discard", show(feats(K.Blk.offered_dis(True{}))), "[1, 550]")
+    T.eq_u32("blk config with discard: 48 bytes", U32.from_nat(List.length(&2, U32, K.Blk.config_dis(u64(16)))), 48)
+
 def main() -> IO(Unit):
   do IO<Unit>:
     T.eq_str("blk config", show(K.Blk.config(U.U64{1, 2})), "[2, 0, 0, 0, 1, 0, 0, 0]")
@@ -336,6 +368,7 @@ def main() -> IO(Unit):
     read_one_desc()
     short_header()
     host_errors()
+    discard()
     T.eq_str("blk features rw", show(feats(K.Blk.features(False{}))), "[1, 512]")
     T.eq_str("blk features ro", show(feats(K.Blk.features(True{}))), "[1, 544]")
     big_requests()

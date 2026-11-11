@@ -461,6 +461,28 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   rm -rf "$t"
 fi
 
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 8c. discard (TRIM): what the guest frees, the host frees"
+  # 16 MiB written into a sparse 64 MiB image, then blkdiscard of it: the
+  # image's blocks go back to the host, the range reads as zeros, and the
+  # data before it is untouched (src/virtio/blk.bend, DISCARD)
+  t=$(mktemp -d)
+  dd if=/dev/zero of="$t/d.img" bs=1048576 count=0 seek=64 2>/dev/null
+  head -c 1048576 /dev/urandom | dd of="$t/d.img" conv=notrunc 2>/dev/null
+  want=$(head -c 1048576 "$t/d.img" | python3 -c 'import hashlib,sys; print(hashlib.md5(sys.stdin.buffer.read()).hexdigest())')
+  ( (slp 8; printf 'dd if=/dev/urandom of=/dev/vda bs=1048576 seek=1 count=16 oflag=direct 2>/dev/null; sync; echo WROTE-$((1+1))\n'; slp 6; printf 'blkdiscard -o 1048576 -l 16777216 /dev/vda; echo DIS-rc=$?; echo NONZERO-$(dd if=/dev/vda bs=1048576 skip=1 count=16 2>/dev/null | tr -d "\\000" | wc -c); echo TRIM-DONE\n'; slp 6; printf 'poweroff -f\n'; slp 2) \
+    | alarm 90 ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/d.img" --cmdline "console=ttyAMA0 quiet" > "$t/out" 2>&1 & )
+  full=0
+  for _ in $(seq $((40 * SLOW))); do grep -aq 'WROTE-2' "$t/out" 2>/dev/null && { sleep 1; full=$(du -k "$t/d.img" | cut -f1); break; }; sleep 0.5; done
+  for _ in $(seq $((60 * SLOW))); do grep -aq 'stopped' "$t/out" 2>/dev/null && break; sleep 0.5; done
+  after=$(du -k "$t/d.img" | cut -f1)
+  got=$(head -c 1048576 "$t/d.img" | python3 -c 'import hashlib,sys; print(hashlib.md5(sys.stdin.buffer.read()).hexdigest())')
+  if grep -aq 'DIS-rc=0' "$t/out" && grep -aq '^NONZERO-0' <<<"$(tr -d '\r' < "$t/out")" && [ "$full" -gt $((after + 15000)) ] && [ "$got" = "$want" ]; then
+    grn "ok: discard frees the host's blocks ($full -> $after KiB), reads zeros, keeps the rest"
+  else red "failed: discard ($full -> $after KiB)"; grep -a "DIS-rc\|NONZERO\|blkdiscard" "$t/out" | tail -3; fail=1; fi
+  rm -rf "$t"
+fi
+
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && command -v hdiutil >/dev/null; then
   echo "== 9. a full host disk: the guest sees I/O errors, not lost writes"
   t=$(mktemp -d)

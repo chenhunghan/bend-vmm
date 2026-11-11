@@ -5368,6 +5368,35 @@ Term hvf_size_kib_run(Env e, Term* f, IoWork* w) {
   return (Term)(u32)(k > 0xffffffffu ? 0xffffffffu : k);
 }
 
+// Hvf.disk_discard(disk, off_hi, off_lo, len_hi, len_lo) -> U32: frees the
+// image's blocks in [off, off+len): a hole that reads as zeros (virtio-blk
+// DISCARD: src/virtio/blk.bend picks whole 4 KiB blocks). 0, or an errno;
+// a file system that cannot punch holes keeps the blocks (discard is
+// advisory: the request still succeeds).
+#ifndef __APPLE__
+#ifndef FALLOC_FL_KEEP_SIZE
+#define FALLOC_FL_KEEP_SIZE 0x01
+#endif
+#ifndef FALLOC_FL_PUNCH_HOLE
+#define FALLOC_FL_PUNCH_HOLE 0x02
+#endif
+int fallocate(int fd, int mode, off_t offset, off_t len);
+#endif
+Term hvf_disk_discard_run(Env e, Term* f, IoWork* w) {
+  int   fd  = hvf_disk(f[0]);
+  off_t off = (off_t)hvf_u64(f[1], f[2]);
+  off_t len = (off_t)hvf_u64(f[3], f[4]);
+  if (fd < 0 || len <= 0) {
+    return (Term)(u32)(fd < 0 ? EBADF : 0);
+  }
+#ifdef __APPLE__
+  struct fpunchhole p = {0, 0, off, len};
+  return (Term)(u32)(fcntl(fd, F_PUNCHHOLE, &p) == 0 ? 0 : errno);
+#else
+  return (Term)(u32)(fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, off, len) == 0 ? 0 : errno);
+#endif
+}
+
 // The console log and share quotas (Hvf.console_log, Hvf.share_quota):
 // placed after the hot paths.
 
@@ -5705,6 +5734,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.reexec)
   io_eff(CID(Hvf.reexec), hvf_reexec_run);
+#endif
+#ifdef CID(Hvf.disk_discard)
+  io_eff(CID(Hvf.disk_discard), hvf_disk_discard_run);
 #endif
 #ifdef CID(Hvf.ctl_call)
   io_eff(CID(Hvf.ctl_call), hvf_ctl_call_run);

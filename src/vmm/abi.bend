@@ -236,6 +236,9 @@ type Vm<-A: Type> is Type:
   VmNow{k: U.U64 -> Vm<A>}
   # Makes earlier writes to disk image `disk` durable (fsync).
   VmDiskFlush{disk: U32, next: Vm<A>}
+  # Frees the host's blocks of disk image `disk` in [offset, offset+len): a
+  # hole that reads as zeros (virtio-blk DISCARD; advisory, never fails).
+  VmDiskDiscard{disk: U32, offset: U.U64, len: U.U64, next: Vm<A>}
   # A network command for the host's sockets.
   VmNet{cmd: NetCmd, next: Vm<A>}
   # A file operation on the shared directory (`share` numbers the --share).
@@ -382,6 +385,9 @@ def Op.now(-R: Type) -> Op<R, U.U64>:
 
 def Op.disk_flush(-R: Type, disk: U32) -> Op<R, Unit>:
   Op{k => VmDiskFlush{disk, k(Unit{})}}
+
+def Op.disk_discard(-R: Type, disk: U32, offset: U.U64, len: U.U64) -> Op<R, Unit>:
+  Op{k => VmDiskDiscard{disk, offset, len, k(Unit{})}}
 
 def Op.net(-R: Type, cmd: NetCmd) -> Op<R, Unit>:
   Op{k => VmNet{cmd, k(Unit{})}}
