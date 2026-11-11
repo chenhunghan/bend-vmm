@@ -252,6 +252,10 @@ def vkey(+conn: U32) -> U32:
       do IO<A>:
         _ : U32 <- H.Host.disk_discard(d, off, len)
         interp(cpu, mc, done, A, next)
+    case V.VmDiskSpace{d, op, at, len, k}:
+      do IO<A>:
+        ws : +List<U32> <- H.Host.disk_space(d, op, at, len)
+        interp(cpu, mc, done, A, k(ws))
     case V.VmNet{cmd, next}:
       do IO<A>:
         net_cmd(mc, done, cmd)

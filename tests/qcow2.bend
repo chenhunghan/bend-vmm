@@ -102,6 +102,13 @@ def discarded(st: St.Store, off: U32, len: U32) -> +List<U32>:
 def sim_v3() -> S.Sim:
   S.Sim.with_disk(S.Sim.new(u64(0), 8192n), cat([81, 70, 73, 251, 0, 0, 0, 3], List.drop(&2, U32, image(), 8n)))
 
+# A write into guest cluster 3 (unallocated) after cluster 1's host cluster
+# 2560 was discarded: the freed cluster is taken again, the image keeps its
+# size.
+def reused() -> +List<U32>:
+  +s = S.Sim.with_disk(sim(), discarded(store(), 512, 512))
+  disk_after(written(s, 1536, [6, 6, 6, 6]))
+
 def main() -> IO(Unit):
   +d = disk_after(written(sim(), 1100, [5, 5, 5, 5]))
   +d2 = disk_after(written(sim(), 600, [4, 4]))
@@ -125,6 +132,14 @@ def main() -> IO(Unit):
     # backing file's older data), the count 0, the cluster freed
     T.eq_str("qcow2 discard over a backing file, version 3: zero flag", show(B.Bytes.slice(v3, 2056n, 8n)), show(be64(1)))
     T.eq_str("qcow2 discard over a backing file, version 3: count 0", show(B.Bytes.slice(v3, 1546n, 2n)), "[0, 0]")
+    # Store.alloc: the freed cluster 2560 is reused (zeroed, count 1)
+    T.eq_u32("qcow2 reuse: the image keeps its size", U32.from_nat(List.length(&2, U32, reused())), 3584)
+    T.eq_str("qcow2 reuse: l2 entry", show(B.Bytes.slice(reused(), 2072n, 8n)), show(copied(2560)))
+    T.eq_str("qcow2 reuse: count 1", show(B.Bytes.slice(reused(), 1546n, 2n)), "[0, 1]")
+    T.eq_str("qcow2 reuse: data, zeros around it", show(B.Bytes.slice(reused(), 2558n, 8n)), "[0, 0, 6, 6, 6, 6, 0, 0]")
+    T.eq_str("qcow2 reuse: reads back", show(read(S.Sim.with_disk(sim(), reused()), 1536, 4)), "[6, 6, 6, 6]")
+    T.eq_u32("qcow2 first free count", St.Store.first_free([0, 1, 0, 2, 0, 0, 0, 1], 0, 4), 2)
+    T.eq_u32("qcow2 no free count", St.Store.first_free([0, 1, 0, 1], 0, 2), 2)
     T.eq_str("qcow2 read mapped", show(read(sim(), 512, 4)), "[7, 7, 7, 7]")
     T.eq_str("qcow2 read across clusters", show(read(sim(), 1020, 8)), "[7, 7, 7, 7, 0, 0, 0, 0]")
     T.eq_str("qcow2 read zeroed", show(read(sim(), 1024, 4)), "[0, 0, 0, 0]")

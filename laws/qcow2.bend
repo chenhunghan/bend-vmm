@@ -78,3 +78,14 @@ law qcow2.magic_other:
 
 law qcow2.magic_short:
   {St.Store.qcow_magic([81, 70, 73]) == False{} : Bool}
+
+# Proposed: cluster reuse (Store.alloc) takes the first count of 0 in a
+# window of Store.window() counts; none in it is the window's length.
+law qcow2.first_free:
+  {St.Store.first_free([0, 1, 0, 2, 0, 0, 0, 1], 0, 4) == 2 : U32}
+
+law qcow2.first_free_none:
+  {St.Store.first_free([0, 1, 0, 1], 0, 2) == 2 : U32}
+
+law qcow2.window:
+  {St.Store.window() == 256 : U32}

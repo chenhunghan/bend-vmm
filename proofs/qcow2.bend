@@ -57,3 +57,12 @@ def L.qcow2.magic_other():
 
 def L.qcow2.magic_short():
   {==}
+
+def L.qcow2.first_free():
+  {==}
+
+def L.qcow2.first_free_none():
+  {==}
+
+def L.qcow2.window():
+  {==}

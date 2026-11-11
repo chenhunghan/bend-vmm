@@ -484,18 +484,25 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && command -v qemu-img >/dev/null; then
-  echo "== 8d. discard on a qcow2 image: its clusters freed, qemu-img check clean"
+  echo "== 8d. discard on a qcow2 image: its clusters freed, then reused; qemu-img check clean"
+  # 16 MiB written, discarded (the image's clusters let go, holes on the
+  # host), then 16 MiB more written: the freed clusters are taken again
+  # (Store.alloc), so the image does not grow, and reads back what was written
   t=$(mktemp -d)
   qemu-img create -q -f qcow2 "$t/d.qcow2" 64M
-  ( (slp 8; printf 'dd if=/dev/urandom of=/dev/vda bs=1048576 seek=1 count=16 oflag=direct 2>/dev/null; sync; echo WROTE-$((1+1))\n'; slp 6; printf 'blkdiscard -o 1048576 -l 16777216 /dev/vda; echo DIS-rc=$?; echo NONZERO-$(dd if=/dev/vda bs=1048576 skip=1 count=16 2>/dev/null | tr -d "\\000" | wc -c); echo TRIM-DONE\n'; slp 6; printf 'poweroff -f\n'; slp 2) \
-    | alarm 90 ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/d.qcow2" --cmdline "console=ttyAMA0 quiet" > "$t/out" 2>&1 & )
-  full=0
-  for _ in $(seq $((40 * SLOW))); do grep -aq 'WROTE-2' "$t/out" 2>/dev/null && { sleep 1; full=$(du -k "$t/d.qcow2" | cut -f1); break; }; sleep 0.5; done
-  for _ in $(seq $((60 * SLOW))); do grep -aq 'stopped' "$t/out" 2>/dev/null && break; sleep 0.5; done
+  ( (slp 8; printf 'dd if=/dev/urandom of=/dev/vda bs=1048576 seek=1 count=16 oflag=direct 2>/dev/null; sync; echo WROTE-$((1+1))\n'; slp 6; printf 'blkdiscard -o 1048576 -l 16777216 /dev/vda; echo DIS-rc=$?; echo NONZERO-$(dd if=/dev/vda bs=1048576 skip=1 count=16 2>/dev/null | tr -d "\\000" | wc -c); echo TRIM-DONE\n'; slp 6; printf 'dd if=/dev/urandom of=/tmp/x bs=1048576 count=16 2>/dev/null; echo WANT-$(md5sum < /tmp/x | cut -c1-12); dd if=/tmp/x of=/dev/vda bs=1048576 seek=1 oflag=direct 2>/dev/null; sync; echo GOT-$(dd if=/dev/vda bs=1048576 skip=1 count=16 2>/dev/null | md5sum | cut -c1-12)\n'; slp 8; printf 'poweroff -f\n'; slp 2) \
+    | alarm 120 ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/d.qcow2" --cmdline "console=ttyAMA0 quiet" > "$t/out" 2>&1 & )
+  full=0; size1=0
+  for _ in $(seq $((40 * SLOW))); do grep -aq 'WROTE-2' "$t/out" 2>/dev/null && { sleep 1; full=$(du -k "$t/d.qcow2" | cut -f1); size1=$(wc -c < "$t/d.qcow2" | tr -d ' '); break; }; sleep 0.5; done
+  for _ in $(seq $((40 * SLOW))); do grep -aq 'TRIM-DONE' "$t/out" 2>/dev/null && { sleep 1; break; }; sleep 0.5; done
   after=$(du -k "$t/d.qcow2" | cut -f1)
-  if grep -aq 'DIS-rc=0' "$t/out" && grep -aq '^NONZERO-0' <<<"$(tr -d '\r' < "$t/out")" && [ "$full" -gt $((after + 15000)) ] && qemu-img check -q "$t/d.qcow2"; then
-    grn "ok: discard on qcow2 frees its clusters ($full -> $after KiB), reads zeros, qemu-img check clean"
-  else red "failed: qcow2 discard ($full -> $after KiB)"; grep -a "DIS-rc\|NONZERO" "$t/out" | tail -3; qemu-img check "$t/d.qcow2" | tail -3; fail=1; fi
+  for _ in $(seq $((80 * SLOW))); do grep -aq 'stopped' "$t/out" 2>/dev/null && break; sleep 0.5; done
+  size2=$(wc -c < "$t/d.qcow2" | tr -d ' ')
+  o=$(tr -d '\r' < "$t/out")
+  want=$(grep -ao '^WANT-[0-9a-f]*' <<<"$o" | cut -c6-); got=$(grep -ao '^GOT-[0-9a-f]*' <<<"$o" | cut -c5-)
+  if grep -aq 'DIS-rc=0' <<<"$o" && grep -aq '^NONZERO-0' <<<"$o" && [ "$full" -gt $((after + 15000)) ] && [ -n "$want" ] && [ "$want" = "$got" ] && [ "$size2" -le $((size1 + 262144)) ] && qemu-img check -q "$t/d.qcow2"; then
+    grn "ok: discard on qcow2 frees its clusters ($full -> $after KiB) and the next writes reuse them (size $size1 -> $size2); qemu-img check clean"
+  else red "failed: qcow2 discard and reuse ($full -> $after KiB, size $size1 -> $size2, data $want/$got)"; grep -a "DIS-rc\|NONZERO" "$t/out" | tail -3; qemu-img check "$t/d.qcow2" | tail -3; fail=1; fi
   rm -rf "$t"
 fi
 

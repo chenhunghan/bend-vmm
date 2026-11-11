@@ -5397,6 +5397,68 @@ Term hvf_disk_discard_run(Env e, Term* f, IoWork* w) {
 #endif
 }
 
+// qcow2 cluster reuse (src/disk/store.bend, Store.alloc decides): the hint
+// Bend keeps per image between requests, the image's size, and a range
+// made to read as zeros.
+static struct {
+  uint64_t hint[HVF_MAX_DISKS];
+} hvf_dspace __attribute__((aligned(128)));
+
+// Hvf.disk_space(disk) -> List<U32>: [hint hi, lo, size hi, lo].
+Term hvf_disk_space_run(Env e, Term* f, IoWork* w) {
+  u32         d  = (u32)f[0];
+  int         fd = hvf_disk(f[0]);
+  struct stat st;
+  uint64_t    h = d < HVF_MAX_DISKS ? hvf_dspace.hint[d] : 0;
+  uint64_t    n = fd >= 0 && fstat(fd, &st) == 0 ? (uint64_t)st.st_size : 0;
+  uint32_t    ws[4] = {(uint32_t)(h >> 32), (uint32_t)h, (uint32_t)(n >> 32), (uint32_t)n};
+  return hvf_words(e, ws, 4);
+}
+
+// Hvf.disk_set_hint(disk, hi, lo) -> U32: keeps the hint. 0.
+Term hvf_disk_set_hint_run(Env e, Term* f, IoWork* w) {
+  u32 d = (u32)f[0];
+  if (d < HVF_MAX_DISKS) {
+    hvf_dspace.hint[d] = hvf_u64(f[1], f[2]);
+  }
+  return (Term)0;
+}
+
+// Hvf.disk_zero(disk, off_hi, off_lo, len) -> U32: the range reads as zeros
+// afterwards: a hole where the file system punches one, else zeros
+// written. 0, or 0xFFFFFFFF (marked for Hvf.disk_status).
+Term hvf_disk_zero_run(Env e, Term* f, IoWork* w) {
+  int   fd  = hvf_disk(f[0]);
+  off_t off = (off_t)hvf_u64(f[1], f[2]);
+  u64   len = (u32)f[3];
+  if (fd < 0) {
+    return hvf_disk_mark(f[0], (Term)HVF_ERR);
+  }
+#ifdef __APPLE__
+  struct fpunchhole p = {0, 0, off, (off_t)len};
+  if (fcntl(fd, F_PUNCHHOLE, &p) == 0) {
+    return (Term)0;
+  }
+#else
+  if (fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, off, (off_t)len) == 0) {
+    return (Term)0;
+  }
+#endif
+  static const char z[65536];
+  for (u64 at = 0; at < len;) {
+    size_t  n = len - at < sizeof z ? (size_t)(len - at) : sizeof z;
+    ssize_t k = pwrite(fd, z, n, off + (off_t)at);
+    if (k < 0 && errno == EINTR) {
+      continue;
+    }
+    if (k <= 0) {
+      return hvf_disk_mark(f[0], (Term)HVF_ERR);
+    }
+    at += (u64)k;
+  }
+  return (Term)0;
+}
+
 // The console log and share quotas (Hvf.console_log, Hvf.share_quota):
 // placed after the hot paths.
 
@@ -5734,6 +5796,15 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.reexec)
   io_eff(CID(Hvf.reexec), hvf_reexec_run);
+#endif
+#ifdef CID(Hvf.disk_space)
+  io_eff(CID(Hvf.disk_space), hvf_disk_space_run);
+#endif
+#ifdef CID(Hvf.disk_set_hint)
+  io_eff(CID(Hvf.disk_set_hint), hvf_disk_set_hint_run);
+#endif
+#ifdef CID(Hvf.disk_zero)
+  io_eff(CID(Hvf.disk_zero), hvf_disk_zero_run);
 #endif
 #ifdef CID(Hvf.disk_discard)
   io_eff(CID(Hvf.disk_discard), hvf_disk_discard_run);

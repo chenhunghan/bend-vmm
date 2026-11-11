@@ -239,6 +239,14 @@ type Vm<-A: Type> is Type:
   # Frees the host's blocks of disk image `disk` in [offset, offset+len): a
   # hole that reads as zeros (virtio-blk DISCARD; advisory, never fails).
   VmDiskDiscard{disk: U32, offset: U.U64, len: U.U64, next: Vm<A>}
+  # Free space in image `disk` (src/disk/store.bend, Store.alloc), one
+  # operation for the three (the exit path's dispatch grows by one case):
+  #   op 0: [hint hi, lo, size hi, lo], the hint where a free cluster may
+  #         be (kept by the host between requests, 0 at first)
+  #   op 1: the hint becomes at; []
+  #   op 2: [at, at+len) reads as zeros afterwards (a hole, or zeros
+  #         written where the host cannot punch one); []
+  VmDiskSpace{disk: U32, op: U32, at: U.U64, len: U32, k: +List<U32> -> Vm<A>}
   # A network command for the host's sockets.
   VmNet{cmd: NetCmd, next: Vm<A>}
   # A file operation on the shared directory (`share` numbers the --share).
@@ -388,6 +396,15 @@ def Op.disk_flush(-R: Type, disk: U32) -> Op<R, Unit>:
 
 def Op.disk_discard(-R: Type, disk: U32, offset: U.U64, len: U.U64) -> Op<R, Unit>:
   Op{k => VmDiskDiscard{disk, offset, len, k(Unit{})}}
+
+def Op.disk_space(-R: Type, disk: U32) -> Op<R, +List<U32>>:
+  Op{k => VmDiskSpace{disk, 0, U.U64.zero(), 0, k}}
+
+def Op.disk_set_hint(-R: Type, disk: U32, at: U.U64) -> Op<R, Unit>:
+  Op{k => VmDiskSpace{disk, 1, at, 0, ws => k(Unit{})}}
+
+def Op.disk_zero(-R: Type, disk: U32, offset: U.U64, len: U32) -> Op<R, Unit>:
+  Op{k => VmDiskSpace{disk, 2, offset, len, ws => k(Unit{})}}
 
 def Op.net(-R: Type, cmd: NetCmd) -> Op<R, Unit>:
   Op{k => VmNet{cmd, k(Unit{})}}

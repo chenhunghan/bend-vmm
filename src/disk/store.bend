@@ -12,7 +12,8 @@ import ./qcow2.bend as Q
 # Reads go cluster by cluster: a mapped cluster from the image, a compressed
 # one inflated, a zero or unallocated one as zeros or from below. Writes go
 # to the top image: in place for a cluster whose reference count is 1
-# (COPIED); otherwise into a new cluster appended to the image (its old
+# (COPIED); otherwise into a new cluster (a freed one when Store.alloc finds
+# one, else appended to the image; its old
 # contents copied first unless the write covers it whole), a new L2 table
 # when the L1 entry has none, and reference counts of 1 for both, a new
 # refcount block when the table's entry has none. Writes need 16-bit
@@ -40,6 +41,9 @@ def Iov.drop(xs: +List<V.Iov>, +n: U32) -> +List<V.Iov>:
     case V.Iov{+a, +l} <> +t:
       Bool.pick(+List<V.Iov>, U32.is_zero(n), V.Iov{a, l} <> t,
         Bool.pick(+List<V.Iov>, U32.is_le(l, n), Iov.drop(t, (n - l : U32)), V.Iov{U.U64.add_u32(a, n), (l - n : U32)} <> t))
+
+def Store.w(+ws: +List<U32>, i: Nat) -> U32:
+  Maybe.default(&2, U32, List.get(&2, U32, ws, i), 0)
 
 def Store.read8(-R: Type, disk: U32, off: U.U64) -> V.Op<R, U.U64>:
   do V.Op<R, U.U64>:
@@ -216,6 +220,82 @@ def Store.ref(fuel: Nat, -R: Type, +disk: U32, +q: Q.Qcow, +h: U.U64) -> V.Op<R,
       +ok = U32.is_eq(Qcow.refbits(q), 16) && U32.is_lt(Q.Qcow.ref_rti(q, h), Q.Qcow.rt_entries(q))
       Store.ref.go(R, ok, f, disk, q, h, x => Store.ref(f, R, disk, q, x))
 
+# Allocation, reusing freed clusters (as QEMU does): the host keeps a hint
+# per image, the first host offset that may hold a free cluster (0 at first;
+# a discard lowers it). A new cluster comes from the window of up to
+# Store.window() reference counts at the hint, read at once: the first count
+# of 0 below the image's end is reused (made to read as zeros first: L2
+# tables and partial writes rely on that), the hint past it; else the hint
+# moves past the window and the cluster is appended (V.Op.disk_alloc). Once
+# the hint is at the end, an allocation costs one host call more.
+# Refcount blocks are still appended.
+def Store.window() -> U32:
+  256
+
+# The index of the first 16-bit count of 0 among n in bs (n when none).
+def Store.first_free(bs: +List<U32>, +i: U32, +n: U32) -> U32:
+  match bs:
+    case Nil{}:
+      n
+    case Con{+a, r1}:
+      match r1:
+        case Nil{}:
+          n
+        case Con{+b, more}:
+          Bool.pick(U32, U32.is_eq(a, 0) && U32.is_eq(b, 0), i, Store.first_free(more, (i + 1 : U32), n))
+
+# The cluster to take from a window at h (n counts, the block's bytes bs)
+# below end, or none (U64 max).
+def Store.alloc.pick(+i: U32, +n: U32, +h: U.U64, +csize: U32, +end: U.U64) -> U.U64:
+  +c = U.U64.add(h, U.U64.shl(0n, U.U64{0, (i * csize : U32)}))
+  Bool.pick(U.U64, U32.is_lt(i, n) && U.U64.is_lt(c, end), c, U.U64{4294967295, 4294967295})
+
+def Store.alloc.take(-R: Type, found: Bool, +disk: U32, +q: Q.Qcow, +c: U.U64, +next: U.U64) -> V.Op<R, U.U64>:
+  match found:
+    case True{}:
+      do V.Op<R, U.U64>:
+        V.Op.disk_set_hint(R, disk, U.U64.add_u32(c, Q.Qcow.csize(q)))
+        V.Op.disk_zero(R, disk, c, Q.Qcow.csize(q))
+        return c
+    case False{}:
+      do V.Op<R, U.U64>:
+        V.Op.disk_set_hint(R, disk, next)
+        V.Op.disk_alloc(R, disk, Q.Qcow.csize(q))
+
+# The window at h: its refcount block (none: every count there is 0) and up
+# to Store.window() counts, not past the block's end.
+def Store.alloc.block(-R: Type, none: Bool, +disk: U32, +q: Q.Qcow, +rb: U.U64, +h: U.U64, +end: U.U64, +slot: U32, +n: U32, +next: U.U64) -> V.Op<R, U.U64>:
+  match none:
+    case True{}:
+      Store.alloc.take(R, U.U64.is_lt(h, end), disk, q, h, next)
+    case False{}:
+      do V.Op<R, U.U64>:
+        +bs : +List<U32> <- V.Op.disk_read(R, disk, U.U64.add(rb, U.U64.from_u32((slot * 2 : U32))), (n * 2 : U32))
+        +c : U.U64 = Store.alloc.pick(Store.first_free(bs, 0, n), n, h, Q.Qcow.csize(q), end)
+        Store.alloc.take(R, Bool.not(U.U64.is_eq(c, U.U64{4294967295, 4294967295})), disk, q, c, next)
+
+def Store.alloc.scan(-R: Type, scan: Bool, +disk: U32, +q: Q.Qcow, +h: U.U64, +end: U.U64) -> V.Op<R, U.U64>:
+  match scan:
+    case False{}:
+      V.Op.disk_alloc(R, disk, Q.Qcow.csize(q))
+    case True{}:
+      +rti = Q.Qcow.ref_rti(q, h)
+      do V.Op<R, U.U64>:
+        e : U.U64 <- Store.read8(R, disk, U.U64.add(Qcow.rt(q), U.U64.from_u32((rti * 8 : U32))))
+        +rb : U.U64 = Q.Qcow.entry_off(e)
+        +slot : U32 = Q.Qcow.ref_slot(q, h)
+        +n : U32 = U32.min(Store.window(), ((Q.Qcow.csize(q) / 2 : U32) - slot : U32))
+        Store.alloc.block(R, U.U64.is_zero(rb), disk, q, rb, h, end, slot, n, U.U64.add(h, U.U64.from_u32((n * Q.Qcow.csize(q) : U32))))
+
+# A new cluster: a freed one when the window at the hint has one, else one
+# appended. Its count is the caller's to set (Store.ref).
+def Store.alloc(-R: Type, +disk: U32, +q: Q.Qcow) -> V.Op<R, U.U64>:
+  do V.Op<R, U.U64>:
+    +ws : +List<U32> <- V.Op.disk_space(R, disk)
+    +h : U.U64 = U.U64.align_up(U32.to_nat(Q.Qcow.bits(q)), U.U64{Store.w(ws, 0n), Store.w(ws, 1n)})
+    +end : U.U64 = U.U64{Store.w(ws, 2n), Store.w(ws, 3n)}
+    Store.alloc.scan(R, U.U64.is_lt(h, end) && U32.is_lt(Q.Qcow.ref_rti(q, h), Q.Qcow.rt_entries(q)), disk, q, h, end)
+
 # The old contents of a cluster about to move to nc: nothing when the write
 # covers it whole, else by its entry (below: from the store below).
 def Store.fill(-R: Type, whole: Bool, e: Q.Entry, +disk: U32, +q: Q.Qcow, +nc: U.U64, cow: U.U64 -> V.Op<R, Unit>) -> V.Op<R, Unit>:
@@ -237,7 +317,7 @@ def Store.fill(-R: Type, whole: Bool, e: Q.Entry, +disk: U32, +q: Q.Qcow, +nc: U
 # count, the old contents, the data, then the L2 entry at slot.
 def Store.write.new(-R: Type, e: Q.Entry, +disk: U32, +q: Q.Qcow, slot: U.U64, +inner: U32, +n: U32, a: +List<V.Iov>, cow: U.U64 -> V.Op<R, Unit>) -> V.Op<R, Bool>:
   do V.Op<R, Bool>:
-    +nc : U.U64 <- V.Op.disk_alloc(R, disk, Q.Qcow.csize(q))
+    +nc : U.U64 <- Store.alloc(R, disk, q)
     ok : Bool <- Store.ref(4n, R, disk, q, nc)
     Store.fill(R, U32.is_zero(inner) && U32.is_eq(n, Q.Qcow.csize(q)), e, disk, q, nc, cow)
     V.Op.ram_to_disk(R, disk, U.U64.add_u32(nc, inner), a)
@@ -277,7 +357,7 @@ def Store.ensure_l2(-R: Type, none: Bool, +disk: U32, +q: Q.Qcow, +l1i: U32, l2:
       V.Op.pure(R, U.U64, l2)
     case True{}:
       do V.Op<R, U.U64>:
-        +nl : U.U64 <- V.Op.disk_alloc(R, disk, Q.Qcow.csize(q))
+        +nl : U.U64 <- Store.alloc(R, disk, q)
         ok : Bool <- Store.ref(4n, R, disk, q, nl)
         Store.write8(R, disk, U.U64.add(Qcow.l1(q), U.U64.from_u32((l1i * 8 : U32))), Q.Qcow.copied(nl))
         return Bool.pick(U.U64, ok, nl, U.U64.zero())
@@ -413,13 +493,21 @@ def Store.dis.clear(-R: Type, +disk: U32, +q: Q.Qcow, +h: U.U64) -> V.Op<R, Unit
     Bool.pick(V.Op<R, Unit>, U.U64.is_zero(rb), V.Op.pure(R, Unit, Unit{}),
       V.Op.disk_write(R, disk, U.U64.add(rb, U.U64.from_u32((slot * 2 : U32))), [0, 0]))
 
+# A freed cluster lowers the allocation hint to it (Store.alloc).
+def Store.dis.hint(-R: Type, +disk: U32, +off: U.U64) -> V.Op<R, Unit>:
+  do V.Op<R, Unit>:
+    +ws : +List<U32> <- V.Op.disk_space(R, disk)
+    +h : U.U64 = U.U64{Store.w(ws, 0n), Store.w(ws, 1n)}
+    V.Op.disk_set_hint(R, disk, Bool.pick(U.U64, U.U64.is_lt(off, h), off, h))
+
 def Store.dis.entry(-R: Type, e: Q.Entry, +disk: U32, +q: Q.Qcow, +slot: U.U64, +zv: U.U64) -> V.Op<R, Unit>:
   match e:
     case Q.Mapped{+off, copied}:
       Bool.pick(V.Op<R, Unit>, copied,
         V.Op.bind(R, Unit, Unit, Store.write8(R, disk, slot, zv), u =>
           V.Op.bind(R, Unit, Unit, Store.dis.clear(R, disk, q, off), v =>
-            V.Op.disk_discard(R, disk, off, U.U64.from_u32(Q.Qcow.csize(q))))),
+            V.Op.bind(R, Unit, Unit, V.Op.disk_discard(R, disk, off, U.U64.from_u32(Q.Qcow.csize(q))), x =>
+              Store.dis.hint(R, disk, off)))),
         V.Op.pure(R, Unit, Unit{}))
     case _:
       V.Op.pure(R, Unit, Unit{})

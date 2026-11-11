@@ -199,6 +199,18 @@ def Hvf.disk_discard(disk: U32, off_hi: U32, off_lo: U32, len_hi: U32, len_lo: U
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.disk_space(disk: U32) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.disk_set_hint(disk: U32, hi: U32, lo: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.disk_zero(disk: U32, off_hi: U32, off_lo: U32, len: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.disk_flush(disk: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
@@ -818,6 +830,17 @@ def Host.disk_alloc(disk: U32, len: U32) -> IO(U.U64):
   do IO<U.U64>:
     +ws : +List<U32> <- Hvf.disk_alloc(disk, len)
     return U.U64{Host.first(ws), Host.first(List.drop(&2, U32, ws, 1n))}
+
+# VmDiskSpace on the host: op 0 the hint and size, 1 set the hint, 2 zero.
+def Host.disk_space.go(+op: U32, +disk: U32, +h: U32, +l: U32, +len: U32) -> IO(+List<U32>):
+  Bool.pick(IO(+List<U32>), U32.is_eq(op, 0), Hvf.disk_space(disk),
+    Bool.pick(IO(+List<U32>), U32.is_eq(op, 1), IO.bind(U32, +List<U32>, Hvf.disk_set_hint(disk, h, l), r => IO.pure(+List<U32>, [])),
+      IO.bind(U32, +List<U32>, Hvf.disk_zero(disk, h, l, len), r => IO.pure(+List<U32>, []))))
+
+def Host.disk_space(disk: U32, op: U32, at: U.U64, len: U32) -> IO(+List<U32>):
+  match at:
+    case U.U64{h, l}:
+      Host.disk_space.go(op, disk, h, l, len)
 
 def Host.disk_discard(disk: U32, off: U.U64, len: U.U64) -> IO(U32):
   match off len:

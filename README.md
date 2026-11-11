@@ -141,7 +141,8 @@ VMM punches holes in a raw image (whole 4 KiB blocks; they read as zeros),
 and in a qcow2 image lets go of whole clusters that are its alone (their
 entries read as zeros, their counts drop to 0, their host clusters become
 holes; `qemu-img check` stays clean). Shared and compressed clusters stay,
-and so does a version 2 image over a backing file (it has no zero flag).
+and so does a version 2 image over a backing file (it has no zero flag). New
+writes to a qcow2 image take freed clusters again before growing the file.
 
 Disk snapshots: a snapshot also keeps each writable `--disk` image as it was,
 next to it (`PATH.GEN.disk0`, ...: a copy-on-write clone on APFS, btrfs or
