@@ -69,6 +69,18 @@ def Hvf.sock_path_max() -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.args() -> IO(List<String>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.clone(from: String, to: String, copy: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.remove(path: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.set_exec(path: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"

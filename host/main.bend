@@ -14,6 +14,7 @@ import ../src/dev/conlog.bend as Cl
 import ../src/vmm/opts.bend as Op
 import ../src/disk/access.bend as Acc
 import ../src/vmm/hostfiles.bend as Hf
+import ../src/vmm/disksnap.bend as Ds
 import ../src/net/limits.bend as Lim
 import ../src/net/flush.bend as Fl
 import ../src/net/udpflow.bend as Uf
@@ -636,17 +637,135 @@ def snap.place(ok: Bool, rc: U32, tmp: String, path: String) -> IO(U32):
     case False{}:
       IO.pure(U32, rc)
 
+# Disk snapshots (src/vmm/disksnap.bend plans them): the host's steps, in
+# order, until one fails (0, or its errno).
+def dsnap.step(s: Ds.Step) -> IO(U32):
+  match s:
+    case Ds.DClone{from, to}:
+      H.Hvf.clone(from, to, Bool.to_u32(Ds.Dsnap.copy_fallback()))
+    case Ds.DRename{from, to}:
+      H.Hvf.rename(from, to)
+    case Ds.DRemove{p}:
+      do IO<U32>:
+        _ : U32 <- H.Hvf.remove(p)
+        return 0
+
+def dsnap.run(ss: List<Ds.Step>, +rc: U32) -> IO(U32):
+  match ss:
+    case Nil{}:
+      IO.pure(U32, rc)
+    case Con{s, rest}:
+      do IO<U32>:
+        +r : U32 <- Bool.pick(IO(U32), U32.is_eq(rc, 0), dsnap.step(s), IO.pure(U32, rc))
+        dsnap.run(rest, r)
+
+# Every open image's writes reach the host's disk before it is cloned.
+def dsnap.flush(n: Nat) -> IO(Unit):
+  match n:
+    case 0n:
+      IO.pure(Unit, Unit{})
+    case 1n+(+k):
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.disk_flush(U32.from_nat(k))
+        dsnap.flush(k)
+
+# This VM's writable disks (its command line's --disk).
+def dsnap.disks() -> IO(List<Ds.DiskAt>):
+  do IO<List<Ds.DiskAt>>:
+    args : List<String> <- H.Hvf.args()
+    prog : U32 <- H.Hvf.prog()
+    return Ds.Dsnap.writable(Op.Opts.disk(Op.Opts.parse(List.drop(&1, String, args, U32.to_nat(prog)), Op.Opts.default())))
+
+# The GEN of the snapshot at a path now ("" when there is none, or it has no
+# disk copies): its saved command line, read with the header's help.
+def dsnap.old.args(got: File & Result<&1, &1, U32 & String, List<&2, U32>>) -> IO(String):
+  match got:
+    case (f, Done{bs}):
+      do IO<String>:
+        File.close(f)
+        return Ds.Dsnap.gen_of(Ds.Dsnap.args(bs))
+    case (f, Fail{e}):
+      do IO<String>:
+        File.close(f)
+        return ""
+
+def dsnap.old.head(got: File & Result<&1, &1, U32 & String, List<&2, U32>>) -> IO(String):
+  match got:
+    case (f, Done{h}):
+      do IO<String>:
+        more : File & Result<&1, &1, U32 & String, List<&2, U32>> <- File.read_at(f, 40, Ds.Dsnap.args_len(h))
+        dsnap.old.args(more)
+    case (f, Fail{e}):
+      do IO<String>:
+        File.close(f)
+        return ""
+
+def dsnap.old.opened(r: Result<&1, &1, U32 & String, File>) -> IO(String):
+  match r:
+    case Fail{e}:
+      IO.pure(String, "")
+    case Done{f}:
+      do IO<String>:
+        got : File & Result<&1, &1, U32 & String, List<&2, U32>> <- File.read_at(f, 0, 40)
+        dsnap.old.head(got)
+
+def dsnap.old(path: String) -> IO(String):
+  do IO<String>:
+    r : Result<&1, &1, U32 & String, File> <- File.open(path, "r")
+    dsnap.old.opened(r)
+
+# The snapshot written, once every disk was copied (else none, and the
+# copies' error).
+def snap.commit.if(ok: Bool, +rc: U32, path: String, plan: Maybe<&2, +List<Sf.Piece>>) -> IO(U32):
+  match ok:
+    case True{}:
+      snap.commit(path, plan)
+    case False{}:
+      do IO<U32>:
+        _ : U32 <- H.Hvf.snap_drop()
+        return rc
+
+# After a failed snapshot, its copies' temporary files go; after one in
+# place, the copies of the snapshot it replaced.
+def dsnap.after(ok: Bool, +dst: String, +old: String, +gen: String) -> IO(U32):
+  match ok:
+    case True{}:
+      do IO<U32>:
+        ds : List<Ds.DiskAt> <- dsnap.disks()
+        dsnap.run(Ds.Dsnap.drop(dst, old, gen, ds), 0)
+    case False{}:
+      do IO<U32>:
+        ds : List<Ds.DiskAt> <- dsnap.disks()
+        dsnap.run(Ds.Dsnap.unsave(dst, gen, ds), 0)
+
 # Pauses (if running), writes the snapshot while holding the machine, and
-# resumes if it was running. Answers 0 or an errno.
+# resumes if it was running. Each writable disk is kept with it
+# (src/vmm/disksnap.bend): copied first, its GEN in the saved command line,
+# the copies placed before the snapshot. Answers 0 or an errno.
 @unsafe def snapshot(+mc: Chan(M.Machine), path: String) -> IO(U32):
   do IO<U32>:
     +was : U32 <- pause_vm()
     +m : M.Machine <- take(mc)
-    +sizes : +List<U32> <- H.Hvf.snap_save(Snap.Snap.encode(m))
     +dst : String = path
     +tmp : String = Sf.Snapf.tmp(dst)
-    +wrote : U32 <- snap.commit(tmp, Sf.Snapf.plan_of(Sf.Snapf.sizes(sizes)))
-    rc : U32 <- snap.place(U32.is_zero(wrote), wrote, tmp, dst)
+    +now : U.U64 <- H.Host.now()
+    +gen : String = U32.show(U.U64.lo(now))
+    +old : String <- dsnap.old(dst)
+    dsnap.flush(8n)
+    ds0 : List<Ds.DiskAt> <- dsnap.disks()
+    +none : Bool = List.is_empty(&1, Ds.DiskAt, ds0)
+    ds1 : List<Ds.DiskAt> <- dsnap.disks()
+    +copied : U32 <- dsnap.run(Ds.Dsnap.save(dst, gen, ds1), 0)
+    args : List<String> <- H.Hvf.args()
+    +orig : +List<U32> = args_bytes(args)
+    _ : U32 <- H.Hvf.set_args(Bool.pick(+List<U32>, none, orig, List.append(&2, U32, orig, args_bytes([Ds.Dsnap.flag(), gen]))))
+    +sizes : +List<U32> <- H.Hvf.snap_save(Snap.Snap.encode(m))
+    +wrote : U32 <- snap.commit.if(U32.is_zero(copied), copied, tmp, Sf.Snapf.plan_of(Sf.Snapf.sizes(sizes)))
+    _ : U32 <- H.Hvf.set_args(orig)
+    ds2 : List<Ds.DiskAt> <- dsnap.disks()
+    +placed : U32 <- dsnap.run(Ds.Dsnap.place(dst, gen, ds2), wrote)
+    +rc : U32 <- snap.place(U32.is_zero(placed), placed, tmp, dst)
+    _ : U32 <- dsnap.after(U32.is_zero(rc), dst, old, gen)
     put(mc, m)
     resume_if(U32.is_zero(was))
     return rc
@@ -1817,7 +1936,7 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     case Some{+h}:
       snap.walk(67n, Sf.Snapf.need(h, []), h, [], size)
 
-@unsafe def restore(path: String, +now: Op.Opts) -> IO(Unit):
+@unsafe def restore(+path: String, +now: Op.Opts) -> IO(Unit):
   do IO<Unit>:
     +st : +List<U32> <- H.Hvf.snap_open(path)
     die_if(U32.is_ne(H.Host.first(st), 0), "cannot read the snapshot (" ++ U32.show(H.Host.first(st)) ++ ")")
@@ -1830,6 +1949,11 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     die_if(Bool.not(Sf.Snapf.agrees(l, ram())), "the snapshot's header does not describe a machine this host makes")
     +why : String = Op.Restore.differs(o, now)
     die_if(Bool.not(String.is_empty(why)), why)
+    # the disks as they were when it was taken, from its copies
+    # (src/vmm/disksnap.bend; none when it has none)
+    tagged : List<String> <- H.Hvf.snap_args()
+    +back : U32 <- dsnap.run(Ds.Dsnap.restore(path, Ds.Dsnap.gen_of(tagged), Ds.Dsnap.writable(Op.Opts.disk(o))), 0)
+    die_if(U32.is_ne(back, 0), "cannot set the disks back from the snapshot's copies (" ++ U32.show(back) ++ "): are " ++ path ++ ".*.disk* there?")
     +vm : U32 <- H.Host.vm_init(Op.Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), ram(), Op.Opts.cpus(o))
     die_if(U32.is_ne(vm, 0), "cannot create the VM (step " ++ U32.show(vm) ++ ")")
     display.map(display_of(Op.Opts.display(o)))

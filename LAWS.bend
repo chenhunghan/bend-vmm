@@ -60,3 +60,4 @@ import ./laws/handoff.bend as Laws_handoff
 import ./laws/fdcache.bend as Laws_fdcache
 import ./laws/transfer.bend as Laws_transfer
 import ./laws/inflate.bend as Laws_inflate
+import ./laws/disksnap.bend as Laws_disksnap

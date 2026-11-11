@@ -9,7 +9,7 @@ carries out plans that Bend hands it.
 This file is the audit of that boundary. It covered all 113 effects in
 host/hvf.c as of 2026-11-09 and says, for each group, where the
 decisions are made; the migration ledger at the end lists every effect
-(123 as of 2026-11-11) with its target in the C-to-Bend plan. The
+(126 as of 2026-11-11) with its target in the C-to-Bend plan. The
 section before it lists every decision still in C, with the reason it
 stays.
 
@@ -41,6 +41,13 @@ stays.
   reports (0 Hypervisor.framework, 1 KVM).
 
 ## Moved on 2026-11-11 (C_TO_BEND.md, stages 2, 3 and 4)
+
+- Disk snapshots, new: which disks a snapshot keeps, the copies' names and
+  GEN tag, the order of cloning, writing and renaming, which copies an
+  overwritten snapshot leaves behind, and how a restore sets the disks back
+  are src/vmm/disksnap.bend (with laws); C clones a file (`Hvf.clone`:
+  clonefile, FICLONE, or a copy), removes one (`Hvf.remove`) and reports the
+  command line (`Hvf.args`).
 
 - A disk transfer that falls short (stage 3's short-IO and retry
   decisions): C makes one vectored attempt per `Hvf.disk_copy` and reports
@@ -119,7 +126,7 @@ from the hot path can still move exit latency
 
 ## Migration ledger (C_TO_BEND.md)
 
-Every effect host/hvf.c registers, as of 2026-11-11 (123; regenerate the
+Every effect host/hvf.c registers, as of 2026-11-11 (126; regenerate the
 list with `grep -o 'io_eff(CID(Hvf\.[a-z_0-9]*)' host/hvf.c`). Target and
 primitive are the plan's proposals, not existing modules; line numbers are
 host/hvf.c's at the commit that changed this table. Test names what checks
@@ -141,6 +148,8 @@ row but the decisions listed as moved above.
 | `snap_save` | `hvf_snap_save_run` (3758) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
 | `snap_commit` | `hvf_snap_commit_run` (3852) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
 | `rename` | `hvf_rename_run` (3888) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C renames; also runs the console log renames |
+| `clone` | `hvf_clone_run` (5199) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C clones; Bend plans disk snapshots (Dsnap, 2026-11-11) |
+| `remove` | `hvf_remove_run` (5244) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C removes; Bend says which (Dsnap, 2026-11-11) |
 | `snap_drop` | `hvf_snap_drop_run` (3801) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
 | `snap_peek` | `hvf_snap_peek_run` (3931) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
 | `snap_load` | `hvf_snap_load_run` (3963) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
@@ -171,9 +180,9 @@ row but the decisions listed as moved above.
 | `disk_alloc` | `hvf_disk_alloc_run` (2084) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
 | `disk_xcopy` | `hvf_disk_xcopy_run` (2103) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
 | `signals` | `hvf_signals_run` (1745) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `console_log` | `hvf_console_log_run` (5163) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `console_size` | `hvf_console_size_run` (5173) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `console_reopen` | `hvf_console_reopen_run` (5182) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C opens; Bend plans the renames (Log.moves, 2026-11-11) |
+| `console_log` | `hvf_console_log_run` (5275) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `console_size` | `hvf_console_size_run` (5285) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `console_reopen` | `hvf_console_reopen_run` (5294) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C opens; Bend plans the renames (Log.moves, 2026-11-11) |
 | `err_text` | `hvf_err_text_run` (4686) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
 | `set_args` | `hvf_set_args_run` (1306) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
 | `set_prog` | `hvf_set_prog_run` (1297) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
@@ -181,6 +190,7 @@ row but the decisions listed as moved above.
 | `reexec` | `hvf_reexec_run` (1347) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C runs execv; Bend chose the path (2026-11-11) |
 | `exe_path` | `hvf_exe_path_run` (1318) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C reports a fact (2026-11-11) |
 | `set_exec` | `hvf_set_exec_run` (1336) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C keeps what Bend chose (Files.exec_path, 2026-11-11) |
+| `args` | `hvf_args_run` (5152) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C reports a fact (2026-11-11) |
 | `out_limits` | `hvf_out_limits_run` (5090) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C keeps what Bend chose (Out.backlog, Out.batch_us, 2026-11-11) |
 | `tty_mode` | `hvf_tty_mode_run` (5100) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C applies what Bend chose (Esc.raw_input, Esc.out_crlf, 2026-11-11) |
 | `out` | `hvf_out_run` (1562) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
@@ -243,8 +253,8 @@ row but the decisions listed as moved above.
 | `lan_recv` | `hvf_lan_recv_run` (4314) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
 | `lan_to_ram` | `hvf_lan_to_ram_run` (4323) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
 | `lan_release` | `hvf_lan_release_run` (4344) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
-| `share_quota` | `hvf_share_quota_run` (5188) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
-| `share_usage` | `hvf_share_usage_run` (5204) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
+| `share_quota` | `hvf_share_quota_run` (5300) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
+| `share_usage` | `hvf_share_usage_run` (5316) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
 | `share_open` | `hvf_share_open_run` (3219) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
 | `fs` | `hvf_fs_run` (3413) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
 | `fdc_stamps` | `hvf_fdc_stamps_run` (3333) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | Bend decides eviction (2026-11-11) |

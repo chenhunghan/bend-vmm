@@ -244,6 +244,16 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5a. disk snapshots: memory and disk go back together, to any snapshot"
+  # (src/vmm/disksnap.bend) marks A, B, C on the disk with snapshots between;
+  # restoring s1, s2, s1 reads A, B, A; a snapshot over s1 replaces its copies
+  t=$(mktemp -d)
+  out=$(python3 scripts/disksnap-test.py ./out/bend-vmm "$t" "$SLOW" 2>&1)
+  if [ $? = 0 ]; then grn "ok: disk snapshots (restore s1, s2, s1 again: each its own disk; a snapshot over s1 replaces its copies)"; else red "failed: disk snapshots"; grep -v '^ok:' <<<"$out" | tail -5; fail=1; fi
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 5b. LAN: two VMs on one segment (--lan)"
   # B listens on TCP 6443 and UDP 8472 (VXLAN's port); A takes its address
   # by DHCP from its own VMM, pings B (ARP broadcast, then unicast), sends

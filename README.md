@@ -135,6 +135,26 @@ of its own next to PATH and renamed over it, so a failed write keeps what
 PATH held, and a restored VM may snapshot over the file it came from. TCP
 connections through the NAT do not survive a restore.
 
+Disk snapshots: a snapshot also keeps each writable `--disk` image as it was,
+next to it (`PATH.GEN.disk0`, ...: a copy-on-write clone on APFS, btrfs or
+XFS, which costs only the blocks the guest changes later; a full copy on
+other file systems). `--restore PATH --disk IMG` sets IMG back to that
+moment from the copy, which is only read, so any snapshot can be restored,
+again and in any order:
+
+```
+echo "snapshot s1.snap" | nc -U vm.sock     # disk and memory as of now
+echo "snapshot s2.snap" | nc -U vm.sock     # ... and later
+bend-vmm --restore s1.snap --disk vm.img    # vm.img is back at s1
+bend-vmm --restore s2.snap --disk vm.img    # then at s2
+```
+
+Restoring replaces IMG's current contents (snapshot first to keep them).
+`:ro` disks need no copy; shared folders (`--share`) are live host
+directories and are not part of a snapshot. Taking a snapshot over PATH
+removes the copies of the snapshot PATH held. Keep a snapshot's copies
+with it when moving it.
+
 Stopping: `SIGTERM` (or `SIGHUP`) presses the guest's power button, the
 `KEY_POWER` key of a virtio keyboard every machine has, and gives the guest
 10 s to shut down and power off (systemd-logind and acpid do); a second

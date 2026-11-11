@@ -5137,6 +5137,118 @@ Term hvf_disk_mark_run(Env e, Term* f, IoWork* w) {
   return (Term)0;
 }
 
+// Disk snapshots (src/vmm/disksnap.bend plans them; these act)
+// ==============================================================
+
+#ifdef __APPLE__
+#include <sys/clonefile.h>
+#include <copyfile.h>
+#else
+#include <linux/fs.h>
+#endif
+
+// Hvf.args() -> List<String>: this program's arguments as Hvf.set_args
+// gave them.
+Term hvf_args_run(Env e, Term* f, IoWork* w) {
+  Term   xs = term_pak(CID(Nil), 0);
+  size_t starts[4096], k = 0;
+  for (size_t i = 0; i < hvf_arglen && k < 4096; i += strnlen(hvf_argbuf + i, hvf_arglen - i) + 1) {
+    starts[k++] = i;
+  }
+  while (k > 0) {
+    k--;
+    const char* a = hvf_argbuf + starts[k];
+    xs = io_node(e, CID(Con), io_str(e, a, strnlen(a, hvf_arglen - starts[k])), xs);
+  }
+  return xs;
+}
+
+#ifndef __APPLE__
+// The bytes of one file into another, from the start (when it cannot clone).
+static int hvf_copy_fd(int s, int d, off_t size) {
+  off_t at = 0;
+  while (at < size) {
+    ssize_t k = copy_file_range(s, &at, d, NULL, (size_t)(size - at), 0);
+    if (k < 0 && errno == EINTR) {
+      continue;
+    }
+    if (k < 0 && (errno == EXDEV || errno == ENOSYS || errno == EOPNOTSUPP || errno == EINVAL)) {
+      char    buf[1 << 16];
+      ssize_t r = pread(s, buf, sizeof buf, at);
+      if (r < 0 && errno == EINTR) {
+        continue;
+      }
+      if (r <= 0 || pwrite(d, buf, (size_t)r, at) != r) {
+        return r < 0 ? errno : EIO;
+      }
+      at += r;
+      continue;
+    }
+    if (k <= 0) {
+      return k < 0 ? errno : EIO;
+    }
+  }
+  return 0;
+}
+#endif
+
+// Hvf.clone(from, to, copy) -> U32: makes to a copy of the file from (to is
+// replaced; neither is followed through a symlink): a copy-on-write clone
+// (clonefile on APFS, FICLONE on btrfs and XFS), or with copy a plain copy
+// where the file system cannot clone. 0, or an errno.
+Term hvf_clone_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* from = io_cstr(e, f[0], &n);
+  char* to   = io_cstr(e, f[1], &n);
+  int   copy = (u32)f[2] != 0, err = 0;
+  unlink(to);
+#ifdef __APPLE__
+  if (clonefile(from, to, CLONE_NOFOLLOW) != 0) {
+    err = errno;
+    if (copy && (err == ENOTSUP || err == EXDEV)) {
+      err = copyfile(from, to, NULL, COPYFILE_DATA | COPYFILE_STAT | COPYFILE_NOFOLLOW) == 0 ? 0 : errno;
+    }
+  }
+#else
+  struct stat st;
+  int         s = open(from, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  int         d = s >= 0 && fstat(s, &st) == 0 ? open(to, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, st.st_mode & 0777) : -1;
+  if (s < 0 || d < 0) {
+    err = errno;
+  } else if (ioctl(d, FICLONE, s) != 0) {
+    err = errno;
+    if (copy && (err == EOPNOTSUPP || err == EXDEV || err == EINVAL || err == ENOTTY)) {
+      err = hvf_copy_fd(s, d, st.st_size);
+    }
+  }
+  if (!err && fsync(d) != 0) {
+    err = errno;
+  }
+  if (s >= 0) {
+    close(s);
+  }
+  if (d >= 0) {
+    close(d);
+  }
+#endif
+  if (err) {
+    unlink(to);
+  }
+  free(from);
+  free(to);
+  return (Term)(u32)err;
+}
+
+// Hvf.remove(path) -> U32: removes a file (not through a symlink's
+// target). 0, or an errno.
+Term hvf_remove_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* path = io_cstr(e, f[0], &n);
+  int   err  = unlink(path) != 0 ? errno : 0;
+  free(path);
+  return (Term)(u32)err;
+}
+
 // The console log and share quotas (Hvf.console_log, Hvf.share_quota):
 // placed after the hot paths.
 
@@ -5474,6 +5586,15 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.reexec)
   io_eff(CID(Hvf.reexec), hvf_reexec_run);
+#endif
+#ifdef CID(Hvf.args)
+  io_eff(CID(Hvf.args), hvf_args_run);
+#endif
+#ifdef CID(Hvf.clone)
+  io_eff(CID(Hvf.clone), hvf_clone_run);
+#endif
+#ifdef CID(Hvf.remove)
+  io_eff(CID(Hvf.remove), hvf_remove_run);
 #endif
 #ifdef CID(Hvf.out_limits)
   io_eff(CID(Hvf.out_limits), hvf_out_limits_run);
