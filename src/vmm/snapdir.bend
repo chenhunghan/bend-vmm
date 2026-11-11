@@ -68,6 +68,26 @@ def Sname.of_time(+secs: U32) -> String:
 def Sname.undo(+secs: U32) -> String:
   "before-restore-" ++ Sname.of_time(secs)
 
+# A generated name (the time's, an undo's) that is taken gets -2, -3, ...
+# (names given by the user are refused instead). fuel: the most tried.
+def Sname.taken(xs: List<&2, String>, +n: String) -> Bool:
+  match xs:
+    case Nil{}:
+      False{}
+    case Con{+x, rest}:
+      String.eq(x, n) || Sname.taken(rest, n)
+
+def Sname.unique.go(fuel: Nat, +xs: List<&2, String>, +base: String, +k: U32) -> String:
+  match fuel:
+    case 0n:
+      base ++ "-" ++ U32.show(k)
+    case 1n+f:
+      +n = Bool.pick(String, U32.is_lt(k, 2), base, base ++ "-" ++ U32.show(k))
+      Bool.pick(String, Sname.taken(xs, n), Sname.unique.go(f, xs, base, (k + 1 : U32)), n)
+
+def Sname.unique(+base: String, +xs: List<&2, String>) -> String:
+  Sname.unique.go(100n, xs, base, 1)
+
 # Layout
 # ======
 
@@ -147,9 +167,20 @@ def Sdir.cmp_of(r: (String & String) & Cmp) -> Cmp:
     case (p, c):
       c
 
-# a before b: older first, then by name.
+def Sdir.parent(i: Info) -> String:
+  match i:
+    case Info{n, t, p, m, d, note}:
+      p
+
+# a before b: older first; in the same second, a snapshot before the one
+# taken from it, then by name.
 def Sdir.before(+a: Info, +b: Info) -> Bool:
-  U32.is_lt(Sdir.time(a), Sdir.time(b)) || (U32.is_eq(Sdir.time(a), Sdir.time(b)) && Cmp.is_lt(Sdir.cmp_of(String.cmp(Sdir.name(a), Sdir.name(b)))))
+  +same = U32.is_eq(Sdir.time(a), Sdir.time(b))
+  +a_first = String.eq(Sdir.parent(b), Sdir.name(a))
+  +b_first = String.eq(Sdir.parent(a), Sdir.name(b))
+  U32.is_lt(Sdir.time(a), Sdir.time(b))
+    || (same && a_first)
+    || (same && Bool.not(b_first) && Cmp.is_lt(Sdir.cmp_of(String.cmp(Sdir.name(a), Sdir.name(b)))))
 
 def Sdir.insert(xs: List<&2, Info>, +x: Info) -> List<&2, Info>:
   match xs:
@@ -158,7 +189,7 @@ def Sdir.insert(xs: List<&2, Info>, +x: Info) -> List<&2, Info>:
     case Con{+y, +rest}:
       Bool.pick(List<&2, Info>, Sdir.before(x, y), Con{x, Con{y, rest}}, Con{y, Sdir.insert(rest, x)})
 
-# A listing, oldest first.
+# A listing, oldest first (a parent before its child in the same second).
 def Sdir.sorted(xs: List<&2, Info>, +acc: List<&2, Info>) -> List<&2, Info>:
   match xs:
     case Nil{}:

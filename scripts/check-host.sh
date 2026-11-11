@@ -254,6 +254,14 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5g. VM folders and named snapshots (bend-vmm create, run, snapshot, restore, ...)"
+  t=$(mktemp -d)
+  out=$(python3 scripts/vmdir-test.py ./out/bend-vmm "$t" "$SLOW" 2>&1)
+  if [ $? = 0 ]; then grn "ok: VM folders: create, run, status, snapshot (named and timed), snapshots, restore with an undo, a stopped VM's disks, snapshot-rm, prune, ctl ($(grep -c '^ok:' <<<"$out") checks)"; else red "failed: VM folders"; grep -v '^ok:' <<<"$out" | tail -8; fail=1; fi
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 5b. LAN: two VMs on one segment (--lan)"
   # B listens on TCP 6443 and UDP 8472 (VXLAN's port); A takes its address
   # by DHCP from its own VMM, pings B (ARP broadcast, then unicast), sends

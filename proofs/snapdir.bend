@@ -60,3 +60,12 @@ def L.snapdir.pick_many():
 
 def L.snapdir.pick_none():
   {==}
+
+def L.snapdir.sorted_parent():
+  {==}
+
+def L.snapdir.unique_free():
+  {==}
+
+def L.snapdir.unique_next():
+  {==}

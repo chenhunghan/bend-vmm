@@ -52,8 +52,19 @@ def Dsnap.writable.go(specs: List<&2, String>, +i: U32) -> List<DiskAt>:
 def Dsnap.writable(+spec: String) -> List<DiskAt>:
   Bool.pick(List<DiskAt>, String.is_empty(spec), [], Dsnap.writable.go(String.split(spec, ','), 0))
 
+# A snapshot folder (`snapshot DIR/`, src/vmm/snapdir.bend): its memory is
+# DIR/memory and its copies DIR/disk<i>, tagged "dir" (the folder is
+# written whole, then renamed: no GEN is needed).
+def Dsnap.folder(+path: String) -> Bool:
+  String.ends_with(path, "/")
+
+def Dsnap.folder_gen() -> String:
+  "dir"
+
 def Dsnap.copy(+snap: String, +gen: String, +i: U32) -> String:
-  snap ++ "." ++ gen ++ ".disk" ++ U32.show(i)
+  Bool.pick(String, String.eq(gen, Dsnap.folder_gen()) && String.ends_with(snap, "/memory"),
+    String.take(snap, Nat.sub(String.length(snap), 6n)) ++ "disk" ++ U32.show(i),
+    snap ++ "." ++ gen ++ ".disk" ++ U32.show(i))
 
 def Dsnap.tmp(+path: String) -> String:
   path ++ ".bend-vmm-tmp"

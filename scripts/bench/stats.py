@@ -84,12 +84,13 @@ def main(argv):
         lb = b5 if sign > 0 else -b95
         if ub <= 0:
             v = "faster"
+        elif m in margins and ub <= margins[m]:
+            # no worse than the margin (one-sided), even if measurably slower
+            v = "equivalent (±%g)" % margins[m]
         elif lb > 0:
             v = "SLOWER"; worst = 1
         else:
             v = "inconclusive"
-            if m in margins and ub <= margins[m]:
-                v = "equivalent (±%g)" % margins[m]
         print("%-18s %3d %9.4g %9.4g %+9.3g [%+9.3g,%+9.3g] %+9.3g [%+9.3g,%+9.3g] %+9.3g  %s %s" % (
             m, n, statistics.median(a for a, _ in ps), statistics.median(b for _, b in ps),
             mean, lo2, hi2, med, blo, bhi, ub, v, unit))

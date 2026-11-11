@@ -51,3 +51,10 @@ law disksnap.args:
 # A failed snapshot leaves no temporary copy behind.
 law disksnap.unsave:
   {D.Dsnap.unsave("vm.snap", "7", [D.DiskAt{1, "b.img"}]) == [D.DRemove{"vm.snap.7.disk1.bend-vmm-tmp"}] : List<D.Step>}
+
+# A snapshot folder: its copies are DIR/disk<i> beside DIR/memory.
+law disksnap.folder:
+  {D.Dsnap.restore("web/snapshots/s1/memory", "dir", [D.DiskAt{0, "disk.img"}]) == [D.DClone{"web/snapshots/s1/disk0", "disk.img.bend-vmm-tmp"}, D.DRename{"disk.img.bend-vmm-tmp", "disk.img"}] : List<D.Step>}
+
+law disksnap.folder_save:
+  {D.Dsnap.place("t/memory", "dir", [D.DiskAt{2, "c.img"}]) == [D.DRename{"t/disk2.bend-vmm-tmp", "t/disk2"}] : List<D.Step>}

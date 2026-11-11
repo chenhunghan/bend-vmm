@@ -39,3 +39,9 @@ def L.disksnap.args():
 
 def L.disksnap.unsave():
   {==}
+
+def L.disksnap.folder():
+  {==}
+
+def L.disksnap.folder_save():
+  {==}

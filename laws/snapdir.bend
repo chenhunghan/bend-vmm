@@ -70,3 +70,14 @@ law snapdir.pick_many:
 
 law snapdir.pick_none:
   {S.Vmsel.why(S.Vmsel.pick("", [])) == "no VM is running here" : String}
+
+# In the same second, a snapshot lists before the one taken from it.
+law snapdir.sorted_parent:
+  {S.Sdir.names(S.Sdir.sorted([S.Info{"2026-x", 10, "s1", 0, 0, ""}, S.Info{"s1", 10, "", 0, 0, ""}], [])) == ["s1", "2026-x"] : List<&2, String>}
+
+# A generated name that is taken gets the next free suffix.
+law snapdir.unique_free:
+  {S.Sname.unique("2026-11-11-081052", ["s1"]) == "2026-11-11-081052" : String}
+
+law snapdir.unique_next:
+  {S.Sname.unique("t", ["t", "t-2"]) == "t-3" : String}

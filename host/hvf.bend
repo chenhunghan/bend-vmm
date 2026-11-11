@@ -81,6 +81,22 @@ def Hvf.remove(path: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.ctl_call(path: String, line: String, ms: U32) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.ls(dir: String) -> IO(List<String>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.rmdir(path: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.size_kib(path: String) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.set_exec(path: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"

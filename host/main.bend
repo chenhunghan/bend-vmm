@@ -15,6 +15,9 @@ import ../src/vmm/opts.bend as Op
 import ../src/disk/access.bend as Acc
 import ../src/vmm/hostfiles.bend as Hf
 import ../src/vmm/disksnap.bend as Ds
+import ../src/vmm/snapdir.bend as Sd
+import ../src/vmm/cmds.bend as Cm
+import ./api.bend as Api
 import ../src/net/limits.bend as Lim
 import ../src/net/flush.bend as Fl
 import ../src/net/udpflow.bend as Uf
@@ -742,14 +745,17 @@ def dsnap.after(ok: Bool, +dst: String, +old: String, +gen: String) -> IO(U32):
 # resumes if it was running. Each writable disk is kept with it
 # (src/vmm/disksnap.bend): copied first, its GEN in the saved command line,
 # the copies placed before the snapshot. Answers 0 or an errno.
-@unsafe def snapshot(+mc: Chan(M.Machine), path: String) -> IO(U32):
+@unsafe def snapshot(+mc: Chan(M.Machine), +path: String) -> IO(U32):
   do IO<U32>:
     +was : U32 <- pause_vm()
     +m : M.Machine <- take(mc)
-    +dst : String = path
+    # (snapshot DIR/: a snapshot folder, its memory DIR/memory and its
+    # disks DIR/disk<i>, src/vmm/snapdir.bend)
+    +folder : Bool = Ds.Dsnap.folder(path)
+    +dst : String = Bool.pick(String, folder, path ++ "memory", path)
     +tmp : String = Sf.Snapf.tmp(dst)
     +now : U.U64 <- H.Host.now()
-    +gen : String = U32.show(U.U64.lo(now))
+    +gen : String = Bool.pick(String, folder, Ds.Dsnap.folder_gen(), U32.show(U.U64.lo(now)))
     +old : String <- dsnap.old(dst)
     dsnap.flush(8n)
     ds0 : List<Ds.DiskAt> <- dsnap.disks()
@@ -1993,7 +1999,18 @@ def usage() -> String:
     "       bend-vmm --firmware CODE.fd --vars VARS.fd [--disk IMG] ...   (UEFI)",
     "       bend-vmm --restore SNAPSHOT [--disk, --share, ... as taken] [--control PATH] [--forward ...]",
     "       bend-vmm --payload FILE.bin                                   (bare metal)",
-    "       bend-vmm --version"], "\n")
+    "       bend-vmm --version",
+    "",
+    "VM folders (DIR: a VM's folder, default .):",
+    "       bend-vmm create DIR [options as above]       DIR/vm.conf (relative paths are DIR's)",
+    "       bend-vmm run [DIR]                           run it (its control socket: DIR/control.sock)",
+    "       bend-vmm status|pause|resume|stop|powerdown [--vm DIR]",
+    "       bend-vmm snapshot [NAME] [--note TEXT] [--vm DIR]   memory and disks (disks of a stopped VM)",
+    "       bend-vmm snapshots [--vm DIR]",
+    "       bend-vmm restore NAME [--vm DIR]             saves the current state first, then runs NAME",
+    "       bend-vmm snapshot-rm NAME [--vm DIR]",
+    "       bend-vmm prune --keep N [--vm DIR]",
+    "       bend-vmm ctl SOCKET COMMAND...               a raw --control command"], "\n")
 
 def main.info.pick(+first: String) -> Maybe<&2, String>:
   Bool.pick(Maybe<&2, String>, String.eq(first, "--version"), Some{"bend-vmm " ++ Ver.Version.name()},
@@ -2087,7 +2104,17 @@ def args_bytes(args: List<String>) -> +List<U32>:
     _ : U32 <- H.Hvf.accept_retry(Ck.Clients.full_retry_ms())
     main.go(main.info(flags), flags)
 
+# A command line: a command (bend-vmm create, run, snapshot, restore ...:
+# host/api.bend runs it, Vmm.run its VM) or a VM's options.
+@unsafe def main.cmd(none: Bool, +prog: List<String>, +rest: List<String>, s: Cm.Sub) -> IO(Unit):
+  match none:
+    case True{}:
+      Vmm.run(prog, rest)
+    case False{}:
+      Api.cli(p => f => Vmm.run(p, f), prog, s)
+
 @unsafe def main() -> IO(Unit):
   do IO<Unit>:
     +args : List<String> <- IO.args()
-    Vmm.run(List.take(&1, String, args, 1n), List.drop(&1, String, args, 1n))
+    +s : Cm.Sub = Cm.Sub.parse(Cm.Sub.l2(List.drop(&1, String, args, 1n)))
+    main.cmd(Api.cli.none(s), List.take(&1, String, args, 1n), List.drop(&1, String, args, 1n), s)

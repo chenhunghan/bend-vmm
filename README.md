@@ -171,6 +171,38 @@ Releases: a tag `v*` builds `bend-vmm` for macOS (signed with a Developer ID
 and notarized) and Linux arm64 and publishes both on a GitHub release
 (`.github/workflows/release.yml`; the signing secrets are listed there).
 
+## VM folders and snapshots
+
+A VM can live in a folder: its options in `vm.conf`, its disks beside them,
+its snapshots in `snapshots/`, its control socket in it while it runs. The
+commands find it by the folder (`--vm DIR`, default the current one), so no
+socket path is needed:
+
+```
+bend-vmm create web --kernel Image --initrd initrd.cpio --mem 1024 --disk disk.img
+cd web                                # relative paths in vm.conf are the folder's
+bend-vmm run                          # runs the VM here (control socket: control.sock)
+
+bend-vmm snapshot before-upgrade      # (another terminal) memory and disks, now
+bend-vmm snapshot --note "it works"   # named by the time: 2026-11-11-081052
+bend-vmm snapshots                    # oldest first, with sizes and parents
+bend-vmm restore before-upgrade       # saves the current state first, stops the VM,
+                                      # runs from the snapshot (memory and disks)
+bend-vmm restore before-restore-2026-11-11-081530   # ... which undoes it
+bend-vmm snapshot-rm NAME; bend-vmm prune --keep 5
+bend-vmm status | pause | resume | stop | powerdown
+```
+
+Each snapshot is a folder, `snapshots/NAME/`: `memory`, a copy of each
+writable disk (`disk0`, ...: copy-on-write on APFS, btrfs and XFS) and
+`info`, written whole and then renamed into place. A restore takes the host
+files from `vm.conf` (a snapshot never chooses them) and never writes a
+snapshot's copies, so any snapshot can be restored again, in any order. A
+snapshot of a stopped VM keeps its disks only; restoring it boots on them.
+Shared folders are not part of a snapshot. `vm.conf` holds one option per
+line, as on the command line (`--cmdline console=ttyAMA0 quiet`; `#`
+comments); `bend-vmm --help` lists the commands.
+
 ## As a library
 
 `main.bend` at the repository's root is a BendHub package (MIT):
@@ -179,7 +211,13 @@ aa1f296; each publish of a change has a new hash), then `V.Vmm.run(prog, flags)`
 program: `prog` is how that program starts the VMM again (on a guest reset,
 and in a snapshot's saved command line), e.g. `["vk8s", "vmm"]`, and `flags`
 are the options above. One VM per process (the host layer's state is the
-process's). On macOS the program needs the Hypervisor.framework entitlement
+process's). `V.Vmm.run_dir(prog, dir)` and `V.Vmm.restore(prog, dir, name)`
+run a VM folder's VM. From another process, typed calls take a VM's folder or
+its `--control` socket and answer a `Result` (nothing prints or exits):
+`V.Vmm.status` (running, paused or stopped, and the forwards), `pause`,
+`resume`, `stop`, `powerdown`, `ctl`, `create`, `snapshot`, `snapshots`,
+`snapshot_rm` and `prune`; the error tells no socket, not running and a
+timeout apart (host/api.bend). On macOS the program needs the Hypervisor.framework entitlement
 (`scripts/build.sh your.bend out/your` builds and signs it).
 
 ## Start time

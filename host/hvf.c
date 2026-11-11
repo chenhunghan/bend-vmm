@@ -5249,6 +5249,125 @@ Term hvf_remove_run(Env e, Term* f, IoWork* w) {
   return (Term)(u32)err;
 }
 
+// The client side of the control socket and VM folders (host/api.bend:
+// bend-vmm snapshot, restore, status ...; src/vmm/cmds.bend decides)
+// ===================================================================
+
+// Hvf.ctl_call(path, line, ms) -> List<U32>: sends one line to the control
+// socket at path and answers [0, reply bytes...] (the reply line without
+// its newline), or [1, errno] when it cannot connect (ENOENT: no socket
+// there; ECONNREFUSED: nobody listens, the VM is not running), or [2] when
+// no reply came within ms.
+Term hvf_ctl_call_run(Env e, Term* f, IoWork* w) {
+  u64                n;
+  char*              path = io_cstr(e, f[0], &n);
+  char*              line = io_cstr(e, f[1], &n);
+  int                ms   = (int)(u32)f[2];
+  struct sockaddr_un a    = {0};
+  a.sun_family            = AF_UNIX;
+  uint32_t err[2]         = {1, ENAMETOOLONG};
+  HvfWords out            = {0};
+  int      fd             = -1;
+  if (strlen(path) >= sizeof a.sun_path) {
+    goto fail;
+  }
+  memcpy(a.sun_path, path, strlen(path) + 1);
+  fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0 || connect(fd, (struct sockaddr*)&a, sizeof a) != 0) {
+    err[1] = (uint32_t)errno;
+    goto fail;
+  }
+  size_t len = strlen(line);
+  if (write(fd, line, len) != (ssize_t)len || write(fd, "\n", 1) != 1) {
+    err[1] = (uint32_t)errno;
+    goto fail;
+  }
+  hvf_w(&out, 0);
+  for (;;) {
+    struct pollfd p = {fd, POLLIN, 0};
+    int           r = poll(&p, 1, ms);
+    if (r < 0 && errno == EINTR) {
+      continue;
+    }
+    if (r <= 0) {
+      free(out.w);
+      close(fd);
+      free(path);
+      free(line);
+      uint32_t t = 2;
+      return hvf_words(e, &t, 1);
+    }
+    char    b[256];
+    ssize_t k = read(fd, b, sizeof b);
+    if (k <= 0) {
+      break;
+    }
+    int nl = 0;
+    for (ssize_t i = 0; i < k; i++) {
+      if (b[i] == '\n') {
+        nl = 1;
+        break;
+      }
+      hvf_w(&out, (uint8_t)b[i]);
+    }
+    if (nl) {
+      break;
+    }
+  }
+  close(fd);
+  free(path);
+  free(line);
+  return hvf_fs_done(e, &out);
+fail:
+  if (fd >= 0) {
+    close(fd);
+  }
+  free(path);
+  free(line);
+  return hvf_words(e, err, 2);
+}
+
+// Hvf.ls(dir) -> List<String>: the names in a directory, but . and .. ([]
+// when it cannot be read).
+Term hvf_ls_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* path = io_cstr(e, f[0], &n);
+  DIR*  d    = opendir(path);
+  free(path);
+  Term xs = term_pak(CID(Nil), 0);
+  if (!d) {
+    return xs;
+  }
+  struct dirent* de;
+  while ((de = readdir(d)) != NULL) {
+    if (strcmp(de->d_name, ".") && strcmp(de->d_name, "..")) {
+      xs = io_node(e, CID(Con), io_str(e, de->d_name, strlen(de->d_name)), xs);
+    }
+  }
+  closedir(d);
+  return xs;
+}
+
+// Hvf.rmdir(path) -> U32: removes an empty directory. 0, or an errno.
+Term hvf_rmdir_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* path = io_cstr(e, f[0], &n);
+  int   err  = rmdir(path) != 0 ? errno : 0;
+  free(path);
+  return (Term)(u32)err;
+}
+
+// Hvf.size_kib(path) -> U32: the KiB a file takes on the host's disk (its
+// allocated blocks: a sparse file counts what it holds), 0 when none.
+Term hvf_size_kib_run(Env e, Term* f, IoWork* w) {
+  u64         n;
+  char*       path = io_cstr(e, f[0], &n);
+  struct stat st;
+  u64         k = lstat(path, &st) == 0 ? (u64)st.st_blocks / 2 : 0;
+  free(path);
+  return (Term)(u32)(k > 0xffffffffu ? 0xffffffffu : k);
+}
+
 // The console log and share quotas (Hvf.console_log, Hvf.share_quota):
 // placed after the hot paths.
 
@@ -5586,6 +5705,18 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.reexec)
   io_eff(CID(Hvf.reexec), hvf_reexec_run);
+#endif
+#ifdef CID(Hvf.ctl_call)
+  io_eff(CID(Hvf.ctl_call), hvf_ctl_call_run);
+#endif
+#ifdef CID(Hvf.ls)
+  io_eff(CID(Hvf.ls), hvf_ls_run);
+#endif
+#ifdef CID(Hvf.rmdir)
+  io_eff(CID(Hvf.rmdir), hvf_rmdir_run);
+#endif
+#ifdef CID(Hvf.size_kib)
+  io_eff(CID(Hvf.size_kib), hvf_size_kib_run);
 #endif
 #ifdef CID(Hvf.args)
   io_eff(CID(Hvf.args), hvf_args_run);
