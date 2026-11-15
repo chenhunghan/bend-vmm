@@ -9,7 +9,7 @@ carries out plans that Bend hands it.
 This file is the audit of that boundary. It covered all 113 effects in
 host/hvf.c as of 2026-11-09 and says, for each group, where the
 decisions are made; the migration ledger at the end lists every effect
-(138 as of 2026-11-15) with its target in the C-to-Bend plan. The
+(139 as of 2026-11-15) with its target in the C-to-Bend plan. The
 section before it lists every decision still in C, with the reason it
 stays.
 
@@ -149,7 +149,7 @@ from the hot path can still move exit latency
 
 ## Migration ledger (C_TO_BEND.md)
 
-Every effect host/hvf.c registers, as of 2026-11-15 (138; regenerate the
+Every effect host/hvf.c registers, as of 2026-11-15 (139; regenerate the
 list with `grep -o 'io_eff(CID(Hvf\.[a-z_0-9]*)' host/hvf.c`). Target and
 primitive are the plan's proposals, not existing modules; line numbers are
 host/hvf.c's at the commit that changed this table. Test names what checks
@@ -247,6 +247,7 @@ row but the decisions listed as moved above.
 | `ctl_call` | `hvf_ctl_call_run` (5261) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C connects and relays; Bend decides what a reply means (host/api.bend, 2026-11-11) |
 | `ls` | `hvf_ls_run` (5332) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C reports a fact (2026-11-11) |
 | `rmdir` | `hvf_rmdir_run` (5352) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C removes; Bend says which (Sdir, 2026-11-11) |
+| `ram_kib` | `hvf_ram_kib_run` | host/main.bend over thin OS calls | OS-call bindings (mincore) | 2 | balloon-test status json | status json | C reports a fact (2026-11-15) |
 | `size_kib` | `hvf_size_kib_run` (5362) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C reports a fact (2026-11-11) |
 | `vsock_base` | `hvf_vsock_base_run` (4502) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
 | `unix_connect` | `hvf_unix_connect_run` (4517) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |

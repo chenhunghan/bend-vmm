@@ -78,6 +78,20 @@ def Ctl.no_balloon() -> String:
 def Ctl.status_json_balloon(paused: Bool, +target: U32, +actual: U32) -> String:
   "{\"state\":\"" ++ Bool.pick(String, paused, "paused", "running") ++ "\",\"balloon\":{\"target_mib\":" ++ U32.show(Ctl.pages_mib(target)) ++ ",\"actual_mib\":" ++ U32.show(Ctl.pages_mib(actual)) ++ "}}"
 
+# status json with a balloon and what of it the host still holds: kept_mib
+# is the memory in the balloon the host could not release (pages of 16 KiB
+# blocks the balloon holds only part of).
+def Ctl.status_json_kept(paused: Bool, +target: U32, +actual: U32, +kept: U32) -> String:
+  "{\"state\":\"" ++ Bool.pick(String, paused, "paused", "running") ++ "\",\"balloon\":{\"target_mib\":" ++ U32.show(Ctl.pages_mib(target)) ++ ",\"actual_mib\":" ++ U32.show(Ctl.pages_mib(actual)) ++ ",\"kept_mib\":" ++ U32.show(Ctl.pages_mib(kept)) ++ "}}"
+
+# status json's guest RAM: what of it the host holds, resident and (macOS)
+# compressed, in MiB from KiB; spliced before the object's closing brace.
+def Ctl.ram_json(+resident_kib: U32, +compressed_kib: U32) -> String:
+  ",\"ram\":{\"resident_mib\":" ++ U32.show((resident_kib / 1024 : U32)) ++ ",\"compressed_mib\":" ++ U32.show((compressed_kib / 1024 : U32)) ++ "}}"
+
+def Ctl.with_ram(+json: String, +resident_kib: U32, +compressed_kib: U32) -> String:
+  String.take(json, Nat.sub(String.length(json), 1n)) ++ Ctl.ram_json(resident_kib, compressed_kib)
+
 # A command that takes an argument, given none: its usage.
 def Ctl.needs(+arg: String, c: Cmd, why: String) -> Cmd:
   Bool.pick(Cmd, String.is_empty(arg), CBad{why}, c)

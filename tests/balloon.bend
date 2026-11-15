@@ -133,11 +133,54 @@ def poll_asked(r: Maybe<&1, S.Sim & ((Q.Vq & K.AutoSt) & Bool)>) -> Bool:
     case Some{(s, ((q, K.AutoSt{h, k, m, st}), u))}:
       k && u && U32.is_eq(h, A.Auto.none())
 
+# Every other page of n blocks from page 4 * base (step 2, from first).
+def stride(n: Nat, +first: U32) -> +List<U32>:
+  match n:
+    case 0n:
+      []
+    case 1n+k:
+      Con{first, stride(k, (first + 2 : U32))}
+
+# A fragmented guest's balloon: 4000 pages, every other one (2000 partial
+# blocks) in buffers of 256, then the pages between them.
+def frag_join(+free: +List<V.Iov>, +r: K.Inflated) -> K.Inflated:
+  match r:
+    case K.Inflated{+b3, +f3}:
+      K.Inflated{b3, List.append(&2, V.Iov, free, f3)}
+
+def frag_step(+i: K.Inflated, +first: U32) -> K.Inflated:
+  match i:
+    case K.Inflated{+b, +free}:
+      frag_join(free, K.Balloon.inflate_all(stride(256n, first), b))
+
+def frag_in(n: Nat, +b: K.Bal, +first: U32) -> K.Inflated:
+  match n:
+    case 0n:
+      K.Inflated{b, []}
+    case 1n+k:
+      frag_step(frag_in(k, b, (first + 512 : U32)), first)
+
+def inflated_bal(i: K.Inflated) -> K.Bal:
+  match i:
+    case K.Inflated{b, f}:
+      b
+
+def inflated_n(i: K.Inflated) -> U32:
+  match i:
+    case K.Inflated{b, f}:
+      U32.from_nat(List.length(&2, V.Iov, f))
+
 def main() -> IO(Unit):
   do IO<Unit>:
     T.eq_str("balloon reporting: both buffers used, length 0", show(mem(run(2), 6144, 20)), "[0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]")
     T.eq_str("balloon reporting: no whole block, memory kept", show(mem(run(2), 8192, 4)), "[7, 7, 7, 7]")
     T.ok("balloon reporting: the pass used buffers", used(run(2)))
+    +half : K.Bal = inflated_bal(frag_in(8n, K.Balloon.new(), 0))
+    T.eq_u32("balloon fragmented: every other page kept", K.Balloon.kept(half), 2048)
+    +whole : K.Inflated = frag_in(8n, half, 1)
+    T.eq_u32("balloon fragmented: the pages between release every block", inflated_n(whole), 1024)
+    T.eq_u32("balloon fragmented: nothing kept after", K.Balloon.kept(inflated_bal(whole)), 0)
+    T.eq_u32("balloon fragmented: deflated, nothing counted", K.Balloon.actual(K.Balloon.deflate_all(stride(4096n, 0), K.Balloon.deflate_all(stride(4096n, 1), inflated_bal(whole)))), 0)
     T.eq_u32("balloon inflate: 15 pages counted", actual_of(infl(0, K.Balloon.new())), 15)
     T.eq_u32("balloon deflate: 15 pages taken back", actual_of(infl(1, K.Bal{0, 20, []})), 5)
     T.eq_u32("balloon stats: the first buffer is held", stats_held(stats_run(K.Balloon.auto_new())), 0)

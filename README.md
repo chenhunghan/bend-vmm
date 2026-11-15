@@ -229,15 +229,29 @@ socket sets how much the guest should give to the balloon (`balloon 0`
 gives it all back); the guest frees that much (dropping cache first) and
 the VMM releases each 16 KiB block once all of its pages are in the
 balloon. `status json` then reads
-`{"state":"running","balloon":{"target_mib":1024,"actual_mib":1024}}`.
-The device offers VIRTIO_BALLOON_F_DEFLATE_ON_OOM, so a guest short of
+`{"state":"running","balloon":{"target_mib":1024,"actual_mib":1024,"kept_mib":0}}`:
+`status json` also reports `"ram":{"resident_mib":…,"compressed_mib":…}`:
+what of guest RAM the host holds (resident, and in macOS's compressor);
+the VMM's footprint is that plus its own memory (about 50 MiB).
+`kept_mib` is what of the balloon the host could not release (pages of
+16 KiB blocks only partly in it). A 4 KiB-page guest whose free memory is
+fragmented gives the balloon its scattered single pages first, and those
+stay charged to the host (`bench frag` in the test guest shows it: 200 MiB
+in the balloon, 200 MiB kept). Compaction in the guest does not fix that
+by itself (it moves balloon pages into other single-page holes); a
+16 KiB-page guest kernel avoids it, and so does `balloon 0`, compaction
+(`echo 1 > /proc/sys/vm/compact_memory`), then the balloon again. The
+device offers VIRTIO_BALLOON_F_DEFLATE_ON_OOM, so a guest short of
 memory takes pages back from the balloon instead of failing.
 
 By default the balloon is also automatic (`--balloon auto`;
 `--balloon free-page-reporting` keeps reporting alone): the device offers
 its stats queue (VIRTIO_BALLOON_F_STATS_VQ), the VMM reads the guest's free
 memory every 2 s (from 30 s after it starts), and moves the target so the guest keeps a floor free
-(256 MiB, or a tenth of its RAM) and the balloon holds at most half of it.
+(256 MiB, or a tenth of its RAM) and the balloon holds at most half of it,
+with hysteresis: it grows only when 96 MiB more than the floor is free
+(leaving 64 MiB above it) and shrinks only below the floor, so a guest
+whose free memory moves by tens of MiB does not make it chase.
 That brings back memory free page reporting misses: Linux reports a zone
 again only after enough pages were freed there, so memory freed and taken
 again can sit free for hours (a Kubernetes control plane with 900 MB free

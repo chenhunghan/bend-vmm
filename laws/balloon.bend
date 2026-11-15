@@ -74,3 +74,22 @@ law balloon.pfns:
 # with pages 0, 1 and 4..7 in is block 64 with 0 and 1, block 65 whole.
 law balloon.parts16:
   {K.Balloon.parts16([K.Part{16, 243}]) == [K.Part{64, 3}, K.Part{65, 15}] : +List<K.Part>}
+
+# Proposed: a whole buffer at once (Balloon.inflate_all, deflate_all) gives
+# the state page-at-a-time does, its masks in block order: pages 256..270 in
+# any order release blocks 64..66 and keep 67's mask; pages 258 and 257
+# into a balloon holding 256 (block 64) and 1031 (block 257) in reverse
+# order (an older snapshot) leave the masks sorted.
+law balloon.inflate_all:
+  {K.Balloon.inflate_all(List.reverse(&2, U32, pfns16(15n, 256)), K.Balloon.new()) == K.Inflated{K.Bal{0, 15, [K.Part{67, 7}]}, [V.Iov{U.U64{0, 1048576}, 16384}, V.Iov{U.U64{0, 1064960}, 16384}, V.Iov{U.U64{0, 1081344}, 16384}]} : K.Inflated}
+
+law balloon.inflate_all_sorts:
+  {K.Balloon.inflate_all([258, 257], K.Bal{0, 2, [K.Part{257, 8}, K.Part{64, 1}]}) == K.Inflated{K.Bal{0, 4, [K.Part{64, 7}, K.Part{257, 8}]}, []} : K.Inflated}
+
+law balloon.deflate_all:
+  {K.Balloon.deflate_all([256, 1031, 999], K.Bal{0, 3, [K.Part{64, 3}, K.Part{257, 8}]}) == K.Bal{0, 0, [K.Part{64, 2}]} : K.Bal}
+
+# Proposed: kept counts the pages of partial blocks (the host could not
+# release them).
+law balloon.kept:
+  {K.Balloon.kept(K.Bal{0, 9, [K.Part{64, 7}, K.Part{257, 8}]}) == 4 : U32}

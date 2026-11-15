@@ -14,7 +14,10 @@ Then inflate and deflate from the control socket: 1 GiB of page cache,
 `balloon 0` (the guest can use that memory again). Then the automatic
 balloon (the default, src/virtio/balauto.bend): an idle guest's free memory
 goes into it, a 1.2 GiB burst still fits with nothing killed, it fills again
-after; `balloon 100` stops it, `balloon auto` starts it again.
+after; `balloon 100` stops it, `balloon auto` starts it again. Last, a
+fragmented guest (bench frag: every other 4 KiB page free): `balloon 200`
+fills within 10 s even so, status json's kept_mib says most of it could not
+be released (16 KiB blocks only part in the balloon).
 """
 import hashlib, os, re, socket, subprocess, sys, time
 
@@ -194,5 +197,26 @@ check("balloon 100 stops it (target %d MiB)" % t, t == 100, t)
 r = ctl("balloon auto")
 t = wait_target(lambda t: t >= 512, 30)
 check("balloon auto starts it again (target %d MiB)" % t, r == "balloon auto" and t >= 512, (r, t))
+vm.end()
+
+def kept_mib():
+    m = re.search(r'"kept_mib":(\d+)', ctl("status json"))
+    return int(m.group(1)) if m else -1
+
+vm = Vm(["--mem", "1024", "--cpus", "2", "--kernel", "out/guest/Image", "--initrd", "out/guest/guest.cpio",
+         "--control", sock, "--cmdline", "console=ttyAMA0 quiet"])
+check("boot a guest to fragment", vm.wait("busybox shell", 60))
+vm.p.stdin.write(b"bench frag 600 20 &\n"); vm.p.stdin.flush()
+check("bench frag", vm.wait("FRAG-READY", 60))
+ctl("balloon 200")
+st = ""
+for _ in range(int(20 * slow)):
+    time.sleep(0.5)
+    st = ctl("status json")
+    if '"actual_mib":200' in st:
+        break
+check("a fragmented guest fills the balloon within 10 s", '"actual_mib":200' in st, st)
+k = kept_mib()
+check("kept_mib: the balloon's pages the host could not release (%d MiB)" % k, k >= 100, st)
 vm.end()
 sys.exit(1 if fails else 0)

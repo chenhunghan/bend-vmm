@@ -99,3 +99,9 @@ def L.control.status_json_balloon():
 
 def L.control.balloon_auto():
   {==}
+
+def L.control.status_json_kept():
+  {==}
+
+def L.control.with_ram():
+  {==}

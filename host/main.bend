@@ -840,7 +840,7 @@ def status_json(paused: Bool, info: Maybe<&2, Bl.Bal>) -> String:
     case None{}:
       Ctl.Ctl.status_json(paused)
     case Some{+b}:
-      Ctl.Ctl.status_json_balloon(paused, Bl.Balloon.target(b), Bl.Balloon.actual(b))
+      Ctl.Ctl.status_json_kept(paused, Bl.Balloon.target(b), Bl.Balloon.actual(b), Bl.Balloon.kept(b))
 
 def balloon_reply(has: Bool, info: Maybe<&2, Bl.Bal>) -> String:
   match info:
@@ -874,7 +874,9 @@ def balloon_reply(has: Bool, info: Maybe<&2, Bl.Bal>) -> String:
         +m : M.Machine <- take(mc)
         +info : Maybe<&2, Bl.Bal> = M.Machine.balloon_info(m)
         put(mc, m)
-        return status_json(Bool.not(U32.is_zero(H.Host.first(st))), info)
+        +res : U32 <- H.Hvf.ram_kib(0)
+        +comp : U32 <- H.Hvf.ram_kib(1)
+        return Ctl.Ctl.with_ram(status_json(Bool.not(U32.is_zero(H.Host.first(st))), info), res, comp)
     case Ctl.CBalloon{mib}:
       do IO<String>:
         +m0 : M.Machine <- take(mc)

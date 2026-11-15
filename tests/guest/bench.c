@@ -24,6 +24,9 @@
 //                    without UNMAP
 //   bench tick HZ SECONDS  sleeps 1/HZ s in a loop (nanosleep, no fork):
 //                    a guest that only wakes on a timer
+//   bench frag MB SECONDS  fragments the guest's free memory: touches MB of
+//                    anonymous memory, gives back every other 4 KiB page
+//                    (madvise DONTNEED), holds the rest SECONDS, exits
 //   bench on CPU PROG ARGS...  runs PROG on vCPU CPU only (where the devices'
 //                    interrupts land, so no IPI wakes it: steadier numbers)
 // Prints `BENCH <name> <value> <unit>` lines.
@@ -55,6 +58,7 @@ static i64 sys(i64 n, i64 a, i64 b, i64 c, i64 d, i64 e, i64 f) {
 #define SYS_ioctl 29
 #define SYS_fallocate 47
 #define SYS_nanosleep 101
+#define SYS_madvise 233
 #define SYS_sched_setaffinity 122
 #define SYS_execve 221
 #define SYS_read 63
@@ -149,6 +153,16 @@ static int tick(u64 hz, u64 secs) {
   if (hz == 1) { t.s = 1; t.ns = 0; }
   for (u64 i = 0; i < hz * secs; i++) sys(SYS_nanosleep, (i64)&t, 0, 0, 0, 0, 0);
   return 0;
+}
+
+static int frag(u64 mb, u64 secs) {
+  u64 n = mb << 20;
+  char* m = (char*)sys(SYS_mmap, 0, (i64)n, 3, 0x22, -1, 0);
+  if ((i64)m < 0) return 1;
+  for (u64 o = 0; o < n; o += 4096) m[o] = 1;
+  for (u64 o = 4096; o < n; o += 8192) sys(SYS_madvise, (i64)(m + o), 4096, 4, 0, 0, 0);
+  put("FRAG-READY"); flush();
+  return tick(1, secs);
 }
 
 // fallocate on a block device: mode 3 (PUNCH_HOLE | KEEP_SIZE) or 17
@@ -313,6 +327,7 @@ void _start_c(u64* sp) {
   }
   if (argc >= 3 && eq(argv[1], "disk")) rc = disk(argv[2]);
   else if (argc >= 2 && eq(argv[1], "mmio")) rc = mmio();
+  else if (argc >= 4 && eq(argv[1], "frag")) rc = frag(num(argv[2]), num(argv[3]));
   else if (argc >= 4 && eq(argv[1], "tick")) rc = tick(num(argv[2]), num(argv[3]));
   else if (argc >= 5 && eq(argv[1], "punch")) rc = falloc(argv[2], 3, num(argv[3]), num(argv[4]));
   else if (argc >= 5 && eq(argv[1], "zero")) rc = falloc(argv[2], 17, num(argv[3]), num(argv[4]));

@@ -59,3 +59,12 @@ law balauto.period:
 
 law balauto.start:
   {A.Auto.start_ms() == 30000 : U32}
+
+# Proposed: hysteresis. Free memory 80 MiB above a 256 MiB floor (inside
+# slack + band) leaves the target; 160 MiB above grows it by 96 MiB (free
+# stays 64 MiB above the floor).
+law balauto.band:
+  {A.Auto.target(A.Stats{86016, 524288, 86016}, 1000) == 1000 : U32}
+
+law balauto.grow_leaves_slack:
+  {A.Auto.target(A.Stats{106496, 524288, 106496}, 1000) == 25576 : U32}

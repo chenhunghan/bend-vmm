@@ -42,3 +42,15 @@ def L.balloon.pfns():
 
 def L.balloon.parts16():
   {==}
+
+def L.balloon.inflate_all():
+  {==}
+
+def L.balloon.inflate_all_sorts():
+  {==}
+
+def L.balloon.deflate_all():
+  {==}
+
+def L.balloon.kept():
+  {==}

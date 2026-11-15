@@ -110,3 +110,12 @@ law control.status_json_balloon:
 # Proposed: balloon auto hands the target back to the automatic balloon.
 law control.balloon_auto:
   {C.Ctl.parse("balloon auto") == C.CBalloonAuto{} : C.Cmd}
+
+# Proposed: status json also says what of the balloon the host could not
+# release (kept_mib).
+law control.status_json_kept:
+  {C.Ctl.status_json_kept(False{}, 262144, 131072, 2560) == "{\"state\":\"running\",\"balloon\":{\"target_mib\":1024,\"actual_mib\":512,\"kept_mib\":10}}" : String}
+
+# Proposed: status json also says what of guest RAM the host holds.
+law control.with_ram:
+  {C.Ctl.with_ram("{\"state\":\"running\"}", 2048, 0) == "{\"state\":\"running\",\"ram\":{\"resident_mib\":2,\"compressed_mib\":0}}" : String}

@@ -5663,6 +5663,29 @@ Term hvf_size_kib_run(Env e, Term* f, IoWork* w) {
   return (Term)(u32)(k > 0xffffffffu ? 0xffffffffu : k);
 }
 
+// Hvf.ram_kib(kind) -> U32: guest RAM the host holds, in KiB (mincore over
+// the RAM mapping): kind 0 resident, 1 compressed (macOS: paged out to the
+// compressor; Linux: 0). status json's "ram" (what the VMM's footprint
+// holds for guest RAM, against its own memory).
+Term hvf_ram_kib_run(Env e, Term* f, IoWork* w) {
+  size_t pg = (size_t)getpagesize(), k = hvf_ram ? (size_t)(hvf_ram_size / pg) : 0;
+  char*  v  = k ? malloc(k) : NULL;
+  u64    n  = 0;
+  if (v && mincore(hvf_ram, (size_t)hvf_ram_size, v) == 0) {
+    for (size_t i = 0; i < k; i++) {
+#ifdef __APPLE__
+      int paged = (v[i] & MINCORE_PAGED_OUT) != 0;
+#else
+      int paged = 0;
+#endif
+      n += (u32)f[0] == 0 ? (v[i] & 1) != 0 : paged;
+    }
+  }
+  free(v);
+  n = n * (pg / 1024);
+  return (Term)(u32)(n > 0xffffffffu ? 0xffffffffu : n);
+}
+
 // Hvf.disk_discard(disk, off_hi, off_lo, len_hi, len_lo) -> U32: frees the
 // image's blocks in [off, off+len): a hole that reads as zeros (virtio-blk
 // DISCARD: src/virtio/blk.bend picks whole 4 KiB blocks). 0, or an errno;
@@ -6284,6 +6307,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.rmdir)
   io_eff(CID(Hvf.rmdir), hvf_rmdir_run);
+#endif
+#ifdef CID(Hvf.ram_kib)
+  io_eff(CID(Hvf.ram_kib), hvf_ram_kib_run);
 #endif
 #ifdef CID(Hvf.size_kib)
   io_eff(CID(Hvf.size_kib), hvf_size_kib_run);

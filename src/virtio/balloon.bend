@@ -151,6 +151,26 @@ def Balloon.actual(+b: Bal) -> U32:
     case Bal{t, a, p}:
       a
 
+# The pages the balloon holds that the host could not release: those of
+# its partial blocks (a 16 KiB block is released only once all four of its
+# pages are in the balloon).
+def Balloon.bits(+m: U32) -> U32:
+  ((m .&. 1 : U32) + (((m >> 1n : U32) .&. 1 : U32) + (((m >> 2n : U32) .&. 1 : U32) + ((m >> 3n : U32) .&. 1 : U32) : U32) : U32) : U32)
+
+def Balloon.kept.go(ps: +List<Part>) -> U32:
+  match ps:
+    case Nil{}:
+      0
+    case Con{p, rest}:
+      match p:
+        case Part{b, +m}:
+          (Balloon.bits(m) + Balloon.kept.go(rest) : U32)
+
+def Balloon.kept(+b: Bal) -> U32:
+  match b:
+    case Bal{t, a, ps}:
+      Balloon.kept.go(ps)
+
 # A page into its block's mask: the masks after it, and the block when it is
 # now whole (U32 max when not).
 type Took is Data:
@@ -240,6 +260,167 @@ def Balloon.deflate(pfns: +List<U32>, +b: Bal) -> Bal:
         case Bal{+t, +a, +ps}:
           Balloon.deflate(rest, Bal{t, Bool.pick(U32, U32.is_eq(a, 0), 0, (a - 1 : U32)), Balloon.give(ps, (pfn >> 2n : U32), Balloon.bit(pfn))})
 
+# A whole buffer of page numbers at once (Balloon.on_pfns): the same state
+# as Balloon.inflate and Balloon.deflate one page at a time, with the masks
+# in block order, in one walk of them (one page at a time walks them once
+# per page: a fragmented guest's balloon holds tens of thousands of partial
+# blocks, and inflating into it took seconds per MiB).
+def Balloon.part_le(x: Part, y: Part) -> Bool:
+  match x:
+    case Part{+a, m}:
+      match y:
+        case Part{+b, n}:
+          U32.is_le(a, b)
+
+def Balloon.part_of(+pfn: U32) -> Part:
+  Part{(pfn >> 2n : U32), Balloon.bit(pfn)}
+
+def Balloon.parts_of(pfns: +List<U32>) -> +List<Part>:
+  match pfns:
+    case Nil{}:
+      []
+    case Con{+pfn, rest}:
+      Con{Balloon.part_of(pfn), Balloon.parts_of(rest)}
+
+# A part onto sorted parts: joined with the first when they share a block.
+def Balloon.join_into(+p: Part, xs: +List<Part>) -> +List<Part>:
+  match p:
+    case Part{+b, +m}:
+      match xs:
+        case Nil{}:
+          [Part{b, m}]
+        case Con{x, +rest}:
+          match x:
+            case Part{+c, +n}:
+              Bool.pick(+List<Part>, U32.is_eq(b, c), Con{Part{b, (m .|. n : U32)}, rest}, Con{Part{b, m}, Con{Part{c, n}, rest}})
+
+def Balloon.join(ps: +List<Part>) -> +List<Part>:
+  match ps:
+    case Nil{}:
+      []
+    case Con{p, rest}:
+      Balloon.join_into(p, Balloon.join(rest))
+
+# A buffer's pages as masks, one per block, in block order.
+def Balloon.batch(+pfns: +List<U32>) -> +List<Part>:
+  Balloon.join(List.sort(~Part, ~Balloon.part_le, Balloon.parts_of(pfns)))
+
+def Balloon.ordered.go(ps: +List<Part>, +prev: U32) -> Bool:
+  match ps:
+    case Nil{}:
+      True{}
+    case Con{p, rest}:
+      match p:
+        case Part{+b, m}:
+          Bool.and(U32.is_lt(prev, b), Balloon.ordered.go(rest, b))
+
+def Balloon.ordered.pick(sorted: Bool, +ps: +List<Part>) -> +List<Part>:
+  match sorted:
+    case True{}:
+      ps
+    case False{}:
+      List.sort(~Part, ~Balloon.part_le, ps)
+
+# The masks in block order (a state from an older snapshot may hold them in
+# any order).
+def Balloon.ordered(+ps: +List<Part>) -> +List<Part>:
+  match ps:
+    case Nil{}:
+      []
+    case Con{p, rest}:
+      match p:
+        case Part{+b, +m}:
+          Balloon.ordered.pick(Balloon.ordered.go(rest, b), Con{Part{b, m}, rest})
+
+def Balloon.keep(+p: Part, +i: Inflated) -> Inflated:
+  match i:
+    case Inflated{Bal{t, a, ps}, free}:
+      Inflated{Bal{t, a, Con{p, ps}}, free}
+
+def Balloon.one_in(+b: U32, +m: U32, +i: Inflated) -> Inflated:
+  match i:
+    case Inflated{Bal{t, a, ps}, +free}:
+      Bool.pick(Inflated, U32.is_eq(m, 15), Inflated{Bal{t, a, ps}, Con{Balloon.block_iov(b), free}}, Inflated{Bal{t, a, Con{Part{b, m}, ps}}, free})
+
+def Balloon.in_only(ns: +List<Part>) -> Inflated:
+  match ns:
+    case Nil{}:
+      Inflated{Bal{0, 0, []}, []}
+    case Con{n, rest}:
+      match n:
+        case Part{+b, +m}:
+          Balloon.one_in(b, m, Balloon.in_only(rest))
+
+# Sorted masks and a sorted batch: the masks after it (count and target
+# left 0: Balloon.inflate_all sets them), and the blocks now whole.
+def Balloon.in_merge(fuel: Nat, os: +List<Part>, ns: +List<Part>) -> Inflated:
+  match fuel:
+    case 0n:
+      Inflated{Bal{0, 0, os}, []}
+    case 1n+f:
+      match os:
+        case Nil{}:
+          Balloon.in_only(ns)
+        case Con{o, +orest}:
+          match o:
+            case Part{+ob, +om}:
+              match ns:
+                case Nil{}:
+                  Inflated{Bal{0, 0, Con{Part{ob, om}, orest}}, []}
+                case Con{n, +nrest}:
+                  match n:
+                    case Part{+nb, +nm}:
+                      +lt = U32.is_lt(ob, nb)
+                      +gt = U32.is_lt(nb, ob)
+                      Balloon.one_in(Bool.pick(U32, gt, nb, ob), Bool.pick(U32, lt, om, Bool.pick(U32, gt, nm, (om .|. nm : U32))),
+                        Balloon.in_merge(f, Bool.pick(+List<Part>, gt, Con{Part{ob, om}, orest}, orest), Bool.pick(+List<Part>, lt, Con{Part{nb, nm}, nrest}, nrest)))
+
+def Balloon.in_set(+t: U32, +a: U32, +i: Inflated) -> Inflated:
+  match i:
+    case Inflated{Bal{x, y, ps}, free}:
+      Inflated{Bal{t, a, ps}, free}
+
+def Balloon.inflate_all(+pfns: +List<U32>, +b: Bal) -> Inflated:
+  match b:
+    case Bal{+t, +a, +ps}:
+      +os = Balloon.ordered(ps)
+      +ns = Balloon.batch(pfns)
+      Balloon.in_set(t, (a + U32.from_nat(List.length(&2, U32, pfns)) : U32),
+        Balloon.in_merge(Nat.add(List.length(&2, Part, os), List.length(&2, Part, ns)), os, ns))
+
+def Balloon.out_one(+b: U32, +m: U32, +rest: +List<Part>) -> +List<Part>:
+  Bool.pick(+List<Part>, U32.is_zero(m), rest, Con{Part{b, m}, rest})
+
+def Balloon.out_merge(fuel: Nat, os: +List<Part>, ns: +List<Part>) -> +List<Part>:
+  match fuel:
+    case 0n:
+      os
+    case 1n+f:
+      match os:
+        case Nil{}:
+          []
+        case Con{o, +orest}:
+          match o:
+            case Part{+ob, +om}:
+              match ns:
+                case Nil{}:
+                  Con{Part{ob, om}, orest}
+                case Con{n, +nrest}:
+                  match n:
+                    case Part{+nb, +nm}:
+                      +lt = U32.is_lt(ob, nb)
+                      +gt = U32.is_lt(nb, ob)
+                      Balloon.out_one(ob, Bool.pick(U32, lt, om, Bool.pick(U32, gt, 0, (om .&. U32.xor(15, nm) : U32))),
+                        Balloon.out_merge(f, Bool.pick(+List<Part>, gt, Con{Part{ob, om}, orest}, orest), Bool.pick(+List<Part>, lt, Con{Part{nb, nm}, nrest}, nrest)))
+
+def Balloon.deflate_all(+pfns: +List<U32>, +b: Bal) -> Bal:
+  match b:
+    case Bal{+t, +a, +ps}:
+      +os = Balloon.ordered(ps)
+      +ns = Balloon.batch(pfns)
+      +k = U32.from_nat(List.length(&2, U32, pfns))
+      Bal{t, Bool.pick(U32, U32.is_le(a, k), 0, (a - k : U32)), Balloon.out_merge(Nat.add(List.length(&2, Part, os), List.length(&2, Part, ns)), os, ns)}
+
 # The u32 page numbers of a buffer's bytes (little-endian).
 def Balloon.pfns(fuel: Nat, bs: +List<U32>) -> +List<U32>:
   match fuel:
@@ -268,9 +449,9 @@ def Balloon.on_inflated(-R: Type, +i: Inflated) -> V.Op<R, Bal>:
 def Balloon.on_pfns(-R: Type, +inflate: Bool, +b: Bal, +pfns: +List<U32>) -> V.Op<R, Bal>:
   match inflate:
     case True{}:
-      Balloon.on_inflated(R, Balloon.inflate(pfns, Inflated{b, []}))
+      Balloon.on_inflated(R, Balloon.inflate_all(pfns, b))
     case False{}:
-      V.Op.pure(R, Bal, Balloon.deflate(pfns, b))
+      V.Op.pure(R, Bal, Balloon.deflate_all(pfns, b))
 
 # One inflate or deflate buffer: its page numbers read (at most
 # max_pfns), counted, the whole blocks released; returned with length 0.

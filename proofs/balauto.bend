@@ -42,3 +42,9 @@ def L.balauto.period():
 
 def L.balauto.start():
   {==}
+
+def L.balauto.band():
+  {==}
+
+def L.balauto.grow_leaves_slack():
+  {==}

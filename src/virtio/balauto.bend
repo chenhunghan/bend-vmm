@@ -12,8 +12,9 @@ import ../lib/bytes.bend as B
 # Every Auto.period_ms() the host returns the stats buffer the driver
 # posted; the driver posts it again with fresh values, and Auto.target
 # moves the target:
-#   - free above the floor by more than Auto.slack(): inflate by the excess
-#     (at most Auto.step() a time), never past Auto.most(total);
+#   - free above the floor by more than Auto.slack() + Auto.band(): inflate
+#     by the excess over floor + slack (at most Auto.step() a time), never
+#     past Auto.most(total);
 #   - free below the floor: deflate by the shortfall and Auto.slack() more,
 #     at once;
 #   - else: as it is.
@@ -53,6 +54,16 @@ def Auto.step() -> U32:
   # 256 MiB
   65536
 
+# Hysteresis: the balloon grows only when free memory is above the floor by
+# more than Auto.slack() and Auto.band() more, and then leaves Auto.slack()
+# free above the floor; it shrinks only below the floor. A guest whose free
+# memory moves by tens of MiB (a busy Kubernetes control plane) no longer
+# makes the balloon chase it: inflating and deflating every poll cost such a
+# VM 20 points of host CPU.
+def Auto.band() -> U32:
+  # 32 MiB
+  8192
+
 def Auto.floor(+total: U32) -> U32:
   # 256 MiB, or 1/10 of the guest's RAM
   U32.max(65536, (total / 10 : U32))
@@ -90,7 +101,7 @@ def Auto.fresh() -> Stats:
   Stats{0, 0, 0}
 
 def Auto.grow(+free: U32, +floor: U32, +target: U32, +most: U32) -> U32:
-  U32.min(most, (target + U32.min((free - floor : U32), Auto.step()) : U32))
+  U32.min(most, (target + U32.min(((free - floor : U32) - Auto.slack() : U32), Auto.step()) : U32))
 
 def Auto.shrink(+free: U32, +floor: U32, +target: U32) -> U32:
   +want = ((floor - free : U32) + Auto.slack() : U32)
@@ -105,5 +116,5 @@ def Auto.target(+st: Stats, +target: U32) -> U32:
     case Stats{+free, +total, a}:
       +floor = Auto.floor(total)
       Bool.pick(U32, U32.is_zero(total), target,
-      Bool.pick(U32, U32.is_lt((floor + Auto.slack() : U32), free), Auto.grow(free, floor, target, Auto.most(total)),
+      Bool.pick(U32, U32.is_lt(((floor + Auto.slack() : U32) + Auto.band() : U32), free), Auto.grow(free, floor, target, Auto.most(total)),
       Bool.pick(U32, U32.is_lt(free, floor), Auto.shrink(free, floor, target), target)))

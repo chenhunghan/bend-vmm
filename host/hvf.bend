@@ -93,6 +93,10 @@ def Hvf.rmdir(path: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.ram_kib(kind: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.size_kib(path: String) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
