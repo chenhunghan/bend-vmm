@@ -89,3 +89,14 @@ law qcow2.first_free_none:
 
 law qcow2.window:
   {St.Store.window() == 256 : U32}
+
+# Proposed: an image that lists an internal snapshot (header byte 60) is
+# not written (its L2 tables are the snapshot's too).
+law qcow2.writable:
+  {Q.Qcow.writable(header()) == True{} : Bool}
+
+law qcow2.snapshots_read_only:
+  {Q.Qcow.writable(List.set(&2, U32, header(), 63n, 1)) == False{} : Bool}
+
+law qcow2.raw_writable:
+  {Q.Qcow.writable(List.set(&2, U32, List.set(&2, U32, header(), 63n, 1), 0n, 82)) == True{} : Bool}

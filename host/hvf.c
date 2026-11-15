@@ -125,6 +125,7 @@ static int hvf_open(void) {
 // =========
 
 static uint8_t* hvf_ram;
+static int      hvf_ram_filed; // RAM maps a snapshot file (a restore)
 static uint64_t hvf_ram_base;
 static uint64_t hvf_ram_size;
 
@@ -1158,6 +1159,7 @@ Term hvf_init_run(Env e, Term* f, IoWork* w) {
     hvf_ram_size = hvf_snap.ram_size;
     hvf_ram_base = hvf_snap.ram_base;
     hvf_ram = mmap(NULL, hvf_ram_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, hvf_snap.fd, (off_t)hvf_snap.ram_off);
+    hvf_ram_filed = 1;
   } else {
     hvf_ram = mmap(NULL, hvf_ram_size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
   }
@@ -3720,12 +3722,45 @@ static int hvf_pread_all(int fd, void* p, size_t n, off_t at) {
   return 0;
 }
 
-// Guest RAM, skipping all-zero 64 KiB chunks (the file stays sparse).
+// Whether a chunk of anonymous RAM has never held data (macOS): mincore
+// says none of its pages is resident, paged out or modified (each
+// anonymous page reports MINCORE_ANONYMOUS, untouched or not). Reading such
+// a chunk to compare it with zeros would allocate it (macOS has no shared
+// zero page for anonymous memory: a snapshot of a 4 GiB guest grew the
+// VMM from 297 MiB to 4.3 GiB), so it is skipped unread. RAM mapped from a
+// snapshot file is never skipped this way (its untouched pages hold the
+// file's data); on Linux a read maps the shared zero page and costs nothing.
+#ifdef __APPLE__
+static int hvf_ram_empty(const uint8_t* p, size_t n) {
+  static char v[65536 / 4096];
+  size_t      pg = (size_t)getpagesize(), k = (n + pg - 1) / pg;
+  if (hvf_ram_filed || k > sizeof v || mincore((void*)p, n, v) != 0) {
+    return 0;
+  }
+  // every anonymous page reports MINCORE_ANONYMOUS; any other bit
+  // (resident, paged out, compressed, modified, copied) means data
+  for (size_t i = 0; i < k; i++) {
+    if ((unsigned char)v[i] & ~MINCORE_ANONYMOUS & 0xff) {
+      return 0;
+    }
+  }
+  return 1;
+}
+#else
+static int hvf_ram_empty(const uint8_t* p, size_t n) {
+  (void)p;
+  (void)n;
+  return 0;
+}
+#endif
+
+// Guest RAM, skipping all-zero 64 KiB chunks (the file stays sparse), and on
+// macOS chunks that never held data, unread (hvf_ram_empty).
 static int hvf_put_ram(int fd, off_t at) {
   static const uint8_t zero[65536];
   for (uint64_t o = 0; o < hvf_ram_size; o += sizeof zero) {
     size_t n = hvf_ram_size - o < sizeof zero ? (size_t)(hvf_ram_size - o) : sizeof zero;
-    if (memcmp(hvf_ram + o, zero, n) == 0) {
+    if (hvf_ram_empty(hvf_ram + o, n) || memcmp(hvf_ram + o, zero, n) == 0) {
       continue;
     }
     if (pwrite(fd, hvf_ram + o, n, at + (off_t)o) != (ssize_t)n) {
@@ -5486,10 +5521,16 @@ Term hvf_disk_zero_run(Env e, Term* f, IoWork* w) {
 static void hvf_ram_drop(uint8_t* a, uint64_t n) {
   uint64_t gpa = hvf_ram_base + (uint64_t)(a - hvf_ram);
   if (vmb_unmap(gpa, n) != 0) {
+    if (hvf_trace & 16) {
+      fprintf(stderr, "[trace] balloon: unmap of 0x%llx +%llu refused\n", (unsigned long long)gpa, (unsigned long long)n);
+    }
     madvise(a, n, MADV_FREE_REUSABLE);
     return;
   }
   if (mmap(a, n, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) {
+    if (hvf_trace & 16) {
+      fprintf(stderr, "[trace] balloon: fresh pages at 0x%llx refused\n", (unsigned long long)gpa);
+    }
     madvise(a, n, MADV_FREE_REUSABLE);
   }
   if (vmb_map(a, gpa, n, VMB_R | VMB_W | VMB_X) != 0) {

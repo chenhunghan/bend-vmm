@@ -50,7 +50,9 @@ sockets and guest memory where Bend tells it to.
 - virtio-blk disks, raw or qcow2 (read-write or read-only, FLUSH): qcow2
   images over backing files (raw or qcow2, up to 8 deep), compressed
   clusters, copy-on-write into new clusters with their reference counts, so
-  `qemu-img check` passes on what the guest wrote. virtio-rng, the PL031 RTC.
+  `qemu-img check` passes on what the guest wrote. A qcow2 image with
+  internal snapshots (`qemu-img snapshot -l`) is attached read-only (said on
+  stderr): its tables are the snapshots' too. virtio-rng, the PL031 RTC.
 - Reboot (`reboot` in the guest restarts the VM) and power-off.
 
 ## Build and run
@@ -140,8 +142,10 @@ frees (`fstrim`, `mount -o discard`, `blkdiscard`) goes back to the host: the
 VMM punches holes in a raw image (whole 4 KiB blocks; they read as zeros),
 and in a qcow2 image lets go of whole clusters that are its alone (their
 entries read as zeros, their counts drop to 0, their host clusters become
-holes; `qemu-img check` stays clean). Shared and compressed clusters stay,
-and so does a version 2 image over a backing file (it has no zero flag). New
+holes; `qemu-img check` stays clean). A cluster with a count above 1 loses
+one reference, and a compressed one a reference to each host cluster its
+bytes span (the last one out frees it). A version 2 image over a backing
+file keeps its clusters (it has no zero flag). New
 writes to a qcow2 image take freed clusters again before growing the file.
 
 Disk snapshots: a snapshot also keeps each writable `--disk` image as it was,

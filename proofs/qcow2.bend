@@ -66,3 +66,12 @@ def L.qcow2.first_free_none():
 
 def L.qcow2.window():
   {==}
+
+def L.qcow2.writable():
+  {==}
+
+def L.qcow2.snapshots_read_only():
+  {==}
+
+def L.qcow2.raw_writable():
+  {==}

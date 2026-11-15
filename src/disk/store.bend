@@ -480,9 +480,11 @@ def Store.status(-R: Type, st: Store) -> V.Op<R, U32>:
 # not show the backing file's older data), then its reference count is 0,
 # then its host cluster is a hole. A VMM that stops between leaks the
 # cluster at worst (unreferenced but counted; qemu-img check repairs it),
-# never maps freed data. Shared, compressed, zero and unallocated clusters
-# stay; so does every cluster of a version 2 image over a backing file (no
-# zero flag) or of one whose counts are not 16-bit.
+# never maps freed data. A shared cluster loses one reference and a
+# compressed one a reference to each host cluster it spans (Store.dis.entry);
+# zero and unallocated clusters stay, and so does every cluster of a version
+# 2 image over a backing file (no zero flag) or of one whose counts are not
+# 16-bit.
 
 def Store.dis.clear(-R: Type, +disk: U32, +q: Q.Qcow, +h: U.U64) -> V.Op<R, Unit>:
   +rti = Q.Qcow.ref_rti(q, h)
@@ -500,6 +502,51 @@ def Store.dis.hint(-R: Type, +disk: U32, +off: U.U64) -> V.Op<R, Unit>:
     +h : U.U64 = U.U64{Store.w(ws, 0n), Store.w(ws, 1n)}
     V.Op.disk_set_hint(R, disk, Bool.pick(U.U64, U.U64.is_lt(off, h), off, h))
 
+# One reference less to the host cluster at h: its 16-bit count lowered (a
+# count of 0 stays 0); when it reaches 0, the cluster becomes a hole and
+# lowers the allocation hint (Store.alloc may take it again).
+def Store.dis.unref.at(-R: Type, +disk: U32, +q: Q.Qcow, +h: U.U64, +at: U.U64, +bs: +List<U32>) -> V.Op<R, Unit>:
+  +c = B.Bytes.read_be(2n, bs)
+  +left = Bool.pick(U32, U32.is_eq(c, 0), 0, (c - 1 : U32))
+  do V.Op<R, Unit>:
+    V.Op.disk_write(R, disk, at, B.Bytes.be(2n, left))
+    Bool.pick(V.Op<R, Unit>, U32.is_eq(left, 0),
+      V.Op.bind(R, Unit, Unit, V.Op.disk_discard(R, disk, h, U.U64.from_u32(Q.Qcow.csize(q))), x => Store.dis.hint(R, disk, h)),
+      V.Op.pure(R, Unit, Unit{}))
+
+def Store.dis.unref(-R: Type, +disk: U32, +q: Q.Qcow, +h: U.U64) -> V.Op<R, Unit>:
+  +rti = Q.Qcow.ref_rti(q, h)
+  +slot = Q.Qcow.ref_slot(q, h)
+  do V.Op<R, Unit>:
+    e : U.U64 <- Store.read8(R, disk, U.U64.add(Qcow.rt(q), U.U64.from_u32((rti * 8 : U32))))
+    +rb : U.U64 = Q.Qcow.entry_off(e)
+    +at : U.U64 = U.U64.add(rb, U.U64.from_u32((slot * 2 : U32)))
+    +bs : +List<U32> <- Bool.pick(V.Op<R, +List<U32>>, U.U64.is_zero(rb), V.Op.pure(R, +List<U32>, [0, 0]), V.Op.disk_read(R, disk, at, 2))
+    Bool.pick(V.Op<R, Unit>, U.U64.is_zero(rb), V.Op.pure(R, Unit, Unit{}), Store.dis.unref.at(R, disk, q, h, at, bs))
+
+# The host clusters from c to last (inclusive), one reference less each
+# (fuel: the most clusters; a compressed cluster spans at most two).
+def Store.dis.unrefs(fuel: Nat, -R: Type, +disk: U32, +q: Q.Qcow, +c: U.U64, +last: U.U64) -> V.Op<R, Unit>:
+  match fuel:
+    case 0n:
+      V.Op.pure(R, Unit, Unit{})
+    case 1n+f:
+      Bool.pick(V.Op<R, Unit>, U.U64.is_le(c, last),
+        V.Op.bind(R, Unit, Unit, Store.dis.unref(R, disk, q, c), u =>
+          Store.dis.unrefs(f, R, disk, q, U.U64.add_u32(c, Q.Qcow.csize(q)), last)),
+        V.Op.pure(R, Unit, Unit{}))
+
+# The host cluster holding byte h.
+def Store.dis.cluster_of(+q: Q.Qcow, +h: U.U64) -> U.U64:
+  U.U64.and(h, U.U64.not(U.U64.from_u32((Q.Qcow.csize(q) - 1 : U32))))
+
+# A guest cluster let go, by its entry, the entry first reading as zeros
+# (zv) so freed data is never mapped:
+#   mapped and the image's alone (COPIED): count 0, a hole (as before);
+#   mapped and shared (count above 1): one reference less;
+#   compressed: one reference less to each host cluster its bytes span
+#   (several compressed clusters share host clusters; the last one out
+#   frees it).
 def Store.dis.entry(-R: Type, e: Q.Entry, +disk: U32, +q: Q.Qcow, +slot: U.U64, +zv: U.U64) -> V.Op<R, Unit>:
   match e:
     case Q.Mapped{+off, copied}:
@@ -508,7 +555,10 @@ def Store.dis.entry(-R: Type, e: Q.Entry, +disk: U32, +q: Q.Qcow, +slot: U.U64, 
           V.Op.bind(R, Unit, Unit, Store.dis.clear(R, disk, q, off), v =>
             V.Op.bind(R, Unit, Unit, V.Op.disk_discard(R, disk, off, U.U64.from_u32(Q.Qcow.csize(q))), x =>
               Store.dis.hint(R, disk, off)))),
-        V.Op.pure(R, Unit, Unit{}))
+        V.Op.bind(R, Unit, Unit, Store.write8(R, disk, slot, zv), u => Store.dis.unref(R, disk, q, off)))
+    case Q.Packed{+off, +clen}:
+      V.Op.bind(R, Unit, Unit, Store.write8(R, disk, slot, zv), u =>
+        Store.dis.unrefs(4n, R, disk, q, Store.dis.cluster_of(q, off), Store.dis.cluster_of(q, U.U64.add_u32(off, (clen - 1 : U32)))))
     case _:
       V.Op.pure(R, Unit, Unit{})
 
@@ -528,9 +578,11 @@ def Store.dis.cluster(-R: Type, past: Bool, +disk: U32, +q: Q.Qcow, +c: U.U64, +
       V.Op.pure(R, Unit, Unit{})
     case False{}:
       do V.Op<R, Unit>:
-        e1 : U.U64 <- Store.read8(R, disk, U.U64.add(Qcow.l1(q), U.U64.from_u32((Q.Qcow.l1_index(q, c) * 8 : U32))))
+        +e1 : U.U64 <- Store.read8(R, disk, U.U64.add(Qcow.l1(q), U.U64.from_u32((Q.Qcow.l1_index(q, c) * 8 : U32))))
         +l2 : U.U64 = Q.Qcow.entry_off(e1)
-        Store.dis.l2(R, U.U64.is_zero(l2), disk, q, l2, c, zv)
+        # an L2 table shared with an internal snapshot (no COPIED) stays: its
+        # entries are the snapshot's too
+        Store.dis.l2(R, U.U64.is_zero(l2) || U32.is_zero((U.U64.hi(e1) .&. 2147483648 : U32)), disk, q, l2, c, zv)
 
 # The clusters from c to end, one at a time (fuel: the most clusters).
 def Store.dis.go(fuel: Nat, -R: Type, +disk: U32, +q: Q.Qcow, +c: U.U64, +end: U.U64, +zv: U.U64) -> V.Op<R, Unit>:

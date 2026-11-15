@@ -1408,11 +1408,13 @@ def path_under(+dir: String, +name: String) -> String:
         below : St.Store <- devices.backing(8n, path, id, Qc.Qcow.backing(head))
         return D.BlkStoreKind{St.QcowStore{id, q, below}, U.U64.shr(9n, Qc.Qcow.size(q)), ro}
 
-@unsafe def devices.open(ro: Bool, +path: String, +id: U32) -> IO(D.DevKind):
+@unsafe def devices.open(+ro: Bool, +path: String, +id: U32) -> IO(D.DevKind):
   do IO<D.DevKind>:
     die_if(U32.is_eq(id, err()), "cannot open a disk image")
     +head : +List<U32> <- H.Host.disk_read(id, U.U64.zero(), 512)
-    devices.format(Qc.Qcow.parse(head), ro, path, id, head)
+    +keep : Bool = Bool.not(ro) && Bool.not(Qc.Qcow.writable(head))
+    Bool.pick(IO(Unit), keep, log_err("bend-vmm: " ++ path ++ " has internal snapshots (qemu-img snapshot -l): attached read-only"), IO.pure(Unit, Unit{}))
+    devices.format(Qc.Qcow.parse(head), ro || keep, path, id, head)
 
 # An image the host would not open for writing (src/disk/access.bend says
 # which refusals) is attached read-only, and said so.

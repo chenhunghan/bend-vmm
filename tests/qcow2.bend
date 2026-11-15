@@ -41,11 +41,25 @@ def refblock() -> +List<U32>:
 def l2() -> +List<U32>:
   pad(cat(be64(0), cat(copied(2560), be64(1))), 512n)
 
-def image() -> +List<U32>:
+def image.of(+rb: +List<U32>, +l2t: +List<U32>) -> +List<U32>:
   +head = pad([81, 70, 73, 251], 512n)
   +l1 = pad(copied(2048), 512n)
   +rt = pad(be64(1536), 512n)
-  cat(head, cat(l1, cat(rt, cat(refblock(), cat(l2(), cat(List.replicate(U32, 512n, 7), List.replicate(U32, 512n, 9)))))))
+  cat(head, cat(l1, cat(rt, cat(rb, cat(l2t, cat(List.replicate(U32, 512n, 7), List.replicate(U32, 512n, 9)))))))
+
+def image() -> +List<U32>:
+  image.of(refblock(), l2())
+
+# Guest cluster 1 shared: its entry without COPIED, host cluster 2560
+# counted twice (another image or snapshot holds it too).
+def image_shared() -> +List<U32>:
+  image.of(pad([0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 2, 0, 1], 512n), pad(cat(be64(0), cat(be64(2560), be64(1))), 512n))
+
+# Guest cluster 1 compressed: 684 bytes at 2900 (bit 62, one more sector
+# in bit 61), spanning host clusters 2560 (counted twice: another
+# compressed cluster shares it) and 3072 (once).
+def image_packed() -> +List<U32>:
+  image.of(pad([0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 2, 0, 1], 512n), pad(cat(be64(0), cat(B.Bytes.be64(U.U64{1610612736, 2900}), be64(1))), 512n))
 
 # Memory 0..8192; reads land at 4096.
 def sim() -> S.Sim:
@@ -98,6 +112,9 @@ def discarded.got(r: Maybe<&1, S.Sim & Unit>) -> +List<U32>:
 def discarded(st: St.Store, off: U32, len: U32) -> +List<U32>:
   discarded.got(S.Sim.exec(Unit, sim(), St.Store.discard(Unit, st, u64(off), u64(len))))
 
+def discarded_on(+img: +List<U32>) -> +List<U32>:
+  discarded.got(S.Sim.exec(Unit, S.Sim.with_disk(S.Sim.new(u64(0), 8192n), img), St.Store.discard(Unit, store(), u64(512), u64(512))))
+
 # The image as version 3 (header bytes 4..7).
 def sim_v3() -> S.Sim:
   S.Sim.with_disk(S.Sim.new(u64(0), 8192n), cat([81, 70, 73, 251, 0, 0, 0, 3], List.drop(&2, U32, image(), 8n)))
@@ -114,6 +131,9 @@ def main() -> IO(Unit):
   +d2 = disk_after(written(sim(), 600, [4, 4]))
   +x = discarded(store(), 512, 512)
   +below = discarded(St.QcowStore{0, q(), St.RawStore{1}}, 512, 512)
+  +sh = discarded_on(image_shared())
+  +pk = discarded_on(image_packed())
+  +l2sh = discarded_on(List.set(&2, U32, image(), 512n, 0))
   +v3 = discarded.got(S.Sim.exec(Unit, sim_v3(), St.Store.discard(Unit, St.QcowStore{0, q(), St.RawStore{1}}, u64(512), u64(512))))
   do IO<Unit>:
     # discard of guest cluster 1 (mapped at 2560, COPIED): its L2 entry 0, its
@@ -132,6 +152,23 @@ def main() -> IO(Unit):
     # backing file's older data), the count 0, the cluster freed
     T.eq_str("qcow2 discard over a backing file, version 3: zero flag", show(B.Bytes.slice(v3, 2056n, 8n)), show(be64(1)))
     T.eq_str("qcow2 discard over a backing file, version 3: count 0", show(B.Bytes.slice(v3, 1546n, 2n)), "[0, 0]")
+    # a shared cluster: the entry cleared, one reference less, the data kept
+    # (the other holder still reads it)
+    T.eq_str("qcow2 discard shared: l2 entry unallocated", show(B.Bytes.slice(sh, 2056n, 8n)), show(be64(0)))
+    T.eq_str("qcow2 discard shared: count 1", show(B.Bytes.slice(sh, 1546n, 2n)), "[0, 1]")
+    T.eq_str("qcow2 discard shared: data kept", show(B.Bytes.slice(sh, 2560n, 4n)), "[7, 7, 7, 7]")
+    # a compressed cluster: the entry cleared, one reference less to each
+    # host cluster its bytes span; 3072 reaches 0 and is freed, 2560 stays
+    T.eq_str("qcow2 discard compressed: l2 entry unallocated", show(B.Bytes.slice(pk, 2056n, 8n)), show(be64(0)))
+    T.eq_str("qcow2 discard compressed: first count 1", show(B.Bytes.slice(pk, 1546n, 2n)), "[0, 1]")
+    T.eq_str("qcow2 discard compressed: last count 0", show(B.Bytes.slice(pk, 1548n, 2n)), "[0, 0]")
+    T.eq_str("qcow2 discard compressed: shared host cluster kept", show(B.Bytes.slice(pk, 2560n, 4n)), "[7, 7, 7, 7]")
+    T.eq_str("qcow2 discard compressed: last host cluster freed", show(B.Bytes.slice(pk, 3072n, 4n)), "[0, 0, 0, 0]")
+    T.eq_str("qcow2 discard compressed: reads zeros", show(read(S.Sim.with_disk(sim(), pk), 512, 4)), "[0, 0, 0, 0]")
+    # an L2 table shared with an internal snapshot (its L1 entry without
+    # COPIED): left as it is, the snapshot's entries with it
+    T.eq_str("qcow2 discard under a shared L2 table: kept", show(B.Bytes.slice(l2sh, 2056n, 8n)), show(copied(2560)))
+    T.eq_str("qcow2 discard under a shared L2 table: count kept", show(B.Bytes.slice(l2sh, 1546n, 2n)), "[0, 1]")
     # Store.alloc: the freed cluster 2560 is reused (zeroed, count 1)
     T.eq_u32("qcow2 reuse: the image keeps its size", U32.from_nat(List.length(&2, U32, reused())), 3584)
     T.eq_str("qcow2 reuse: l2 entry", show(B.Bytes.slice(reused(), 2072n, 8n)), show(copied(2560)))

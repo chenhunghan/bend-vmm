@@ -65,6 +65,13 @@ def Qcow.parse(+bs: +List<U32>) -> Maybe<&2, Qcow>:
   +ok = Nat.is_le(112n, List.length(&2, U32, bs)) && U32.is_eq(Qcow.be32(bs, 0n), Qcow.magic()) && (U32.is_eq(version, 2) || U32.is_eq(version, 3)) && U32.is_le(9, bits) && U32.is_le(bits, 21) && U32.is_zero(Qcow.be32(bs, 32n)) && Qcow.features_ok(version, bs)
   Bool.pick(Maybe<&2, Qcow>, ok, Some{Qcow{bits, Qcow.be64(bs, 24n), Qcow.be64(bs, 40n), Qcow.be32(bs, 36n), Qcow.be64(bs, 48n), Qcow.be32(bs, 56n), refbits}}, None{})
 
+# Whether the image may be written: not a qcow2 image, or one that lists
+# no internal snapshot (header byte 60). An internal snapshot shares the image's L2 tables (their L1
+# entries lose COPIED); writing or discarding through them would change
+# the snapshot too, so such an image is attached read-only.
+def Qcow.writable(+bs: +List<U32>) -> Bool:
+  Bool.not(U32.is_eq(Qcow.be32(bs, 0n), Qcow.magic())) || U32.is_zero(Qcow.be32(bs, 60n))
+
 # The backing file name's offset and length (length 0: none).
 def Qcow.backing(+bs: +List<U32>) -> U.U64 & U32:
   (Qcow.be64(bs, 8n), Qcow.be32(bs, 16n))

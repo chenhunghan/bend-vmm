@@ -526,6 +526,34 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && command -v qemu-img >
   rm -rf "$t"
 fi
 
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && command -v qemu-img >/dev/null; then
+  echo "== 8f. discard of compressed qcow2 clusters; an image with internal snapshots is kept read-only"
+  # a compressed image (compressed clusters share host clusters): the guest
+  # discards its first 16 MiB, which then read zeros; the image shrinks and
+  # qemu-img check is clean (no leak, no count off; Store.dis.entry). An
+  # image with an internal snapshot shares its L2 tables with it, so it is
+  # attached read-only: the discard is refused and the file is unchanged
+  t=$(mktemp -d)
+  python3 -c 'import sys; sys.stdout.buffer.write(b"".join(b"%031d\n" % i for i in range(1048576)))' > "$t/base.raw"
+  qemu-img convert -q -c -O qcow2 "$t/base.raw" "$t/comp.qcow2"
+  qemu-img convert -q -O qcow2 "$t/base.raw" "$t/snap.qcow2"
+  qemu-img snapshot -c s1 "$t/snap.qcow2"
+  cp "$t/snap.qcow2" "$t/snap0.qcow2"
+  csize1=$(du -k "$t/comp.qcow2" | cut -f1)
+  ( (slp 8; printf 'for d in vda vdb; do blkdiscard -o 0 -l 16777216 /dev/$d 2>/dev/null; echo DIS-$d-rc=$?; echo NONZERO-$d-$(dd if=/dev/$d bs=1048576 count=16 iflag=direct 2>/dev/null | tr -d "\\000" | wc -c); done; echo TRIM-DONE\n'; slp 8; printf 'poweroff -f\n'; slp 2) \
+    | alarm 90 ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/comp.qcow2,$t/snap.qcow2" --cmdline "console=ttyAMA0 quiet" > "$t/out" 2>&1 & )
+  for _ in $(seq $((80 * SLOW))); do grep -aq 'stopped' "$t/out" 2>/dev/null && break; sleep 0.5; done
+  o=$(tr -d '\r' < "$t/out")
+  csize2=$(du -k "$t/comp.qcow2" | cut -f1)
+  qemu-img check -q "$t/comp.qcow2" && cok=1 || cok=0
+  cmp -s "$t/snap.qcow2" "$t/snap0.qcow2" && same=1 || same=0
+  if grep -aq 'DIS-vda-rc=0' <<<"$o" && grep -aq '^NONZERO-vda-0' <<<"$o" && grep -aq 'DIS-vdb-rc=1' <<<"$o" && grep -aq 'has internal snapshots' <<<"$o" \
+      && [ $cok = 1 ] && [ $same = 1 ] && [ "$csize2" -lt "$csize1" ]; then
+    grn "ok: discard of compressed clusters ($csize1 -> $csize2 KiB, reads zeros, qemu-img check clean); an image with internal snapshots stays read-only and unchanged"
+  else red "failed: compressed/snapshot qcow2 discard (compressed $csize1 -> $csize2 KiB, check $cok, snapshot image unchanged $same)"; grep -a "DIS-\\|NONZERO\\|internal" "$t/out" | tail -5; qemu-img check "$t/comp.qcow2" | tail -3; fail=1; fi
+  rm -rf "$t"
+fi
+
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && command -v hdiutil >/dev/null; then
   echo "== 9. a full host disk: the guest sees I/O errors, not lost writes"
   t=$(mktemp -d)
