@@ -9,7 +9,7 @@ carries out plans that Bend hands it.
 This file is the audit of that boundary. It covered all 113 effects in
 host/hvf.c as of 2026-11-09 and says, for each group, where the
 decisions are made; the migration ledger at the end lists every effect
-(135 as of 2026-11-15) with its target in the C-to-Bend plan. The
+(136 as of 2026-11-15) with its target in the C-to-Bend plan. The
 section before it lists every decision still in C, with the reason it
 stays.
 
@@ -18,7 +18,7 @@ stays.
 | Group | Effects | C does | Bend decides (src/) |
 |---|---|---|---|
 | Hypervisor | `init` `vcpu` `vcpu_queue` `irq` `kick` `pause` `resume` `pause_state` | creates the VM and vCPUs, runs them, reports exits as facts (KVM's raw, kind 2000 + reason) | everything about the machine; KVM exits become the machine's terms in `arm64/kvmexit.bend` |
-| Snapshots | `snap_save` `snap_commit` `snap_drop` `snap_open` `snap_peek` `snap_load` `snap_info` `snap_args` `snap_machine` `snap_gic` `snap_plans` `rename` | reads and writes the registers and the vGIC that a plan names, and moves byte ranges | file layout, placement and format version (`vmm/snapfile.bend`), vGIC replay order (`arm64/gicplan.bend`), registers kept (`arm64/regplan.bend`), file mode (`vmm/hostfiles.bend`) |
+| Snapshots | `snap_save` `snap_commit` `snap_rebase` `snap_drop` `snap_open` `snap_peek` `snap_load` `snap_info` `snap_args` `snap_machine` `snap_gic` `snap_plans` `rename` | reads and writes the registers and the vGIC that a plan names, and moves byte ranges | file layout, placement and format version (`vmm/snapfile.bend`), vGIC replay order (`arm64/gicplan.bend`), registers kept (`arm64/regplan.bend`), file mode (`vmm/hostfiles.bend`) |
 | Memory and images | `load` `read` `write` `file_size` `zero_ram` `inflate_ram` `inflate_disk` `flash` `fw_load` | copies files into guest RAM; inflates gzip and deflate | whether to inflate (`boot/image.bend`), where things go (`vmm/layout.bend`), whether firmware fits (`Layout.flash_fits`) |
 | Disks | `disk_open_with` `disk_err` `disk_read` `disk_write` `disk_copy` `disk_short` `disk_mark` `disk_xcopy` `disk_alloc` `disk_flush` `disk_size` `disk_status` | moves bytes between images and guest memory; opens and locks images | how each use opens and locks (`disk/access.bend`), read-only fallback, qcow2 (`src/disk`) |
 | Console and process | `out` `out_flush` `stdin` `stdin_tty` `stdin_wait` `log_state` `log_put` `console_log` `console_size` `console_reopen` `signals` `signal_wait` `set_args` `set_prog` `prog` `reexec` `exe_path` `set_exec` `err_text` `now` `random` | terminal, pipes, signals, re-exec, clock, entropy | log gate (`vmm/loggate.bend`), log rotation and its renames (`dev/conlog.bend`), what a reset runs (`Files.exec_path`), escape keys, file modes |
@@ -149,7 +149,7 @@ from the hot path can still move exit latency
 
 ## Migration ledger (C_TO_BEND.md)
 
-Every effect host/hvf.c registers, as of 2026-11-15 (135; regenerate the
+Every effect host/hvf.c registers, as of 2026-11-15 (136; regenerate the
 list with `grep -o 'io_eff(CID(Hvf\.[a-z_0-9]*)' host/hvf.c`). Target and
 primitive are the plan's proposals, not existing modules; line numbers are
 host/hvf.c's at the commit that changed this table. Test names what checks
@@ -170,6 +170,7 @@ row but the decisions listed as moved above.
 | `snap_plans` | `hvf_snap_plans_run` (2221) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
 | `snap_save` | `hvf_snap_save_run` (3758) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
 | `snap_commit` | `hvf_snap_commit_run` (3852) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
+| `snap_rebase` | `hvf_snap_rebase_run` | host/main.bend (`snap.rebase`, policy `Snapf.rebase`) | packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save | C remaps RAM where the Bend plan put it (2026-11-15) |
 | `rename` | `hvf_rename_run` (3888) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C renames; also runs the console log renames |
 | `clone` | `hvf_clone_run` (5199) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C clones; Bend plans disk snapshots (Dsnap, 2026-11-11) |
 | `remove` | `hvf_remove_run` (5244) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C removes; Bend says which (Dsnap, 2026-11-11) |

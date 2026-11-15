@@ -261,13 +261,15 @@ def Api.disk_kib(xs: List<String>, +dir: String) -> IO(U32):
         +more : U32 <- Api.disk_kib(rest, dir)
         return (k + more : U32)
 
-# A snapshot's info with what its disks hold now: a copy cloned from the
-# disk shares nearly all of it at first and takes more as the disk moves on
-# (the space removing the snapshot gives back).
-def Api.info.now(i: Sd.Info, +dk: U32) -> Sd.Info:
+# A snapshot's info with what its memory and disks hold now, on their own:
+# a disk copy cloned from the disk, and a memory file cloned from the
+# snapshot before it (Snapf.rebase), share nearly all of it at first and
+# take more as the VM moves on (the space removing the snapshot gives
+# back).
+def Api.info.now(i: Sd.Info, +mk: U32, +dk: U32) -> Sd.Info:
   match i:
     case Sd.Info{n, t, p, m, d, note}:
-      Sd.Info{n, t, p, m, dk, note}
+      Sd.Info{n, t, p, mk, dk, note}
 
 def Api.infos(ns: List<&2, String>, +dir: String) -> IO(List<&2, Sd.Info>):
   match ns:
@@ -279,8 +281,9 @@ def Api.infos(ns: List<&2, String>, +dir: String) -> IO(List<&2, Sd.Info>):
         +text : String <- Api.read(Sd.Sdir.info(sd))
         xs : List<String> <- H.Hvf.ls(sd)
         +dk : U32 <- Api.disk_kib(xs, sd)
+        +mk : U32 <- H.Hvf.size_kib(sd ++ "/memory")
         more : List<&2, Sd.Info> <- Api.infos(rest, dir)
-        return Con{Api.info.now(Sd.Sdir.info.parse(text), dk), more}
+        return Con{Api.info.now(Sd.Sdir.info.parse(text), mk, dk), more}
 
 def Api.no_dir() -> Err:
   EFailed{"snapshots need a VM folder (for a socket: bend-vmm ctl SOCKET snapshot PATH)"}

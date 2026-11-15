@@ -270,6 +270,15 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5i. incremental snapshots: RAM maps the last one; the next writes what changed"
+  t=$(mktemp -d)
+  out=$(python3 scripts/snapshot-test.py ./out/bend-vmm "$t" "$SLOW" 2>&1)
+  if [ $? = 0 ]; then grn "ok: incremental snapshots ($(grep -c '^ok:' <<<"$out") checks: $(grep -o 'footprint [0-9]* -> [0-9]* MiB' <<<"$out"), $(grep -o 's2 holds only what changed ([0-9]* MiB' <<<"$out" | sed 's/.*(//') for s2; restores of s2 and s1, and snapshots of each)"
+  else red "failed: incremental snapshots"; grep -v '^ok:' <<<"$out" | tail -6; fail=1; fi
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 5b. LAN: two VMs on one segment (--lan)"
   # B listens on TCP 6443 and UDP 8472 (VXLAN's port); A takes its address
   # by DHCP from its own VMM, pings B (ARP broadcast, then unicast), sends

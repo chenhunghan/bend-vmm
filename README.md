@@ -240,7 +240,20 @@ writable disk (`disk0`, ...: copy-on-write on APFS, btrfs and XFS) and
 files from `vm.conf` (a snapshot never chooses them) and never writes a
 snapshot's copies, so any snapshot can be restored again, in any order. A
 snapshot of a stopped VM keeps its disks only; restoring it boots on them.
-Shared folders are not part of a snapshot. `vm.conf` holds one option per
+Shared folders are not part of a snapshot.
+
+Snapshots are incremental: after one is written, the running VM's memory
+maps it (copy-on-write), so what the guest has not written since is clean
+file data the host may drop (a 1 GiB VM went from 452 MB to 6 MB of
+physical footprint right after a snapshot), and the next snapshot starts as
+a clone of it and writes only the memory written since (20 MiB written: a
+29 MiB snapshot in 0.07 s, against 397 MiB). On APFS, btrfs and XFS the
+clone shares the unchanged blocks, and `bend-vmm snapshots` shows what each
+snapshot holds on its own: the space removing it gives back. The latest
+snapshot backs the running VM, so removing it frees its space only at the
+next snapshot or when the VM stops; never change a snapshot file in place.
+
+`vm.conf` holds one option per
 line, as on the command line (`--cmdline console=ttyAMA0 quiet`; `#`
 comments); `bend-vmm --help` lists the commands.
 

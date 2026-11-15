@@ -429,6 +429,10 @@ def Hvf.snap_commit(path: String, plan: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.snap_rebase(path: String, off_hi: U32, off_lo: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.lan_open(dir: String, mac: +List<U32>, mode: U32, replace: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"

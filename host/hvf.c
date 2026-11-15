@@ -30,8 +30,10 @@
 #include <crt_externs.h>
 #include <mach/mach_time.h>
 #include <mach-o/dyld.h>
+#include <sys/clonefile.h>
 #else
 #include <linux/kvm.h>
+#include <linux/fs.h>
 #include <sys/ioctl.h>
 #endif
 
@@ -125,7 +127,13 @@ static int hvf_open(void) {
 // =========
 
 static uint8_t* hvf_ram;
-static int      hvf_ram_filed; // RAM maps a snapshot file (a restore)
+// The snapshot file guest RAM maps, copy-on-write (-1: none, RAM is
+// anonymous), and RAM's
+// offset in it: a restore's, or the last snapshot written (Hvf.snap_rebase).
+// A new snapshot starts as its clone and writes only what changed.
+static int      hvf_base_fd = -1;
+static uint64_t hvf_base_off;
+static int      hvf_commit_cloned; // the snapshot being written began as the base's clone
 static uint64_t hvf_ram_base;
 static uint64_t hvf_ram_size;
 
@@ -1159,7 +1167,8 @@ Term hvf_init_run(Env e, Term* f, IoWork* w) {
     hvf_ram_size = hvf_snap.ram_size;
     hvf_ram_base = hvf_snap.ram_base;
     hvf_ram = mmap(NULL, hvf_ram_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, hvf_snap.fd, (off_t)hvf_snap.ram_off);
-    hvf_ram_filed = 1;
+    hvf_base_fd   = hvf_snap.fd;
+    hvf_base_off  = hvf_snap.ram_off;
   } else {
     hvf_ram = mmap(NULL, hvf_ram_size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
   }
@@ -3750,45 +3759,93 @@ static int hvf_pread_all(int fd, void* p, size_t n, off_t at) {
   return 0;
 }
 
-// Whether a chunk of anonymous RAM has never held data (macOS): mincore
-// says none of its pages is resident, paged out or modified (each
-// anonymous page reports MINCORE_ANONYMOUS, untouched or not). Reading such
-// a chunk to compare it with zeros would allocate it (macOS has no shared
-// zero page for anonymous memory: a snapshot of a 4 GiB guest grew the
-// VMM from 297 MiB to 4.3 GiB), so it is skipped unread. RAM mapped from a
-// snapshot file is never skipped this way (its untouched pages hold the
-// file's data); on Linux a read maps the shared zero page and costs nothing.
+// What a 64 KiB chunk of guest RAM holds, without reading it: HVF_SAME, the
+// base snapshot's bytes still (RAM maps one, hvf_base_fd, and no page of the
+// chunk was written since); HVF_EMPTY, pages that never held data (fresh
+// anonymous memory: never touched, or released by the balloon); else
+// HVF_DATA (read it to know). Reading a never-touched chunk on macOS would
+// allocate it (macOS has no shared zero page for anonymous memory: a
+// snapshot of a 4 GiB guest grew the VMM from 297 MiB to 4.3 GiB).
+enum { HVF_SAME, HVF_EMPTY, HVF_DATA };
 #ifdef __APPLE__
-static int hvf_ram_empty(const uint8_t* p, size_t n) {
+// mincore: every anonymous page reports MINCORE_ANONYMOUS, and any other bit
+// with it (resident, paged out, modified, copied) means it holds data; a
+// page of the base file not yet copied on write reports no
+// MINCORE_ANONYMOUS
+static int hvf_ram_chunk(const uint8_t* p, size_t n) {
   static char v[65536 / 4096];
   size_t      pg = (size_t)getpagesize(), k = (n + pg - 1) / pg;
-  if (hvf_ram_filed || k > sizeof v || mincore((void*)p, n, v) != 0) {
-    return 0;
+  if (k > sizeof v || mincore((void*)p, n, v) != 0) {
+    return HVF_DATA;
   }
-  // every anonymous page reports MINCORE_ANONYMOUS; any other bit
-  // (resident, paged out, compressed, modified, copied) means data
+  int fresh = 0, base = 0;
   for (size_t i = 0; i < k; i++) {
-    if ((unsigned char)v[i] & ~MINCORE_ANONYMOUS & 0xff) {
-      return 0;
+    unsigned char f = (unsigned char)v[i];
+    if (!(f & MINCORE_ANONYMOUS)) {
+      base++;
+    } else if (f & ~MINCORE_ANONYMOUS & 0xff) {
+      return HVF_DATA;
+    } else {
+      fresh++;
     }
   }
-  return 1;
+  if (base == (int)k) {
+    return hvf_base_fd >= 0 ? HVF_SAME : HVF_DATA;
+  }
+  return base == 0 ? HVF_EMPTY : HVF_DATA;
 }
 #else
-static int hvf_ram_empty(const uint8_t* p, size_t n) {
-  (void)p;
-  (void)n;
-  return 0;
+// /proc/self/pagemap: a page of the base file not written since is
+// present as a file page, or not present (and not swapped); a written one is
+// anonymous (present without the file bit, or swapped). Memory that maps no
+// base: untouched pages read as the shared zero page, at no cost.
+static int hvf_pagemap = -2;
+static int hvf_ram_chunk(const uint8_t* p, size_t n) {
+  uint64_t e[64];
+  size_t   pg = (size_t)getpagesize(), k = (n + pg - 1) / pg;
+  if (hvf_base_fd < 0) {
+    return HVF_DATA;
+  }
+  if (hvf_pagemap == -2) {
+    hvf_pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+  }
+  if (hvf_pagemap < 0 || k > 64 || pread(hvf_pagemap, e, k * 8, (off_t)((uintptr_t)p / pg * 8)) != (ssize_t)(k * 8)) {
+    return HVF_DATA;
+  }
+  for (size_t i = 0; i < k; i++) {
+    int present = (int)(e[i] >> 63 & 1), swapped = (int)(e[i] >> 62 & 1), file = (int)(e[i] >> 61 & 1);
+    if (swapped || (present && !file)) {
+      return HVF_DATA;
+    }
+  }
+  return HVF_SAME;
 }
 #endif
 
-// Guest RAM, skipping all-zero 64 KiB chunks (the file stays sparse), and on
-// macOS chunks that never held data, unread (hvf_ram_empty).
+static int hvf_punch(int fd, off_t off, off_t len);
+
+// Guest RAM at `at`: all-zero 64 KiB chunks skipped (the file stays sparse)
+// and never-used ones unread (hvf_ram_chunk). A snapshot that began as the
+// base's clone (hvf_commit_cloned) with RAM at the same offset writes only
+// the chunks written since the base: unchanged ones keep the clone's
+// blocks (shared with the base on APFS, btrfs, XFS), emptied ones become
+// holes. A clone whose RAM lies elsewhere is cut at `at` and written whole.
 static int hvf_put_ram(int fd, off_t at) {
   static const uint8_t zero[65536];
+  int inc = hvf_commit_cloned && hvf_base_fd >= 0 && (uint64_t)at == hvf_base_off;
+  if (hvf_commit_cloned && !inc && ftruncate(fd, at) != 0) {
+    return -1;
+  }
   for (uint64_t o = 0; o < hvf_ram_size; o += sizeof zero) {
     size_t n = hvf_ram_size - o < sizeof zero ? (size_t)(hvf_ram_size - o) : sizeof zero;
-    if (hvf_ram_empty(hvf_ram + o, n) || memcmp(hvf_ram + o, zero, n) == 0) {
+    int    s = hvf_ram_chunk(hvf_ram + o, n);
+    if (s == HVF_SAME && inc) {
+      continue;
+    }
+    if (s == HVF_EMPTY || memcmp(hvf_ram + o, zero, n) == 0) {
+      if (inc && hvf_punch(fd, at + (off_t)o, (off_t)n) != 0 && pwrite(fd, zero, n, at + (off_t)o) != (ssize_t)n) {
+        return -1;
+      }
       continue;
     }
     if (pwrite(fd, hvf_ram + o, n, at + (off_t)o) != (ssize_t)n) {
@@ -3797,7 +3854,6 @@ static int hvf_put_ram(int fd, off_t at) {
   }
   return ftruncate(fd, at + (off_t)hvf_ram_size);
 }
-
 
 // What a snapshot being written holds between Hvf.snap_save and
 // Hvf.snap_commit: the machine words and the GIC state (each vCPU keeps its
@@ -3933,7 +3989,33 @@ Term hvf_snap_commit_run(Env e, Term* f, IoWork* w) {
   // the guest's whole RAM: the file's mode is the plan's first word
   // (Files.private: this user alone), and it is never written through a
   // symlink planted at the path
-  int fd = np ? open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, (mode_t)plan[0]) : -1;
+  // RAM that maps a base snapshot: the new file starts as the base's clone
+  // (copy-on-write where the file system can), so hvf_put_ram writes only
+  // what changed
+  int fd            = -1;
+  hvf_commit_cloned = 0;
+#ifdef __APPLE__
+  if (np && hvf_base_fd >= 0 && fclonefileat(hvf_base_fd, AT_FDCWD, path, 0) == 0) {
+    fd = open(path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd >= 0 && fchmod(fd, (mode_t)plan[0]) == 0) {
+      hvf_commit_cloned = 1;
+    } else {
+      if (fd >= 0) {
+        close(fd);
+      }
+      unlink(path);
+      fd = -1;
+    }
+  }
+#endif
+  if (fd < 0 && np) {
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, (mode_t)plan[0]);
+  }
+#ifndef __APPLE__
+  if (fd >= 0 && hvf_base_fd >= 0 && ioctl(fd, FICLONE, hvf_base_fd) == 0) {
+    hvf_commit_cloned = 1;
+  }
+#endif
   if (fd < 0) {
     err = np ? errno : EINVAL;
   } else {
@@ -5528,6 +5610,72 @@ Term hvf_size_kib_run(Env e, Term* f, IoWork* w) {
 #endif
 int fallocate(int fd, int mode, off_t offset, off_t len);
 #endif
+
+// A hole in a file (it reads as zeros), or -1.
+static int hvf_punch(int fd, off_t off, off_t len) {
+#ifdef __APPLE__
+  struct fpunchhole p = {0, 0, off, len};
+  return fcntl(fd, F_PUNCHHOLE, &p) == 0 ? 0 : -1;
+#else
+  return fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, off, len) == 0 ? 0 : -1;
+#endif
+}
+
+// Hvf.snap_rebase(path, off_hi, off_lo) -> U32: guest RAM maps the snapshot
+// just written at path (RAM at the offset), copy-on-write, in place of what
+// it mapped: the pages it holds become the file's (clean: the host may
+// drop them and read them back), and the next snapshot starts as its clone
+// and writes only what changed since (hvf_put_ram). Only with the VM
+// paused and the machine held (src: snapshot in host/main.bend): no vCPU
+// runs and no effect touches RAM meanwhile. 0, or an errno (RAM as it was).
+Term hvf_snap_rebase_run(Env e, Term* f, IoWork* w) {
+  u64         n;
+  char*       path = io_cstr(e, f[0], &n);
+  uint64_t    off  = hvf_u64(f[1], f[2]);
+  struct stat st;
+  int         fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  free(path);
+  if (fd < 0) {
+    return (Term)(u32)errno;
+  }
+  if (!hvf_ram || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || (uint64_t)st.st_size < off + hvf_ram_size ||
+      off % (uint64_t)getpagesize() != 0) {
+    close(fd);
+    return (Term)(u32)EINVAL;
+  }
+  // the file maps (checked away from RAM first, so a refusal leaves RAM as
+  // it was)
+  void* t = mmap(NULL, hvf_ram_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, (off_t)off);
+  if (t == MAP_FAILED) {
+    int err = errno;
+    close(fd);
+    return (Term)(u32)err;
+  }
+  munmap(t, hvf_ram_size);
+#ifdef __APPLE__
+  if (vmb_unmap(hvf_ram_base, hvf_ram_size) != 0) {
+    close(fd);
+    return (Term)(u32)EBUSY;
+  }
+#endif
+  // (KVM follows the host mapping: no memory slot changes)
+  if (mmap(hvf_ram, hvf_ram_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, fd, (off_t)off) == MAP_FAILED) {
+    fprintf(stderr, "bend-vmm: guest RAM lost while mapping the snapshot (%s)\n", strerror(errno));
+    abort();
+  }
+#ifdef __APPLE__
+  if (vmb_map(hvf_ram, hvf_ram_base, hvf_ram_size, VMB_R | VMB_W | VMB_X) != 0) {
+    fprintf(stderr, "bend-vmm: cannot map guest RAM back after a snapshot\n");
+    abort();
+  }
+#endif
+  if (hvf_base_fd >= 0) {
+    close(hvf_base_fd);
+  }
+  hvf_base_fd   = fd;
+  hvf_base_off  = off;
+  return (Term)0;
+}
 Term hvf_disk_discard_run(Env e, Term* f, IoWork* w) {
   int   fd  = hvf_disk(f[0]);
   off_t off = (off_t)hvf_u64(f[1], f[2]);
@@ -5900,6 +6048,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.snap_commit)
   io_eff(CID(Hvf.snap_commit), hvf_snap_commit_run);
+#endif
+#ifdef CID(Hvf.snap_rebase)
+  io_eff(CID(Hvf.snap_rebase), hvf_snap_rebase_run);
 #endif
 #ifdef CID(Hvf.rename)
   io_eff(CID(Hvf.rename), hvf_rename_run);

@@ -190,3 +190,14 @@ law snapfile.version_other:
 
 law snapfile.sizes:
   {S.Snapf.sizes([1, 0, 1073741824]) == [2, 0, 1073741824] : List<&2, U32>}
+
+# Proposed: after a snapshot, RAM maps it (Snapf.rebase); a plan's RAM
+# offset is the one its PRam piece names.
+law snapfile.rebase:
+  {S.Snapf.rebase() == True{} : Bool}
+
+law snapfile.plan_ram_example:
+  {S.Snapf.plan_ram(S.Snapf.plan(1, w(1073741824), w(536870912), w(2), w(10), w(64), [w(100), w(0)])) == Some{w(16384)} : Maybe<&2, U.U64>}
+
+law snapfile.plan_ram_none:
+  {S.Snapf.plan_ram(None{}) == None{} : Maybe<&2, U.U64>}

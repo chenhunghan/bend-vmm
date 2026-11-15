@@ -653,6 +653,23 @@ def snap.place(ok: Bool, rc: U32, tmp: String, path: String) -> IO(U32):
     case False{}:
       IO.pure(U32, rc)
 
+# A snapshot in place (ok): guest RAM maps it from now on, where its plan put
+# RAM (Snapf.rebase says why). A refusal leaves RAM as it was: the snapshot
+# stands either way.
+def snap.rebase.at(+path: String, at: Maybe<&2, U.U64>) -> IO(U32):
+  match at:
+    case None{}:
+      IO.pure(U32, 0)
+    case Some{+o}:
+      H.Hvf.snap_rebase(path, U.U64.hi(o), U.U64.lo(o))
+
+def snap.rebase(ok: Bool, +path: String, at: Maybe<&2, U.U64>) -> IO(U32):
+  match ok:
+    case True{}:
+      snap.rebase.at(path, at)
+    case False{}:
+      IO.pure(U32, 0)
+
 # Disk snapshots (src/vmm/disksnap.bend plans them): the host's steps, in
 # order, until one fails (0, or its errno).
 def dsnap.step(s: Ds.Step) -> IO(U32):
@@ -779,11 +796,13 @@ def dsnap.after(ok: Bool, +dst: String, +old: String, +gen: String) -> IO(U32):
     +orig : +List<U32> = args_bytes(args)
     _ : U32 <- H.Hvf.set_args(Bool.pick(+List<U32>, none, orig, List.append(&2, U32, orig, args_bytes([Ds.Dsnap.flag(), gen]))))
     +sizes : +List<U32> <- H.Hvf.snap_save(Snap.Snap.encode(m))
-    +wrote : U32 <- snap.commit.if(U32.is_zero(copied), copied, tmp, Sf.Snapf.plan_of(Sf.Snapf.sizes(sizes)))
+    +plan : Maybe<&2, +List<Sf.Piece>> = Sf.Snapf.plan_of(Sf.Snapf.sizes(sizes))
+    +wrote : U32 <- snap.commit.if(U32.is_zero(copied), copied, tmp, plan)
     _ : U32 <- H.Hvf.set_args(orig)
     ds2 : List<Ds.DiskAt> <- dsnap.disks()
     +placed : U32 <- dsnap.run(Ds.Dsnap.place(dst, gen, ds2), wrote)
     +rc : U32 <- snap.place(U32.is_zero(placed), placed, tmp, dst)
+    _ : U32 <- snap.rebase(U32.is_zero(rc) && Sf.Snapf.rebase(), dst, Sf.Snapf.plan_ram(plan))
     _ : U32 <- dsnap.after(U32.is_zero(rc), dst, old, gen)
     put(mc, m)
     resume_if(U32.is_zero(was))

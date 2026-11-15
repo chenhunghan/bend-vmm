@@ -95,6 +95,7 @@ io_eff(CID(Hvf.resume), hvf_unavailable);
 io_eff(CID(Hvf.pause_state), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.snap_save), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.snap_commit), hvf_unavailable);
+io_eff(CID(Hvf.snap_rebase), hvf_unavailable);
 io_eff(CID(Hvf.snap_drop), hvf_unavailable);
 io_eff(CID(Hvf.rename), hvf_unavailable);
 io_eff(CID(Hvf.net_limits), () => 0);

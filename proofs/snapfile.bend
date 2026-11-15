@@ -147,3 +147,12 @@ def L.snapfile.version_other():
 
 def L.snapfile.sizes():
   {==}
+
+def L.snapfile.rebase():
+  {==}
+
+def L.snapfile.plan_ram_example():
+  {==}
+
+def L.snapfile.plan_ram_none():
+  {==}

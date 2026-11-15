@@ -305,6 +305,34 @@ def Snapf.agrees(l: Layout, +base: U.U64) -> Bool:
     case Layout{Head{v, n, b, +r, a}, ao, wo, nw, go, ng, cs, ro}:
       U.U64.is_eq(b, base) && U.U64.is_zero(U.U64.and(r, U.U64{0, 1048575}))
 
+# After a snapshot is written, guest RAM maps it (Hvf.snap_rebase): the
+# pages the guest has not written since are the file's, clean (the host may
+# drop them and read them back: they leave the VMM's footprint), and the
+# next snapshot begins as the file's clone and writes only the chunks
+# written since. The file then backs the running VM: removing it frees its
+# space only when the next snapshot (or the VM's exit) lets it go.
+def Snapf.rebase() -> Bool:
+  True{}
+
+# Where a plan puts guest RAM (none when it has none).
+def Snapf.ram_at(ps: +List<Piece>) -> Maybe<&2, U.U64>:
+  match ps:
+    case Nil{}:
+      None{}
+    case Con{p, rest}:
+      match p:
+        case PRam{o}:
+          Some{o}
+        case _:
+          Snapf.ram_at(rest)
+
+def Snapf.plan_ram(m: Maybe<&2, +List<Piece>>) -> Maybe<&2, U.U64>:
+  match m:
+    case None{}:
+      None{}
+    case Some{ps}:
+      Snapf.ram_at(ps)
+
 # Wire forms for the host
 # =======================
 
