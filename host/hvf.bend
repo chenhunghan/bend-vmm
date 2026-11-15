@@ -239,6 +239,10 @@ def Hvf.disk_mark(disk: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.ram_release(iovs: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.zero_ram(iovs: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"

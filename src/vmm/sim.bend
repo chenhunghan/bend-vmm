@@ -368,6 +368,9 @@ def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
         case V.VmRamToDisk{dk, off, iovs, next}:
           +s = s
           Sim.run(f, A, Sim.disk_write(s, dk, off, Sim.gather(iovs, s)), next)
+        case V.VmRamRelease{+iovs, next}:
+          # the simulator's released pages read as zeros
+          Sim.run(f, A, Sim.scatter(iovs, s, B.Bytes.zeros(U32.to_nat(V.Iov.total(iovs)))), next)
         case V.VmZeroRam{+iovs, next}:
           Sim.run(f, A, Sim.scatter(iovs, s, B.Bytes.zeros(U32.to_nat(V.Iov.total(iovs)))), next)
         case V.VmDiskAlloc{dk, +len, k}:

@@ -137,6 +137,8 @@ def Enc.kind(k: D.DevKind) -> +List<U32>:
       List.append(&2, U32, [8, Bool.to_u32(ro)], List.append(&2, U32, X.Enc.u64(s), Enc.store(st)))
     case D.LanKind{mac, ip, prefix}:
       List.append(&2, U32, 9 <> X.Enc.bytes(mac), [ip, prefix])
+    case D.BalloonKind{}:
+      [10]
 
 def Enc.fids(fs: +List<F.Fid>) -> +List<U32>:
   match fs:
@@ -460,10 +462,17 @@ def Dec.kind.top(lan: Bool, +t: U32) -> X.Dec<D.DevKind>:
     case False{}:
       Dec.kind.by(U32.is_eq(t, 0), U32.is_eq(t, 1), U32.is_eq(t, 2), U32.is_eq(t, 3), U32.is_eq(t, 4), U32.is_eq(t, 5), U32.is_eq(t, 6), U32.is_eq(t, 7), U32.is_eq(t, 8))
 
+def Dec.kind.top2(balloon: Bool, +t: U32) -> X.Dec<D.DevKind>:
+  match balloon:
+    case True{}:
+      X.Dec.pure(D.DevKind, D.BalloonKind{})
+    case False{}:
+      Dec.kind.top(U32.is_eq(t, 9), t)
+
 def Dec.kind() -> X.Dec<D.DevKind>:
   do X.Dec<D.DevKind>:
     +t : U32 <- X.Dec.u32()
-    Dec.kind.top(U32.is_eq(t, 9), t)
+    Dec.kind.top2(U32.is_eq(t, 10), t)
 
 def Dec.fids(n: Nat) -> X.Dec<+List<F.Fid>>:
   match n:

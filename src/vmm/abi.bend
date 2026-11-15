@@ -274,6 +274,9 @@ type Vm<-A: Type> is Type:
   VmVsToRam{conn: U32, off: U32, iovs: +List<Iov>, next: Vm<A>}
   # Disk images by layout (src/disk): zeros over the pieces of guest memory.
   VmZeroRam{iovs: +List<Iov>, next: Vm<A>}
+  # Lets go of the host memory behind pieces of guest RAM (free page
+  # reporting): touched again, they read as zeros or as their old contents.
+  VmRamRelease{iovs: +List<Iov>, next: Vm<A>}
   # Copies the frame the host holds for the LAN NIC (V.LanRelease frees it)
   # into the pieces of guest memory, in order.
   VmLanToRam{iovs: +List<Iov>, next: Vm<A>}
@@ -369,6 +372,9 @@ def Op.stage(-R: Type, iovs: +List<Iov>) -> Op<R, U32>:
 
 def Op.zero_ram(-R: Type, iovs: +List<Iov>) -> Op<R, Unit>:
   Op{k => VmZeroRam{iovs, k(Unit{})}}
+
+def Op.ram_release(-R: Type, iovs: +List<Iov>) -> Op<R, Unit>:
+  Op{k => VmRamRelease{iovs, k(Unit{})}}
 
 def Op.disk_alloc(-R: Type, disk: U32, len: U32) -> Op<R, U.U64>:
   Op{k => VmDiskAlloc{disk, len, k}}

@@ -13,6 +13,7 @@ import ../fs/p9.bend as P
 import ./vsock.bend as Vs
 import ./input.bend as In
 import ./lan.bend as Ln
+import ./balloon.bend as Bl
 
 # A virtio-mmio device: the transport register model plus the device logic
 # behind it, as the machine sees it.
@@ -38,6 +39,9 @@ import ./lan.bend as Ln
 #                GUEST_TSO4 and HOST_TSO4 (U.U64{1, 2211}: see
 #                src/virtio/net.bend), config
 #                space N.Net.config(mac)
+#   BalloonKind: virtio-balloon, device id 5, three queues (0 inflateq,
+#                1 deflateq, 2 reporting_vq), also FREE_PAGE_REPORTING
+#                (Bl.Balloon.features()), config Bl.Balloon.config()
 #   P9Kind:      virtio-9p on host share `share`, device id 9, one queue,
 #                also VIRTIO_9P_MOUNT_TAG (U.U64{1, 1}), config space
 #                P.P9.config(tag)
@@ -75,6 +79,8 @@ type DevKind is Data:
   # virtio-net on a host LAN (src/virtio/lan.bend): its MAC, and the
   # address its DHCP answers give (ip 0: none) with its prefix length.
   LanKind{mac: +List<U32>, ip: U32, prefix: U32}
+  # virtio-balloon with free page reporting (src/virtio/balloon.bend).
+  BalloonKind{}
 
 # The per-kind state of a device.
 type DevState is Data:
@@ -127,6 +133,8 @@ def Dev.mmio(kind: DevKind) -> M.VirtioMmio:
       M.VirtioMmio.new(18, Dev.features(), 2n, 256, In.Input.config(tablet, 0, 0))
     case LanKind{mac, ip, prefix}:
       M.VirtioMmio.new(1, Ln.Lan.features(), 2n, 256, Ln.Lan.config(mac))
+    case BalloonKind{}:
+      M.VirtioMmio.new(5, Bl.Balloon.features(), Bl.Balloon.queues(), 256, Bl.Balloon.config())
 
 # The state of a fresh device of the given kind.
 def Dev.state(kind: DevKind) -> DevState:
@@ -151,6 +159,8 @@ def Dev.state(kind: DevKind) -> DevState:
       InDev{In.InputState.new()}
     case LanKind{mac, ip, prefix}:
       LanDev{Ln.Lan.new(mac, ip, prefix)}
+    case BalloonKind{}:
+      NoState{}
 
 def Dev.new(kind: DevKind) -> Dev:
   +kind = kind
@@ -227,6 +237,8 @@ def Dev.process(-R: Type, k: DevKind, q: Q.Vq) -> V.Op<R, Q.Vq & Bool>:
     case InputKind{tablet}:
       V.Op.pure(R, Q.Vq & Bool, (q, False{}))
     case LanKind{mac, ip, prefix}:
+      V.Op.pure(R, Q.Vq & Bool, (q, False{}))
+    case BalloonKind{}:
       V.Op.pure(R, Q.Vq & Bool, (q, False{}))
 
 # The pending console input of a state (none for other kinds).
@@ -468,6 +480,10 @@ def Dev.pass(-R: Type, k: DevKind, st: DevState, +sel: U32, q: Q.Vq) -> V.Op<R, 
       Dev.pass.input(R, U32.is_eq(sel, 0), st, q)
     case LanKind{mac, ip, prefix}:
       Dev.pass.lan(R, U32.is_eq(sel, 1), st, q)
+    case BalloonKind{}:
+      do V.Op<R, Pass>:
+        r : Q.Vq & Bool <- Bl.Balloon.process(R, sel, q)
+        return Dev.pass.plain(st, r)
     case RngKind{}:
       do V.Op<R, Pass>:
         r : Q.Vq & Bool <- Dev.process(R, RngKind{}, q)
@@ -625,6 +641,8 @@ def Dev.is_console(k: DevKind) -> Bool:
       False{}
     case LanKind{mac, ip, prefix}:
       False{}
+    case BalloonKind{}:
+      False{}
 
 def Dev.is_net(k: DevKind) -> Bool:
   match k:
@@ -647,6 +665,8 @@ def Dev.is_net(k: DevKind) -> Bool:
     case InputKind{tablet}:
       False{}
     case LanKind{mac, ip, prefix}:
+      False{}
+    case BalloonKind{}:
       False{}
 
 def Dev.input.go(-R: Type, console: Bool, k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState, bytes: +List<U32>) -> V.Op<R, Dev>:

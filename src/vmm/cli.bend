@@ -10,7 +10,7 @@ import ./layout.bend as Ly
 
 def Cli.flags() -> +List<String>:
   ["--kernel", "--initrd", "--payload", "--cmdline", "--mem", "--cpus", "--disk", "--share", "--restore",
-   "--control", "--vsock", "--display", "--firmware", "--vars", "--forward", "--lan", "--console-log"]
+   "--control", "--vsock", "--display", "--firmware", "--vars", "--forward", "--lan", "--console-log", "--balloon"]
 
 def Cli.known(+flag: String, fs: +List<String>) -> Bool:
   match fs:
@@ -407,6 +407,11 @@ def Fwd.all_ok(ss: List<&2, String>) -> Bool:
 # What is wrong with one flag and its value ("" when nothing): an unknown
 # flag; --mem other than 1..1048576 MiB (1 TiB, what a snapshot holds);
 # --cpus other than 1..64; a malformed --display.
+# --balloon free-page-reporting: a virtio-balloon device whose guest hands
+# back the RAM it frees (src/virtio/balloon.bend).
+def Cli.balloon(+v: String) -> Bool:
+  String.eq(v, "free-page-reporting")
+
 def Cli.why(+flag: String, +v: String) -> String:
   Bool.pick(String, Bool.not(Cli.known(flag, Cli.flags())), "unknown option " ++ flag,
   Bool.pick(String, String.eq(flag, "--mem") && Bool.not(Cli.within(U32.read(v), 1, 1048576)), "--mem takes MiB, 1 to 1048576 (not " ++ v ++ ")",
@@ -416,7 +421,8 @@ def Cli.why(+flag: String, +v: String) -> String:
   Bool.pick(String, String.eq(flag, "--share") && Bool.not(Cli.share_ok(Cli.share(v))), "--share takes DIR or DIR,quota=SIZE (bytes, or K, M, G) (not " ++ v ++ ")",
   Bool.pick(String, String.eq(flag, "--console-log") && Bool.not(Cli.conlog_ok(Cli.conlog(v))), "--console-log takes PATH,max=SIZE[,keep=N] (N up to 99) (not " ++ v ++ ")",
   Bool.pick(String, String.eq(flag, "--forward") && Bool.not(Fwd.all_ok(Fwd.specs(v))), "--forward takes [ADDR:]HOSTPORT:GUESTPORT[,...] (ports 1 to 65535) (not " ++ v ++ ")",
-  ""))))))))
+  Bool.pick(String, String.eq(flag, "--balloon") && Bool.not(Cli.balloon(v)), "--balloon takes free-page-reporting (not " ++ v ++ ")",
+  "")))))))))
 
 # The first thing wrong with the arguments (flag and value pairs), or "".
 def Cli.check(args: List<String>) -> String:

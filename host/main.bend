@@ -204,6 +204,10 @@ def vkey(+conn: U32) -> U32:
       do IO<A>:
         _ : U32 <- H.Hvf.zero_ram(H.Host.iovs(iovs))
         interp(cpu, mc, done, A, next)
+    case V.VmRamRelease{iovs, next}:
+      do IO<A>:
+        _ : U32 <- H.Hvf.ram_release(H.Host.iovs(iovs))
+        interp(cpu, mc, done, A, next)
     case V.VmLanToRam{iovs, next}:
       do IO<A>:
         _ : U32 <- H.Hvf.lan_to_ram(H.Host.iovs(iovs))
@@ -1487,7 +1491,17 @@ def devices.input(none: Bool) -> +List<D.DevKind>:
     case False{}:
       devices.lan.go(Cli.Cli.lan(spec))
 
-@unsafe def devices(o: Op.Opts) -> IO(+List<D.DevKind>):
+# --balloon free-page-reporting (taken from the command line a VM starts
+# with: its own, or a snapshot's): the balloon goes last, so the other
+# devices keep their slots.
+def devices.balloon(on: Bool) -> +List<D.DevKind>:
+  match on:
+    case True{}:
+      [D.BalloonKind{}]
+    case False{}:
+      []
+
+@unsafe def devices(o: Op.Opts, +args: List<String>) -> IO(+List<D.DevKind>):
   match o:
     case Op.Opts{k, i, p, c, m, n, +d, +sh, rs, ct, +vk, dp, fw, nv, fd, +ln}:
       do IO<+List<D.DevKind>>:
@@ -1495,7 +1509,8 @@ def devices.input(none: Bool) -> +List<D.DevKind>:
         +disks : +List<D.DevKind> <- devices.disk(String.is_empty(d), d)
         +shares : +List<D.DevKind> <- devices.share(String.is_empty(sh), sh)
         +socks : +List<D.DevKind> <- devices.vsock(String.is_empty(vk), vk)
-        return List.append(&2, D.DevKind, base_devices(), List.append(&2, D.DevKind, lan, List.append(&2, D.DevKind, disks, List.append(&2, D.DevKind, shares, List.append(&2, D.DevKind, socks, devices.input(String.is_empty(dp)))))))
+        +bl : +List<D.DevKind> = devices.balloon(Cli.Cli.balloon(Cli.Cli.find(args, "--balloon")))
+        return List.append(&2, D.DevKind, base_devices(), List.append(&2, D.DevKind, lan, List.append(&2, D.DevKind, disks, List.append(&2, D.DevKind, shares, List.append(&2, D.DevKind, socks, List.append(&2, D.DevKind, devices.input(String.is_empty(dp)), bl))))))
 
 def initrd_of(present: Bool, start: U.U64, end: U.U64) -> Maybe<&2, T.Initrd>:
   match present:
@@ -1972,7 +1987,8 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     die_if(U32.is_ne(vm, 0), "cannot create the VM (step " ++ U32.show(vm) ++ ")")
     display.map(display_of(Op.Opts.display(o)))
     restore.flash(String.is_empty(Op.Opts.firmware(o)), o)
-    +kinds : +List<D.DevKind> <- devices(o)
+    sargs : List<String> <- H.Hvf.snap_args()
+    +kinds : +List<D.DevKind> <- devices(o, List.drop(&1, String, sargs, U32.to_nat(prog)))
     ws : +List<U32> <- H.Hvf.snap_machine()
     +got : Maybe<&2, M.Machine> = Snap.Snap.decode(ws)
     # the devices as this run opened them (a disk's size, read-only, its
@@ -1986,7 +2002,9 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     +rc : U32 <- H.Host.vm_init(Op.Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), ram(), Op.Opts.cpus(o))
     die_if(U32.is_ne(rc, 0), "cannot create the VM (step " ++ U32.show(rc) ++ ")")
     display.map(display_of(Op.Opts.display(o)))
-    +kinds : +List<D.DevKind> <- devices(o)
+    args : List<String> <- H.Hvf.args()
+    +prog : U32 <- H.Hvf.prog()
+    +kinds : +List<D.DevKind> <- devices(o, List.drop(&1, String, args, U32.to_nat(prog)))
     entry : U.U64 & U.U64 <- boot(o, List.length(&2, D.DevKind, kinds))
     start(o, kinds, entry)
 
@@ -2003,7 +2021,7 @@ def usage() -> String:
     "                [--disk IMG[:ro],...] [--share DIR] [--vsock PATH] [--control PATH]",
     "                [--display WxH[,headless]] [--forward [ADDR:]HOSTPORT:GUESTPORT,...]",
     "                [--lan DIR,ip=A.B.C.D/N[,mac=xx:xx:xx:xx:xx:xx]] [--share DIR,quota=SIZE]",
-    "                [--console-log PATH,max=SIZE[,keep=N]]",
+    "                [--console-log PATH,max=SIZE[,keep=N]] [--balloon free-page-reporting]",
     "       bend-vmm --firmware CODE.fd --vars VARS.fd [--disk IMG] ...   (UEFI)",
     "       bend-vmm --restore SNAPSHOT [--disk, --share, ... as taken] [--control PATH] [--forward ...]",
     "       bend-vmm --payload FILE.bin                                   (bare metal)",

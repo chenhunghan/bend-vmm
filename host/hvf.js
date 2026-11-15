@@ -51,6 +51,7 @@ io_eff(CID(Hvf.reexec), hvf_unavailable);
 io_eff(CID(Hvf.exe_path), () => "");
 io_eff(CID(Hvf.set_exec), () => 0);
 io_eff(CID(Hvf.disk_discard), () => 0);
+io_eff(CID(Hvf.ram_release), () => 0);
 io_eff(CID(Hvf.disk_space), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.disk_set_hint), () => 0);
 io_eff(CID(Hvf.disk_zero), hvf_unavailable);

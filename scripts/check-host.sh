@@ -262,6 +262,14 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5h. memory give-back: virtio-balloon free page reporting (--balloon free-page-reporting)"
+  t=$(mktemp -d)
+  out=$(python3 scripts/balloon-test.py ./out/bend-vmm "$t" "$SLOW" 2>&1)
+  if [ $? = 0 ]; then grn "ok: balloon: $(grep -o 'boot: freeing 1 GiB.*MiB)' <<<"$out" | sed 's/boot: //'); again after a restore; the host sees the guest's data"; else red "failed: balloon"; grep -v '^ok:' <<<"$out" | tail -6; fail=1; fi
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 5b. LAN: two VMs on one segment (--lan)"
   # B listens on TCP 6443 and UDP 8472 (VXLAN's port); A takes its address
   # by DHCP from its own VMM, pings B (ARP broadcast, then unicast), sends

@@ -9,7 +9,7 @@ carries out plans that Bend hands it.
 This file is the audit of that boundary. It covered all 113 effects in
 host/hvf.c as of 2026-11-09 and says, for each group, where the
 decisions are made; the migration ledger at the end lists every effect
-(134 as of 2026-11-11) with its target in the C-to-Bend plan. The
+(135 as of 2026-11-15) with its target in the C-to-Bend plan. The
 section before it lists every decision still in C, with the reason it
 stays.
 
@@ -42,6 +42,11 @@ stays.
 
 ## Moved on 2026-11-11 (C_TO_BEND.md, stages 2, 3 and 4)
 
+- Memory give-back, new: virtio-balloon free page reporting; which queue
+  reports, which blocks of a reported range are released (whole 64 KiB
+  ones) are src/virtio/balloon.bend (with laws); C lets go of the host
+  pages (`Hvf.ram_release`: unmap, fresh pages, map again on macOS;
+  MADV_DONTNEED on Linux).
 - qcow2 cluster reuse, new: where a free cluster may be (a hint per image),
   which window of counts to read, which cluster to take and when to append
   are src/disk/store.bend (Store.alloc, with laws); C keeps the hint
@@ -142,7 +147,7 @@ from the hot path can still move exit latency
 
 ## Migration ledger (C_TO_BEND.md)
 
-Every effect host/hvf.c registers, as of 2026-11-11 (134; regenerate the
+Every effect host/hvf.c registers, as of 2026-11-15 (135; regenerate the
 list with `grep -o 'io_eff(CID(Hvf\.[a-z_0-9]*)' host/hvf.c`). Target and
 primitive are the plan's proposals, not existing modules; line numbers are
 host/hvf.c's at the commit that changed this table. Test names what checks
@@ -181,6 +186,7 @@ row but the decisions listed as moved above.
 | `flash` | `hvf_flash_run` (4862) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |
 | `file_size` | `hvf_file_size_run` (1366) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |
 | `zero_ram` | `hvf_zero_ram_run` (2068) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |
+| `ram_release` | `hvf_ram_release_run` (5493) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C releases; Bend says which blocks (Balloon.inside, 2026-11-15) |
 | `inflate_ram` | `hvf_inflate_ram_run` (2135) | host/memory.bend over src/lib/inflate.bend | packed buffers, efficient loops | 6 | tests/inflate.bend, tests/oracles/inflate.py; check-host gzip kernel | boot (gzip kernel), compressed qcow2 | C (zlib); Bend spec and oracle done |
 | `inflate_disk` | `hvf_inflate_disk_run` (2161) | host/memory.bend over src/lib/inflate.bend | packed buffers, efficient loops | 6 | tests/inflate.bend, tests/oracles/inflate.py; check-host gzip kernel | boot (gzip kernel), compressed qcow2 | C (zlib); Bend spec and oracle done |
 | `disk_open_with` | `hvf_disk_open_with_run` (1843) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
@@ -200,9 +206,9 @@ row but the decisions listed as moved above.
 | `disk_alloc` | `hvf_disk_alloc_run` (2084) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
 | `disk_xcopy` | `hvf_disk_xcopy_run` (2103) | host/disk.bend | packed mappings, direct vectored IO, 64-bit offsets | 3 | check-host disk; model: tests/transfer.bend | guest disk-* | C; short-IO decisions: now, measure |
 | `signals` | `hvf_signals_run` (1745) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `console_log` | `hvf_console_log_run` (5485) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `console_size` | `hvf_console_size_run` (5495) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
-| `console_reopen` | `hvf_console_reopen_run` (5504) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C opens; Bend plans the renames (Log.moves, 2026-11-11) |
+| `console_log` | `hvf_console_log_run` (5537) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `console_size` | `hvf_console_size_run` (5547) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
+| `console_reopen` | `hvf_console_reopen_run` (5556) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C opens; Bend plans the renames (Log.moves, 2026-11-11) |
 | `err_text` | `hvf_err_text_run` (4686) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
 | `set_args` | `hvf_set_args_run` (1306) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
 | `set_prog` | `hvf_set_prog_run` (1297) | host/main.bend over thin OS calls | OS-call bindings only | 2 | check-host console, log, reset | exit (layout), boot | C; orchestration: now |
@@ -277,8 +283,8 @@ row but the decisions listed as moved above.
 | `lan_recv` | `hvf_lan_recv_run` (4314) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
 | `lan_to_ram` | `hvf_lan_to_ram_run` (4323) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
 | `lan_release` | `hvf_lan_release_run` (4344) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
-| `share_quota` | `hvf_share_quota_run` (5510) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
-| `share_usage` | `hvf_share_usage_run` (5526) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
+| `share_quota` | `hvf_share_quota_run` (5562) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
+| `share_usage` | `hvf_share_usage_run` (5578) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
 | `share_open` | `hvf_share_open_run` (3219) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
 | `fs` | `hvf_fs_run` (3413) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
 | `fdc_stamps` | `hvf_fdc_stamps_run` (3333) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | Bend decides eviction (2026-11-11) |

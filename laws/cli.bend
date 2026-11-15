@@ -164,3 +164,7 @@ law cli.display_too_big:
 
 law cli.display_overflow:
   {C.Cli.display("65536x65537") == None{} : Maybe<&2, T.Display>}
+
+# Proposed: --balloon takes free-page-reporting, and nothing else.
+law cli.balloon:
+  {C.Cli.balloon("free-page-reporting") && Bool.not(C.Cli.balloon("on")) == True{} : Bool}

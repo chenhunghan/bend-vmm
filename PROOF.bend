@@ -64,3 +64,4 @@ import ./proofs/inflate.bend as Proofs_inflate
 import ./proofs/disksnap.bend as Proofs_disksnap
 import ./proofs/snapdir.bend as Proofs_snapdir
 import ./proofs/cmds.bend as Proofs_cmds
+import ./proofs/balloon.bend as Proofs_balloon

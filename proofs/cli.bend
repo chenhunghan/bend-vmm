@@ -151,3 +151,6 @@ def L.cli.display_too_big():
 
 def L.cli.display_overflow():
   {==}
+
+def L.cli.balloon():
+  {==}

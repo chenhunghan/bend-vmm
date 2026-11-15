@@ -180,6 +180,21 @@ Releases: a tag `v*` builds `bend-vmm` for macOS (signed with a Developer ID
 and notarized) and Linux arm64 and publishes both on a GitHub release
 (`.github/workflows/release.yml`; the signing secrets are listed there).
 
+## Memory give-back
+
+`--balloon free-page-reporting` adds a virtio-balloon device with free page
+reporting (VIRTIO_BALLOON_F_FREE_PAGE_REPORTING): a Linux guest
+(CONFIG_VIRTIO_BALLOON, CONFIG_PAGE_REPORTING; tested with Ubuntu's 6.8)
+reports the memory it frees, a few seconds after it frees it, and the VMM
+hands it back to the host. Freeing 1 GiB in a 2 GiB guest takes the VMM from
+about 1.1 GiB to about 180 MiB resident. On macOS the reported range is
+unmapped from the guest, replaced by fresh pages and mapped again (the
+memory leaves the process at once; the guest reads zeros there next); on
+Linux it is `madvise(MADV_DONTNEED)` (zeros, or the snapshot's contents for
+RAM mapped from a snapshot). Only whole 64 KiB blocks are released. Off by
+default; snapshots keep the device. A guest's page cache counts as used:
+`echo 1 > /proc/sys/vm/drop_caches` in the guest frees it for reporting.
+
 ## VM folders and snapshots
 
 A VM can live in a folder: its options in `vm.conf`, its disks beside them,

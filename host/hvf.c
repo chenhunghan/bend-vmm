@@ -219,7 +219,8 @@ static HvfCpu hvf_cpus[HVF_MAX_CPUS] __attribute__((aligned(128)));
 
 // BEND_VMM_TRACE: bit 1 prints every exception exit on stderr, bit 2 the
 // console input, interrupt line changes and TCP holds, bit 4 staged
-// transmit data, bit 8 shared-folder reads and writes.
+// transmit data, bit 8 shared-folder reads and writes, bit 16 balloon
+// releases.
 static int hvf_trace;
 
 static void hvf_put64(HvfCpu* c, uint64_t v) {
@@ -5459,6 +5460,63 @@ Term hvf_disk_zero_run(Env e, Term* f, IoWork* w) {
   return (Term)0;
 }
 
+// Hvf.ram_release(iovs) -> U32: lets go of the host memory behind pieces of
+// guest RAM (virtio-balloon free page reporting; src/virtio/balloon.bend
+// hands whole 64 KiB blocks; one not host-page aligned is refused). The
+// guest does not touch a range while it reports it. On macOS the range is
+// unmapped from the guest, replaced by fresh anonymous pages and mapped
+// again: its memory leaves the process at once and the guest reads zeros
+// there next (where a step fails, MADV_FREE_REUSABLE instead: the pages go
+// under memory pressure, zeros or the old contents). On Linux
+// MADV_DONTNEED (KVM follows it): zeros for anonymous RAM, the snapshot
+// file's contents for RAM mapped from a snapshot. 0, or 0xFFFFFFFF (a
+// piece outside RAM).
+#ifdef __APPLE__
+static void hvf_ram_drop(uint8_t* a, uint64_t n) {
+  uint64_t gpa = hvf_ram_base + (uint64_t)(a - hvf_ram);
+  if (vmb_unmap(gpa, n) != 0) {
+    madvise(a, n, MADV_FREE_REUSABLE);
+    return;
+  }
+  if (mmap(a, n, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) {
+    madvise(a, n, MADV_FREE_REUSABLE);
+  }
+  if (vmb_map(a, gpa, n, VMB_R | VMB_W | VMB_X) != 0) {
+    fprintf(stderr, "bend-vmm: cannot map guest RAM back at 0x%llx after a balloon release\n", (unsigned long long)gpa);
+  }
+}
+#else
+static void hvf_ram_drop(uint8_t* a, uint64_t n) {
+  madvise(a, n, MADV_DONTNEED);
+}
+#endif
+
+Term hvf_ram_release_run(Env e, Term* f, IoWork* w) {
+  static uint8_t* hva[HVF_MAX_IOVS];
+  static u64      len[HVF_MAX_IOVS];
+  u64             nb;
+  char*           b = io_cbuf(e, f[0], &nb, CID(Con));
+  int             n = hvf_iovs(b, nb, hva, len, HVF_MAX_IOVS);
+  free(b);
+  // Bend hands whole 64 KiB blocks (Balloon.inside); a piece that is not
+  // host-page aligned is refused, never rounded here
+  uintptr_t pg = (uintptr_t)getpagesize();
+  for (int i = 0; i < n; i++) {
+    if (((uintptr_t)hva[i] | (uintptr_t)len[i]) & (pg - 1)) {
+      return (Term)HVF_ERR;
+    }
+  }
+  for (int i = 0; i < n; i++) {
+    if (hvf_trace & 16) {
+      fprintf(stderr, "[trace] balloon release %p +%llu\n", (void*)hva[i], (unsigned long long)len[i]);
+    }
+    if (len[i]) {
+      hvf_ram_drop(hva[i], len[i]);
+    }
+  }
+  return (Term)(n < 0 ? HVF_ERR : 0);
+}
+
 // The console log and share quotas (Hvf.console_log, Hvf.share_quota):
 // placed after the hot paths.
 
@@ -5796,6 +5854,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.reexec)
   io_eff(CID(Hvf.reexec), hvf_reexec_run);
+#endif
+#ifdef CID(Hvf.ram_release)
+  io_eff(CID(Hvf.ram_release), hvf_ram_release_run);
 #endif
 #ifdef CID(Hvf.disk_space)
   io_eff(CID(Hvf.disk_space), hvf_disk_space_run);

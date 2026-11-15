@@ -1,0 +1,23 @@
+import Base
+import ../laws/balloon.bend as L
+
+def L.balloon.features():
+  {==}
+
+def L.balloon.report_queue():
+  {==}
+
+def L.balloon.config():
+  {==}
+
+def L.balloon.inside_whole():
+  {==}
+
+def L.balloon.inside_cut():
+  {==}
+
+def L.balloon.inside_none():
+  {==}
+
+def L.balloon.ranges():
+  {==}
