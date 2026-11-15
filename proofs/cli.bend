@@ -154,3 +154,9 @@ def L.cli.display_overflow():
 
 def L.cli.balloon():
   {==}
+
+def L.cli.balloon_default():
+  {==}
+
+def L.cli.balloon_values():
+  {==}

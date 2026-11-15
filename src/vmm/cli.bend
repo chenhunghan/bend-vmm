@@ -407,10 +407,20 @@ def Fwd.all_ok(ss: List<&2, String>) -> Bool:
 # What is wrong with one flag and its value ("" when nothing): an unknown
 # flag; --mem other than 1..1048576 MiB (1 TiB, what a snapshot holds);
 # --cpus other than 1..64; a malformed --display.
-# --balloon free-page-reporting: a virtio-balloon device whose guest hands
-# back the RAM it frees (src/virtio/balloon.bend).
+# The virtio-balloon device (src/virtio/balloon.bend: the guest hands back
+# the RAM it frees, and the host can ask for more) is on by default;
+# --balloon off leaves it out. --balloon free-page-reporting is accepted
+# and changes nothing (it was the switch before the default).
 def Cli.balloon(+v: String) -> Bool:
   String.eq(v, "free-page-reporting")
+
+def Cli.balloon_ok(+v: String) -> Bool:
+  Cli.balloon(v) || String.eq(v, "off")
+
+# Whether a VM gets the balloon, from its --balloon value ("" when not
+# given).
+def Cli.balloon_on(+v: String) -> Bool:
+  Bool.not(String.eq(v, "off"))
 
 def Cli.why(+flag: String, +v: String) -> String:
   Bool.pick(String, Bool.not(Cli.known(flag, Cli.flags())), "unknown option " ++ flag,
@@ -421,7 +431,7 @@ def Cli.why(+flag: String, +v: String) -> String:
   Bool.pick(String, String.eq(flag, "--share") && Bool.not(Cli.share_ok(Cli.share(v))), "--share takes DIR or DIR,quota=SIZE (bytes, or K, M, G) (not " ++ v ++ ")",
   Bool.pick(String, String.eq(flag, "--console-log") && Bool.not(Cli.conlog_ok(Cli.conlog(v))), "--console-log takes PATH,max=SIZE[,keep=N] (N up to 99) (not " ++ v ++ ")",
   Bool.pick(String, String.eq(flag, "--forward") && Bool.not(Fwd.all_ok(Fwd.specs(v))), "--forward takes [ADDR:]HOSTPORT:GUESTPORT[,...] (ports 1 to 65535) (not " ++ v ++ ")",
-  Bool.pick(String, String.eq(flag, "--balloon") && Bool.not(Cli.balloon(v)), "--balloon takes free-page-reporting (not " ++ v ++ ")",
+  Bool.pick(String, String.eq(flag, "--balloon") && Bool.not(Cli.balloon_ok(v)), "--balloon takes off (or free-page-reporting, the default) (not " ++ v ++ ")",
   "")))))))))
 
 # The first thing wrong with the arguments (flag and value pairs), or "".

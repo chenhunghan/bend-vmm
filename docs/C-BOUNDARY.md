@@ -44,7 +44,9 @@ stays.
 
 - Memory give-back, new: virtio-balloon free page reporting; which queue
   reports, which blocks of a reported range are released (whole 64 KiB
-  ones) are src/virtio/balloon.bend (with laws); C lets go of the host
+  ones), inflate and deflate (per-block page masks; a block is released when
+  all 16 pages are in) and the target set from `balloon MiB` are
+  src/virtio/balloon.bend and src/vmm/control.bend (with laws); C lets go of the host
   pages (`Hvf.ram_release`: unmap, fresh pages, map again on macOS;
   MADV_DONTNEED on Linux).
 - qcow2 cluster reuse, new: where a free cluster may be (a hint per image),

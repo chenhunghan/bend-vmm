@@ -92,3 +92,17 @@ law control.status_json_running:
 
 law control.status_json_paused:
   {C.Ctl.status_json(True{}) == "{\"state\":\"paused\"}" : String}
+
+# Proposed: balloon MiB sets the balloon's target (0 to 1048576 MiB), in
+# 4 KiB pages; status json with a balloon reports it.
+law control.balloon:
+  {C.Ctl.parse("balloon 512") == C.CBalloon{512} : C.Cmd}
+
+law control.balloon_usage:
+  {C.Ctl.parse("balloon lots") == C.CBad{"usage: balloon MiB (0 to 1048576)"} : C.Cmd}
+
+law control.balloon_pages:
+  {C.Ctl.mib_pages(512) == 131072 : U32}
+
+law control.status_json_balloon:
+  {C.Ctl.status_json_balloon(False{}, 262144, 131072) == "{\"state\":\"running\",\"balloon\":{\"target_mib\":1024,\"actual_mib\":512}}" : String}

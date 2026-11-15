@@ -9,6 +9,9 @@ least 300 MiB, within 10 s (RAM mapped from a snapshot counts less). Then it wri
 it out through virtio-blk: the host's disk image must hold exactly what the
 guest wrote (the VMM sees the guest's data in released pages). The same once
 more after a snapshot and a restore (RAM mapped from the snapshot file).
+Then inflate and deflate from the control socket: 1 GiB of page cache,
+`balloon 1024` (status json reports it in the balloon; the VMM shrinks),
+`balloon 0` (the guest can use that memory again).
 """
 import hashlib, os, re, socket, subprocess, sys, time
 
@@ -91,4 +94,61 @@ check("restore with the balloon", vm.wait("restored", 60))
 vm.run("true")
 round_(vm, "restored")
 vm.end()
+
+def ctl(cmd):
+    c = socket.socket(socket.AF_UNIX); c.connect(sock); c.sendall((cmd + "\n").encode())
+    r = c.makefile().readline().strip(); c.close(); return r
+
+# inflate and deflate: 1 GiB of page cache (a disk read the guest keeps),
+# then `balloon 1024`: the guest gives 1 GiB to the balloon (dropping that
+# cache) and the host lets it go; `balloon 0` gives it back
+open(disk, "wb").truncate(1100 << 20)
+with open(disk, "r+b") as f:
+    f.write(os.urandom(1024 << 20))
+vm = Vm(["--mem", "2048", "--cpus", "2", "--kernel", "out/guest/Image", "--initrd", "out/guest/guest.cpio", "--disk", disk,
+         "--control", sock, "--balloon", "free-page-reporting", "--cmdline", "console=ttyAMA0 quiet"])
+check("boot again", vm.wait("busybox shell", 60))
+vm.run("dd if=/dev/vda of=/dev/null bs=1048576 count=1024 2>/dev/null")
+full = vm.rss()
+r = ctl("balloon 1024")
+check("balloon 1024 answers", r.startswith("balloon 1024 MiB"), r)
+st = ""
+for _ in range(int(60 * slow)):
+    time.sleep(0.5)
+    st = ctl("status json")
+    if '"actual_mib":1024' in st:
+        break
+check("the guest puts 1024 MiB in the balloon (status json)", '"actual_mib":1024' in st and '"target_mib":1024' in st, st)
+low = vm.rss()
+check("inflating gives the host its memory (%d -> %d MiB)" % (full, low), full - low >= 500, "%d -> %d" % (full, low))
+ctl("balloon 0")
+for _ in range(int(60 * slow)):
+    time.sleep(0.5)
+    st = ctl("status json")
+    if '"actual_mib":0' in st:
+        break
+check("balloon 0: the guest takes it all back", '"actual_mib":0' in st, st)
+# (the guest's tmpfs holds under half its RAM) 900 MiB in tmpfs, and 700 MiB
+# more in a process, need the memory the balloon gave back
+vm.run("dd if=/dev/urandom of=/tmp/b3 bs=1048576 count=900 2>/dev/null; echo FILL-$(wc -c < /tmp/b3); "
+       "head -c 734003200 /dev/zero | tail -c 1 >/dev/null && echo ANON-OK")
+o = vm.out.decode(errors="replace")
+check("after deflating, the guest uses its memory again (900 MiB in tmpfs, 700 MiB in a process)", "FILL-943718400" in o and "ANON-OK" in o, o[-300:])
+vm.end()
+
+# the balloon is the default; --balloon off leaves it out, and a snapshot
+# taken without it restores without it
+vm = Vm(["--mem", "512", "--kernel", "out/guest/Image", "--initrd", "out/guest/guest.cpio", "--cmdline", "console=ttyAMA0 quiet"])
+vm.wait("busybox shell", 60); vm.run("echo DEF-$(ls /sys/bus/virtio/drivers/virtio_balloon/ | grep -c virtio)"); vm.end()
+check("the balloon is on by default", b"DEF-1" in vm.out)
+vm = Vm(["--mem", "512", "--kernel", "out/guest/Image", "--initrd", "out/guest/guest.cpio", "--control", sock, "--balloon", "off", "--cmdline", "console=ttyAMA0 quiet"])
+vm.wait("busybox shell", 60); vm.run("echo OFF-$(ls /sys/bus/virtio/drivers/virtio_balloon/ | grep -c virtio)")
+check("--balloon off leaves it out", b"OFF-0" in vm.out)
+r = ctl("balloon 100")
+check("balloon MiB without one says so", r.startswith("error: no balloon"), r)
+r = ctl("snapshot " + snap)
+vm.p.kill(); vm.p.wait()
+vm = Vm(["--restore", snap])
+ok = vm.wait("restored", 60); vm.run("echo RE-$(ls /sys/bus/virtio/drivers/virtio_balloon/ | grep -c virtio)"); vm.end()
+check("a snapshot without the balloon restores without it", r == "saved" and ok and b"RE-0" in vm.out, (r, ok))
 sys.exit(1 if fails else 0)

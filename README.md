@@ -124,7 +124,7 @@ in 0.2 s and Alpine its login prompt in about 5 s.
 Management: on the console, `Ctrl-A p` pauses or resumes, `Ctrl-A s` writes
 `./bend-vmm.snap`, `Ctrl-A x` quits, `Ctrl-A h` lists the keys. Over
 `--control`: `echo pause | nc -U SOCK` (also `resume`, `status`,
-`snapshot PATH`, `status json` (`{"state":"running"}`), `net` (the NAT's connections and flow state),
+`snapshot PATH`, `status json` (`{"state":"running"}`), `balloon MiB`, `net` (the NAT's connections and flow state),
 `powerdown` (presses the guest's power button), `quit`;
 with `--display`, `screendump PATH` writes the
 screen as a PPM, `type TEXT` types on the virtio keyboard (`\n` is Return),
@@ -182,8 +182,9 @@ and notarized) and Linux arm64 and publishes both on a GitHub release
 
 ## Memory give-back
 
-`--balloon free-page-reporting` adds a virtio-balloon device with free page
-reporting (VIRTIO_BALLOON_F_FREE_PAGE_REPORTING): a Linux guest
+Every VM has a virtio-balloon device with free page reporting
+(VIRTIO_BALLOON_F_FREE_PAGE_REPORTING; `--balloon off` leaves it out, and
+`--balloon free-page-reporting` is accepted for older command lines): a Linux guest
 (CONFIG_VIRTIO_BALLOON, CONFIG_PAGE_REPORTING; tested with Ubuntu's 6.8)
 reports the memory it frees, a few seconds after it frees it, and the VMM
 hands it back to the host. Freeing 1 GiB in a 2 GiB guest takes the VMM from
@@ -191,9 +192,19 @@ about 1.1 GiB to about 180 MiB resident. On macOS the reported range is
 unmapped from the guest, replaced by fresh pages and mapped again (the
 memory leaves the process at once; the guest reads zeros there next); on
 Linux it is `madvise(MADV_DONTNEED)` (zeros, or the snapshot's contents for
-RAM mapped from a snapshot). Only whole 64 KiB blocks are released. Off by
-default; snapshots keep the device. A guest's page cache counts as used:
+RAM mapped from a snapshot). Only whole 64 KiB blocks are released. The
+device goes last, so other devices keep their slots; a snapshot restores
+with or without it as it was taken. A guest's page cache counts as used:
 `echo 1 > /proc/sys/vm/drop_caches` in the guest frees it for reporting.
+
+The host can also take memory back on demand: `balloon MiB` on the control
+socket sets how much the guest should give to the balloon (`balloon 0`
+gives it all back); the guest frees that much (dropping cache first) and
+the VMM releases each 64 KiB block once all of its pages are in the
+balloon. `status json` then reads
+`{"state":"running","balloon":{"target_mib":1024,"actual_mib":1024}}`.
+The device offers VIRTIO_BALLOON_F_DEFLATE_ON_OOM, so a guest short of
+memory takes pages back from the balloon instead of failing.
 
 ## VM folders and snapshots
 

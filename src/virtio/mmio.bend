@@ -297,6 +297,14 @@ def VirtioMmio.irq(s: VirtioMmio) -> Bool:
     case VirtioMmio{id, df, drf, dsel, drsel, qsel, qs, st, ist, cg, cfg}:
       U32.is_ne(ist, 0)
 
+# The device changed its config space (virtio-balloon's target): the new
+# bytes, ConfigGeneration one more, and interrupt status bit 2 (config
+# change) raised.
+def VirtioMmio.config_changed(s: VirtioMmio, cfg: +List<U32>) -> VirtioMmio:
+  match s:
+    case VirtioMmio{id, df, drf, dsel, drsel, qsel, qs, st, ist, cg, old}:
+      VirtioMmio{id, df, drf, dsel, drsel, qsel, qs, st, (ist .|. 2 : U32), (cg + 1 : U32), cfg}
+
 # Replaces the config space (a device whose config depends on what the
 # driver selected, as virtio-input's).
 def VirtioMmio.with_config(s: VirtioMmio, cfg: +List<U32>) -> VirtioMmio:

@@ -41,7 +41,8 @@ import ./balloon.bend as Bl
 #                space N.Net.config(mac)
 #   BalloonKind: virtio-balloon, device id 5, three queues (0 inflateq,
 #                1 deflateq, 2 reporting_vq), also FREE_PAGE_REPORTING
-#                (Bl.Balloon.features()), config Bl.Balloon.config()
+#                and DEFLATE_ON_OOM (Bl.Balloon.offered()), config Bl.Balloon.config()
+#                (num_pages, actual: Dev.balloon sets the target)
 #   P9Kind:      virtio-9p on host share `share`, device id 9, one queue,
 #                also VIRTIO_9P_MOUNT_TAG (U.U64{1, 1}), config space
 #                P.P9.config(tag)
@@ -93,6 +94,8 @@ type DevState is Data:
   VsState{vs: Vs.Vsock}
   InDev{input: In.InputState}
   LanDev{lan: Ln.Lan}
+  # The balloon's target, count and partly inflated blocks.
+  BalDev{bal: Bl.Bal}
 
 type Dev is Data:
   Dev{kind: DevKind, mmio: M.VirtioMmio, queues: +List<Q.Vq>, state: DevState}
@@ -134,7 +137,7 @@ def Dev.mmio(kind: DevKind) -> M.VirtioMmio:
     case LanKind{mac, ip, prefix}:
       M.VirtioMmio.new(1, Ln.Lan.features(), 2n, 256, Ln.Lan.config(mac))
     case BalloonKind{}:
-      M.VirtioMmio.new(5, Bl.Balloon.features(), Bl.Balloon.queues(), 256, Bl.Balloon.config())
+      M.VirtioMmio.new(5, Bl.Balloon.offered(), Bl.Balloon.queues(), 256, Bl.Balloon.config())
 
 # The state of a fresh device of the given kind.
 def Dev.state(kind: DevKind) -> DevState:
@@ -160,7 +163,7 @@ def Dev.state(kind: DevKind) -> DevState:
     case LanKind{mac, ip, prefix}:
       LanDev{Ln.Lan.new(mac, ip, prefix)}
     case BalloonKind{}:
-      NoState{}
+      BalDev{Bl.Balloon.new()}
 
 def Dev.new(kind: DevKind) -> Dev:
   +kind = kind
@@ -258,6 +261,8 @@ def Dev.input_of(st: DevState) -> +List<U32>:
       []
     case LanDev{l}:
       []
+    case BalDev{b}:
+      []
 
 # The pending frames of a state (none for other kinds).
 def Dev.frames_of(st: DevState) -> +List<+List<U32>>:
@@ -276,6 +281,8 @@ def Dev.frames_of(st: DevState) -> +List<+List<U32>>:
       []
     case LanDev{l}:
       []
+    case BalDev{b}:
+      []
 
 # The 9p server state of a state (a fresh one for other kinds).
 def Dev.p9_of(st: DevState) -> P.P9State:
@@ -293,6 +300,8 @@ def Dev.p9_of(st: DevState) -> P.P9State:
     case InDev{i}:
       P.P9State.new()
     case LanDev{l}:
+      P.P9State.new()
+    case BalDev{b}:
       P.P9State.new()
 
 # The last Dev.max_frames() frames.
@@ -375,6 +384,8 @@ def Dev.vs_of(st: DevState) -> Vs.Vsock:
       Vs.Vsock.new(U.U64{0, 3})
     case LanDev{l}:
       Vs.Vsock.new(U.U64{0, 3})
+    case BalDev{b}:
+      Vs.Vsock.new(U.U64{0, 3})
 
 def Dev.pass.vs_tx(r: Vs.VsTx) -> Pass:
   match r:
@@ -440,6 +451,19 @@ def Dev.lan_of(st: DevState) -> Ln.Lan:
     case _:
       Ln.Lan.new([0, 0, 0, 0, 0, 0], 0, 0)
 
+# The balloon's state (a fresh one for a snapshot taken before it had one).
+def Dev.bal_of(st: DevState) -> Bl.Bal:
+  match st:
+    case BalDev{b}:
+      b
+    case _:
+      Bl.Balloon.new()
+
+def Dev.pass.bal(r: Bl.BalPass) -> Pass:
+  match r:
+    case Bl.BalPass{q, b, used}:
+      Pass{q, BalDev{b}, [], [], [], used}
+
 def Dev.pass.lan_tx(r: Ln.LanTx) -> Pass:
   match r:
     case Ln.LanTx{q, l, used}:
@@ -482,8 +506,8 @@ def Dev.pass(-R: Type, k: DevKind, st: DevState, +sel: U32, q: Q.Vq) -> V.Op<R, 
       Dev.pass.lan(R, U32.is_eq(sel, 1), st, q)
     case BalloonKind{}:
       do V.Op<R, Pass>:
-        r : Q.Vq & Bool <- Bl.Balloon.process(R, sel, q)
-        return Dev.pass.plain(st, r)
+        r : Bl.BalPass <- Bl.Balloon.pass(R, sel, Dev.bal_of(st), q)
+        return Dev.pass.bal(r)
     case RngKind{}:
       do V.Op<R, Pass>:
         r : Q.Vq & Bool <- Dev.process(R, RngKind{}, q)
@@ -794,3 +818,32 @@ def Dev.forget_lan(d: Dev) -> Dev:
       Dev{k, m, qs, LanDev{Ln.Lan.forget_held(l)}}
     case Dev{k, m, qs, st}:
       Dev{k, m, qs, st}
+
+# The host sets the balloon's target (`balloon MiB` on the control socket):
+# a balloon device takes it (pages of 4 KiB) and tells the driver (config
+# change interrupt); other kinds are unchanged.
+def Dev.balloon.go(bal: Bool, +k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState, +pages: U32) -> Dev:
+  match bal:
+    case True{}:
+      +b = Bl.Balloon.set_target(Dev.bal_of(st), pages)
+      Dev{k, M.VirtioMmio.config_changed(m, Bl.Balloon.config_of(b)), qs, BalDev{b}}
+    case False{}:
+      Dev{k, m, qs, st}
+
+def Dev.is_balloon(k: DevKind) -> Bool:
+  match k:
+    case BalloonKind{}:
+      True{}
+    case _:
+      False{}
+
+def Dev.balloon(d: Dev, +pages: U32) -> Dev:
+  match d:
+    case Dev{+k, m, qs, st}:
+      Dev.balloon.go(Dev.is_balloon(k), k, m, qs, st, pages)
+
+# The balloon's target and count (4 KiB pages), when this is the balloon.
+def Dev.balloon_info(d: Dev) -> Maybe<&2, Bl.Bal>:
+  match d:
+    case Dev{+k, m, qs, st}:
+      Bool.pick(Maybe<&2, Bl.Bal>, Dev.is_balloon(k), Some{Dev.bal_of(st)}, None{})

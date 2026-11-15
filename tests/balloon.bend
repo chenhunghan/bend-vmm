@@ -52,9 +52,42 @@ def used(r: Maybe<&1, S.Sim & (Q.Vq & Bool)>) -> Bool:
     case Some{(s, (q, u))}:
       u
 
+# The inflate queue: one readable buffer of 15 page numbers (256..270; not a
+# whole block, so nothing released): counted in the state, the buffer used.
+def le32s(xs: +List<U32>) -> +List<U32>:
+  match xs:
+    case Nil{}:
+      []
+    case Con{x, rest}:
+      cat(B.Bytes.le32(x), le32s(rest))
+
+def pfns(n: Nat, +i: U32) -> +List<U32>:
+  match n:
+    case 0n:
+      []
+    case 1n+k:
+      Con{i, pfns(k, (i + 1 : U32))}
+
+def infl_sim(+inflate: Bool) -> S.Sim:
+  +s = S.Sim.new(u64(4096), 8192n)
+  +s = S.Sim.write(s, u64(8192), le32s(pfns(15n, 256)))
+  +s = S.Sim.write(s, u64(4096), desc(8192, 60, 0, 0))
+  S.Sim.write(s, u64(5120), [0, 0, 1, 0, 0, 0])
+
+def infl(+sel: U32, +b: K.Bal) -> Maybe<&1, S.Sim & K.BalPass>:
+  S.Sim.exec(K.BalPass, infl_sim(True{}), K.Balloon.pass(K.BalPass, sel, b, queue()))
+
+def actual_of(r: Maybe<&1, S.Sim & K.BalPass>) -> U32:
+  match r:
+    case None{}:
+      4294967295
+    case Some{(s, K.BalPass{q, b, u})}:
+      K.Balloon.actual(b)
+
 def main() -> IO(Unit):
   do IO<Unit>:
     T.eq_str("balloon reporting: both buffers used, length 0", show(mem(run(2), 6144, 20)), "[0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]")
     T.eq_str("balloon reporting: no whole block, memory kept", show(mem(run(2), 8192, 4)), "[7, 7, 7, 7]")
     T.ok("balloon reporting: the pass used buffers", used(run(2)))
-    T.eq_str("balloon inflate queue: buffers returned, memory kept", show(cat(mem(run(0), 6146, 2), mem(run(0), 8224, 2))), "[2, 0, 7, 7]")
+    T.eq_u32("balloon inflate: 15 pages counted", actual_of(infl(0, K.Balloon.new())), 15)
+    T.eq_u32("balloon deflate: 15 pages taken back", actual_of(infl(1, K.Bal{0, 20, []})), 5)

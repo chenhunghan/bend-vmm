@@ -84,3 +84,15 @@ def L.control.status_json_running():
 
 def L.control.status_json_paused():
   {==}
+
+def L.control.balloon():
+  {==}
+
+def L.control.balloon_usage():
+  {==}
+
+def L.control.balloon_pages():
+  {==}
+
+def L.control.status_json_balloon():
+  {==}

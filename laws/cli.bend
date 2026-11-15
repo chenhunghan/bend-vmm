@@ -168,3 +168,11 @@ law cli.display_overflow:
 # Proposed: --balloon takes free-page-reporting, and nothing else.
 law cli.balloon:
   {C.Cli.balloon("free-page-reporting") && Bool.not(C.Cli.balloon("on")) == True{} : Bool}
+
+# Proposed: the balloon is on unless --balloon off; free-page-reporting is
+# accepted and changes nothing; other values are refused.
+law cli.balloon_default:
+  {C.Cli.balloon_on("") && C.Cli.balloon_on("free-page-reporting") && Bool.not(C.Cli.balloon_on("off")) == True{} : Bool}
+
+law cli.balloon_values:
+  {C.Cli.balloon_ok("off") && C.Cli.balloon_ok("free-page-reporting") && Bool.not(C.Cli.balloon_ok("on")) == True{} : Bool}

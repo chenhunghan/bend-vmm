@@ -9,6 +9,7 @@ import ../dev/pflash.bend as Pf
 import ../net/nat.bend as Nt
 import ../virtio/device.bend as D
 import ../virtio/input.bend as In
+import ../virtio/balloon.bend as Bl
 import ./layout.bend as L
 import ./abi.bend as V
 
@@ -811,6 +812,37 @@ def Machine.hid.go(-R: Type, m: Machine, ev: In.Hid) -> V.Op<R, Machine>:
 # a device access.
 def Machine.hid(m: Machine, ev: In.Hid) -> V.Vm<Machine>:
   V.Op.finish(Machine, Machine.hid.go(Machine, m, ev))
+
+# The balloon's target (`balloon MiB`): pages of 4 KiB to every device
+# (D.Dev.balloon: the balloon takes it and raises its config change
+# interrupt), then the interrupt lines as after a device access.
+def Machine.devs_balloon(devs: +List<D.Dev>, +pages: U32) -> +List<D.Dev>:
+  match devs:
+    case Nil{}:
+      []
+    case d <> t:
+      D.Dev.balloon(d, pages) <> Machine.devs_balloon(t, pages)
+
+def Machine.balloon.go(-R: Type, m: Machine, +pages: U32) -> V.Op<R, Machine>:
+  match m:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      Machine.irqs(R, Machine{p, u, ui, Machine.devs_balloon(devs, pages), lines, rt, ri, nt, fl})
+
+def Machine.balloon(m: Machine, +pages: U32) -> V.Vm<Machine>:
+  V.Op.finish(Machine, Machine.balloon.go(Machine, m, pages))
+
+# The balloon's state, when the machine has one.
+def Machine.balloon_of(devs: +List<D.Dev>) -> Maybe<&2, Bl.Bal>:
+  match devs:
+    case Nil{}:
+      None{}
+    case d <> t:
+      Maybe.or(&2, Bl.Bal, D.Dev.balloon_info(d), Machine.balloon_of(t))
+
+def Machine.balloon_info(m: Machine) -> Maybe<&2, Bl.Bal>:
+  match m:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      Machine.balloon_of(devs)
 
 # A frame of len bytes the host holds for the LAN NIC, to every device
 # (D.Dev.lan_ready: the LanKind device takes it).

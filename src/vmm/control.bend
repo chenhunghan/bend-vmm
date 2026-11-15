@@ -20,9 +20,11 @@ type Cmd is Data:
   CUnknown{}
   CBad{why: String}
   CStatusJson{}
+  # balloon MiB: the balloon's target (--balloon free-page-reporting).
+  CBalloon{mib: U32}
 
 def Ctl.usage() -> String:
-  "unknown command (pause, resume, snapshot PATH, screendump PATH, type TEXT, pointer X Y, powerdown, net, status [json], quit)"
+  "unknown command (pause, resume, snapshot PATH, screendump PATH, type TEXT, pointer X Y, powerdown, net, status [json], balloon MiB, quit)"
 
 def Ctl.pointer_usage() -> String:
   "usage: pointer X Y (0..32767)"
@@ -41,6 +43,37 @@ def Ctl.pointer(ws: List<&2, String>) -> Cmd:
       Ctl.pointer.mk(U32.read(x), U32.read(y))
     case _:
       CPointerUsage{}
+
+# balloon MiB: the memory the guest is asked to give to the balloon, 0 to
+# 1048576 MiB (0: give it all back).
+def Ctl.balloon_usage() -> String:
+  "usage: balloon MiB (0 to 1048576)"
+
+def Ctl.balloon(m: Maybe<&2, U32>) -> Cmd:
+  match m:
+    case Some{+n}:
+      Bool.pick(Cmd, U32.is_le(n, 1048576), CBalloon{n}, CBad{Ctl.balloon_usage()})
+    case None{}:
+      CBad{Ctl.balloon_usage()}
+
+# MiB as 4 KiB pages, and back (rounded down).
+def Ctl.mib_pages(+mib: U32) -> U32:
+  (mib * 256 : U32)
+
+def Ctl.pages_mib(+pages: U32) -> U32:
+  (pages / 256 : U32)
+
+# The balloon's reply: its target and how much is in it now, in MiB.
+def Ctl.balloon_reply(+target: U32, +actual: U32) -> String:
+  "balloon " ++ U32.show(Ctl.pages_mib(target)) ++ " MiB (in it now: " ++ U32.show(Ctl.pages_mib(actual)) ++ " MiB)"
+
+def Ctl.no_balloon() -> String:
+  "error: no balloon (start the VM with --balloon free-page-reporting)"
+
+# status json with a balloon: the state, then the balloon's target and
+# what is in it, in MiB (without one, Ctl.status_json).
+def Ctl.status_json_balloon(paused: Bool, +target: U32, +actual: U32) -> String:
+  "{\"state\":\"" ++ Bool.pick(String, paused, "paused", "running") ++ "\",\"balloon\":{\"target_mib\":" ++ U32.show(Ctl.pages_mib(target)) ++ ",\"actual_mib\":" ++ U32.show(Ctl.pages_mib(actual)) ++ "}}"
 
 # A command that takes an argument, given none: its usage.
 def Ctl.needs(+arg: String, c: Cmd, why: String) -> Cmd:
@@ -61,7 +94,8 @@ def Ctl.verb(+verb: String, +arg: String) -> Cmd:
   Bool.pick(Cmd, String.eq(verb, "screendump"), Ctl.needs(arg, CScreendump{arg}, "usage: screendump PATH"),
   Bool.pick(Cmd, String.eq(verb, "type"), Ctl.needs(arg, CType{arg}, "usage: type TEXT"),
   Bool.pick(Cmd, String.eq(verb, "pointer"), Ctl.pointer(String.split(arg, ' ')),
-  CUnknown{}))))))))))
+  Bool.pick(Cmd, String.eq(verb, "balloon"), Ctl.balloon(U32.read(arg)),
+  CUnknown{})))))))))))
 
 # One command line: its first word is the verb, the rest (one space between
 # words) its argument.

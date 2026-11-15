@@ -21,3 +21,21 @@ def L.balloon.inside_none():
 
 def L.balloon.ranges():
   {==}
+
+def L.balloon.offered():
+  {==}
+
+def L.balloon.inflate_whole():
+  {==}
+
+def L.balloon.inflate_part():
+  {==}
+
+def L.balloon.deflate():
+  {==}
+
+def L.balloon.config_of():
+  {==}
+
+def L.balloon.pfns():
+  {==}

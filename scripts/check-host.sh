@@ -262,10 +262,10 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
-  echo "== 5h. memory give-back: virtio-balloon free page reporting (--balloon free-page-reporting)"
+  echo "== 5h. memory give-back: virtio-balloon (on by default; --balloon off)"
   t=$(mktemp -d)
   out=$(python3 scripts/balloon-test.py ./out/bend-vmm "$t" "$SLOW" 2>&1)
-  if [ $? = 0 ]; then grn "ok: balloon: $(grep -o 'boot: freeing 1 GiB.*MiB)' <<<"$out" | sed 's/boot: //'); again after a restore; the host sees the guest's data"; else red "failed: balloon"; grep -v '^ok:' <<<"$out" | tail -6; fail=1; fi
+  if [ $? = 0 ]; then grn "ok: balloon: $(grep -o 'boot: freeing 1 GiB.*MiB)' <<<"$out" | sed 's/boot: //'); again after a restore; the host sees the guest's data; $(grep -o 'inflating gives.*MiB)' <<<"$out"), balloon 0 gives it back"; else red "failed: balloon"; grep -v '^ok:' <<<"$out" | tail -6; fail=1; fi
   rm -rf "$t"
 fi
 
