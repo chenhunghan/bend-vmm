@@ -1796,13 +1796,14 @@ static int hvf_disks[HVF_MAX_DISKS];
 static int hvf_ndisks;
 
 // Opens a disk image as src/disk/access.bend says for its use (flags:
-// read only, an exclusive or shared lock, a regular file only); a
+// read only, an exclusive or shared lock, a regular file only, no host
+// cache); a
 // read-write open the host refuses is Bend's to retry read-only (from
 // Hvf.disk_err). Its index, or 0xFFFFFFFF.
 static int hvf_disk_last_err;
 
 static Term hvf_disk_open_as(Env e, Term path_t, u32 flags) {
-  int   ro = (flags & 1) != 0, excl = (flags & 2) != 0, reg = (flags & 4) != 0;
+  int   ro = (flags & 1) != 0, excl = (flags & 2) != 0, reg = (flags & 4) != 0, nocache = (flags & 8) != 0;
   u64   n;
   char* path = io_cstr(e, path_t, &n);
   int   fd   = -1;
@@ -1829,6 +1830,16 @@ static Term hvf_disk_open_as(Env e, Term path_t, u32 flags) {
   if (fd < 0) {
     return (Term)HVF_ERR;
   }
+#ifdef __APPLE__
+  // :nocache (Access.flags_of, 8): the image's blocks skip the host's
+  // unified buffer cache. (Linux: no effect; O_DIRECT would need every
+  // buffer aligned.)
+  if (nocache) {
+    fcntl(fd, F_NOCACHE, 1);
+  }
+#else
+  (void)nocache;
+#endif
   hvf_disks[hvf_ndisks] = fd;
   return (Term)(u32)hvf_ndisks++;
 }

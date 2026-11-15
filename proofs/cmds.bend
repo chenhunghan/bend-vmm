@@ -36,3 +36,6 @@ def L.cmds.conf_roundtrip():
 
 def L.cmds.for_restore():
   {==}
+
+def L.cmds.conf_disk_options():
+  {==}

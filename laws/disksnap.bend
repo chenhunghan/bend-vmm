@@ -58,3 +58,7 @@ law disksnap.folder:
 
 law disksnap.folder_save:
   {D.Dsnap.place("t/memory", "dir", [D.DiskAt{2, "c.img"}]) == [D.DRename{"t/disk2.bend-vmm-tmp", "t/disk2"}] : List<D.Step>}
+
+# A :nocache disk is writable: kept, by its path.
+law disksnap.writable_nocache:
+  {D.Dsnap.writable("a.img:nocache") == [D.DiskAt{0, "a.img"}] : List<D.DiskAt>}

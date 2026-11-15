@@ -1,6 +1,7 @@
 import Base
 import ../lib/bytes.bend as B
 import ./snapfile.bend as Sf
+import ../disk/access.bend as Ac
 
 # Disk snapshots (laws/disksnap.bend): a snapshot also keeps each writable
 # disk as it was, so restoring any snapshot puts memory and disks back
@@ -46,7 +47,7 @@ def Dsnap.writable.go(specs: List<&2, String>, +i: U32) -> List<DiskAt>:
     case Nil{}:
       []
     case Con{+s, rest}:
-      Dsnap.keep(String.ends_with(s, ":ro") || String.is_empty(s), DiskAt{i, s}, Dsnap.writable.go(rest, (i + 1 : U32)))
+      Dsnap.keep(Ac.Access.spec_ro(s) || String.is_empty(s), DiskAt{i, Ac.Access.spec_path(s)}, Dsnap.writable.go(rest, (i + 1 : U32)))
 
 # The writable disks of a --disk value ("a.img,b.img:ro").
 def Dsnap.writable(+spec: String) -> List<DiskAt>:

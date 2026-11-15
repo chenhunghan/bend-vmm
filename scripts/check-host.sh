@@ -470,6 +470,18 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 8e. --disk IMG:nocache (no host page cache) and IMG:ro:nocache"
+  t=$(mktemp -d)
+  head -c 8388608 /dev/urandom > "$t/a.img"; cp "$t/a.img" "$t/b.img"
+  want=$(python3 -c 'import hashlib, sys; print(hashlib.md5(open(sys.argv[1], "rb").read()).hexdigest())' "$t/a.img")
+  out=$(drive 90 "busybox shell" 'md5sum /dev/vda /dev/vdb; dd if=/dev/urandom of=/dev/vda bs=65536 count=16 oflag=direct 2>/dev/null; sync; echo NC-$(dd if=/dev/vda bs=65536 count=16 2>/dev/null | md5sum | cut -c1-12)-DONE\n' "-DONE" 'poweroff -f\n' -- \
+    ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/a.img:nocache,$t/b.img:ro:nocache" --cmdline "console=ttyAMA0 quiet" 2>&1 | tr -d '\r')
+  host=$(head -c 1048576 "$t/a.img" | python3 -c 'import hashlib,sys; print(hashlib.md5(sys.stdin.buffer.read()).hexdigest()[:12])')
+  [ "$(grep -c "^$want  /dev/vd" <<<"$out")" = 2 ] && grep -aq "^NC-$host-DONE" <<<"$out" && grn "ok: :nocache disks read and write as any (one also :ro)" || { red "failed: :nocache disks"; grep -a "vd\|NC-" <<<"$out" | tail -3; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 8c. discard (TRIM): what the guest frees, the host frees"
   # 16 MiB written into a sparse 64 MiB image, then blkdiscard of it: the
   # image's blocks go back to the host, the range reads as zeros, and the

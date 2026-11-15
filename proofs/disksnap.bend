@@ -45,3 +45,6 @@ def L.disksnap.folder():
 
 def L.disksnap.folder_save():
   {==}
+
+def L.disksnap.writable_nocache():
+  {==}

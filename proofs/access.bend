@@ -28,3 +28,15 @@ def L.access.reader():
 
 def L.access.backing():
   {==}
+
+def L.access.spec_plain():
+  {==}
+
+def L.access.spec_both():
+  {==}
+
+def L.access.spec_suffixes():
+  {==}
+
+def L.access.flags_nocache():
+  {==}

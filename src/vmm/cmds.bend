@@ -1,4 +1,5 @@
 import Base
+import ../disk/access.bend as Ac
 
 # bend-vmm's commands (laws/cmds.bend): the subcommands a user types, and a
 # VM folder's configuration. Pure: which command a command line is, which
@@ -134,8 +135,7 @@ def Conf.path(+dir: String, +p: String) -> String:
   Bool.pick(String, String.is_empty(p) || String.starts_with(p, "/"), p, dir ++ "/" ++ p)
 
 def Conf.disk1(+dir: String, +spec: String) -> String:
-  Bool.pick(String, String.ends_with(spec, ":ro"),
-    Conf.path(dir, String.take(spec, Nat.sub(String.length(spec), 3n))) ++ ":ro", Conf.path(dir, spec))
+  Conf.path(dir, Ac.Access.spec_path(spec)) ++ Ac.Access.suffixes(spec)
 
 def Conf.disks(+dir: String, specs: List<&2, String>) -> List<&2, String>:
   match specs:

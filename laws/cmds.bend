@@ -44,3 +44,7 @@ law cmds.conf_roundtrip:
 # snapshot's.
 law cmds.for_restore:
   {C.Conf.for_restore(["--kernel", "k", "--disk", "d.img", "--mem", "1", "--forward", "8080:80"]) == ["--disk", "d.img", "--forward", "8080:80"] : List<&2, String>}
+
+# vm.conf keeps a disk's options after its folder-relative path.
+law cmds.conf_disk_options:
+  {C.Conf.flags("web", "--disk a.img:nocache,b.img:ro") == ["--disk", "web/a.img:nocache,web/b.img:ro"] : List<&2, String>}

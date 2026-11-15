@@ -31,3 +31,17 @@ law access.reader:
 
 law access.backing:
   {A.Access.flags(A.Backing{}) == 5 : U32}
+
+# Proposed: a --disk entry's options as suffixes, in any order, each once.
+law access.spec_plain:
+  {A.Access.spec("a.img") == A.Spec{"a.img", False{}, False{}} : A.Spec}
+
+law access.spec_both:
+  {A.Access.spec("d/a.img:nocache:ro") == A.Spec{"d/a.img", True{}, True{}} : A.Spec}
+
+law access.spec_suffixes:
+  {A.Access.suffixes("a.img:ro:nocache") == ":ro:nocache" : String}
+
+# :nocache adds 8 to the open flags.
+law access.flags_nocache:
+  {A.Access.flags_of(A.Writer{}, True{}) == 10 : U32}

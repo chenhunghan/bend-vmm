@@ -1414,29 +1414,27 @@ def path_under(+dir: String, +name: String) -> String:
     +head : +List<U32> <- H.Host.disk_read(id, U.U64.zero(), 512)
     devices.format(Qc.Qcow.parse(head), ro, path, id, head)
 
-# A :ro image is opened (and locked) only for reading (src/disk/access.bend).
-@unsafe def devices.open_as(ro: Bool, path: String) -> IO(U32):
-  H.Hvf.disk_open_with(path, Acc.Access.flags(Acc.Access.use(ro)))
-
 # An image the host would not open for writing (src/disk/access.bend says
 # which refusals) is attached read-only, and said so.
-@unsafe def devices.retry(again: Bool, ro: Bool, +path: String, +id: U32) -> IO(D.DevKind):
+@unsafe def devices.retry(again: Bool, ro: Bool, +nc: Bool, +path: String, +id: U32) -> IO(D.DevKind):
   match again:
     case True{}:
       do IO<D.DevKind>:
         log_err("bend-vmm: " ++ path ++ " cannot be written: attached read-only")
-        rid : U32 <- H.Hvf.disk_open_with(path, Acc.Access.flags(Acc.Reader{}))
+        rid : U32 <- H.Hvf.disk_open_with(path, Acc.Access.flags_of(Acc.Reader{}, nc))
         devices.open(True{}, path, rid)
     case False{}:
       devices.open(ro, path, id)
 
+# (src/disk/access.bend reads the entry: its path, :ro, :nocache)
 @unsafe def devices.one(+spec: String) -> IO(D.DevKind):
-  +ro = String.ends_with(spec, ":ro")
-  +path : String = Bool.pick(String, ro, String.take(spec, Nat.sub(String.length(spec), 3n)), spec)
+  +ro = Acc.Access.spec_ro(spec)
+  +nc = Acc.Access.spec_nocache(spec)
+  +path : String = Acc.Access.spec_path(spec)
   do IO<D.DevKind>:
-    +id : U32 <- devices.open_as(ro, path)
+    +id : U32 <- H.Hvf.disk_open_with(path, Acc.Access.flags_of(Acc.Access.use(ro), nc))
     +e : U32 <- H.Hvf.disk_err()
-    devices.retry(Bool.not(ro) && U32.is_eq(id, err()) && Acc.Access.fallback(e), ro, path, id)
+    devices.retry(Bool.not(ro) && U32.is_eq(id, err()) && Acc.Access.fallback(e), ro, nc, path, id)
 
 # --disk a.img,b.img:ro gives one virtio-blk per image, in order.
 @unsafe def devices.disks(specs: List<&2, String>) -> IO(+List<D.DevKind>):
@@ -2052,7 +2050,7 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
 def usage() -> String:
   String.join([
     "usage: bend-vmm --kernel Image [--initrd FILE] [--cmdline \"...\"] [--mem MiB] [--cpus N]",
-    "                [--disk IMG[:ro],...] [--share DIR] [--vsock PATH] [--control PATH]",
+    "                [--disk IMG[:ro][:nocache],...] [--share DIR] [--vsock PATH] [--control PATH]",
     "                [--display WxH[,headless]] [--forward [ADDR:]HOSTPORT:GUESTPORT,...]",
     "                [--lan DIR,ip=A.B.C.D/N[,mac=xx:xx:xx:xx:xx:xx]] [--share DIR,quota=SIZE]",
     "                [--console-log PATH,max=SIZE[,keep=N]] [--balloon off]",
