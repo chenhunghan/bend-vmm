@@ -86,7 +86,7 @@ Options:
 | `--cmdline "…"` | kernel command line (default `console=ttyAMA0 earlycon=pl011,0x9000000`) |
 | `--mem MiB` | guest RAM (default 512) |
 | `--cpus N` | vCPUs (default 1) |
-| `--disk A[,B:ro…]` | disk images (raw, or qcow2 by its header) as virtio-blk (`/dev/vda`, `/dev/vdb`, …); `:ro` attaches one read-only, and so is an image you may not write (said on stderr); `:nocache` (with `:ro` or alone, any order) keeps the image's blocks out of the host's page cache, since the guest caches them already (macOS `F_NOCACHE`; no effect on Linux yet) |
+| `--disk A[,B:ro…]` | disk images (raw, or qcow2 by its header) as virtio-blk (`/dev/vda`, `/dev/vdb`, …); `:ro` attaches one read-only, and so is an image you may not write (said on stderr); `:nocache` (with `:ro` or alone, any order) keeps the image's blocks out of the host's page cache, since the guest caches them already (macOS `F_NOCACHE`; Linux `O_DIRECT` for the guest's aligned transfers) |
 | `--share DIR[,quota=SIZE]` | a host directory over virtio-9p (`mount -t 9p -o trans=virtio,version=9p2000.L share /mnt`); with a quota (bytes, or K, M, G) the guest's writes past it fail with ENOSPC (its files' sizes are counted, approximately) |
 | `--console-log PATH,max=SIZE[,keep=N]` | the guest's console goes to PATH instead of stdout and rotates at about SIZE (PATH.1 … PATH.N, N 1 by default), so a guest cannot fill the host's disk with it |
 | `--payload FILE` | a bare-metal binary entered at the start of RAM |
@@ -224,7 +224,9 @@ bend-vmm run                          # runs the VM here (control socket: contro
 
 bend-vmm snapshot before-upgrade      # (another terminal) memory and disks, now
 bend-vmm snapshot --note "it works"   # named by the time: 2026-11-11-081052
-bend-vmm snapshots                    # oldest first, with sizes and parents
+bend-vmm snapshots                    # oldest first, with parents and sizes: what
+                                      # each holds on its own (disk copies share
+                                      # blocks with the disk until it changes)
 bend-vmm restore before-upgrade       # saves the current state first, stops the VM,
                                       # runs from the snapshot (memory and disks)
 bend-vmm restore before-restore-2026-11-11-081530   # ... which undoes it

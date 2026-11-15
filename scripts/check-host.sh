@@ -474,10 +474,28 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   t=$(mktemp -d)
   head -c 8388608 /dev/urandom > "$t/a.img"; cp "$t/a.img" "$t/b.img"
   want=$(python3 -c 'import hashlib, sys; print(hashlib.md5(open(sys.argv[1], "rb").read()).hexdigest())' "$t/a.img")
+  # Linux: b.img out of the page cache first, to see that the guest's reads
+  # (O_DIRECT) leave it out
+  # (resident: the bytes of a file in the page cache, by mincore)
+  resident() { python3 -c 'import ctypes, mmap, os, sys
+f = open(sys.argv[1], "rb"); n = os.fstat(f.fileno()).st_size; pg = mmap.PAGESIZE
+m = mmap.mmap(f.fileno(), n, access=mmap.ACCESS_COPY); v = (ctypes.c_ubyte * ((n + pg - 1) // pg))()
+libc = ctypes.CDLL(None); libc.mincore.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+ok = libc.mincore(ctypes.addressof(ctypes.c_char.from_buffer(m)), n, v) == 0
+print(pg * sum(1 for x in v if x & 1) if ok else -1)' "$1"; }
+  lin=0; [ "$(uname)" = Linux ] && lin=1
+  [ $lin = 1 ] && { sync; python3 -c 'import os, sys; fd = os.open(sys.argv[1], os.O_RDONLY); os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)' "$t/b.img"; }
   out=$(drive 90 "busybox shell" 'md5sum /dev/vda /dev/vdb; dd if=/dev/urandom of=/dev/vda bs=65536 count=16 oflag=direct 2>/dev/null; sync; echo NC-$(dd if=/dev/vda bs=65536 count=16 2>/dev/null | md5sum | cut -c1-12)-DONE\n' "-DONE" 'poweroff -f\n' -- \
     ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/a.img:nocache,$t/b.img:ro:nocache" --cmdline "console=ttyAMA0 quiet" 2>&1 | tr -d '\r')
   host=$(head -c 1048576 "$t/a.img" | python3 -c 'import hashlib,sys; print(hashlib.md5(sys.stdin.buffer.read()).hexdigest()[:12])')
   [ "$(grep -c "^$want  /dev/vd" <<<"$out")" = 2 ] && grep -aq "^NC-$host-DONE" <<<"$out" && grn "ok: :nocache disks read and write as any (one also :ro)" || { red "failed: :nocache disks"; grep -a "vd\|NC-" <<<"$out" | tail -3; fail=1; }
+  if [ $lin = 1 ]; then
+    if grep -aq 'no O_DIRECT here' <<<"$out"; then echo "skipped: this file system has no O_DIRECT ($(df --output=fstype "$t" | tail -1))"
+    else
+      cached=$(resident "$t/b.img" 2>/dev/null)
+      [ "${cached:-999999999}" -le 65536 ] && grn "ok: :nocache on Linux: the 8 MiB the guest read left $cached bytes in the host page cache" || { red "failed: :nocache on Linux left $cached bytes of b.img in the page cache"; fail=1; }
+    fi
+  fi
   rm -rf "$t"
 fi
 

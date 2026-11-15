@@ -1795,6 +1795,9 @@ Term hvf_stdin_wait_run(Env e, Term* f, IoWork* w) {
 
 #define HVF_MAX_DISKS 8
 static int hvf_disks[HVF_MAX_DISKS];
+// Linux :nocache: the same image opened O_DIRECT (its fd + 1; 0: none), for
+// the guest's aligned transfers (hvf_disk_copy_run)
+static int hvf_disks_direct[HVF_MAX_DISKS];
 static int hvf_ndisks;
 
 // Opens a disk image as src/disk/access.bend says for its use (flags:
@@ -1828,20 +1831,31 @@ static Term hvf_disk_open_as(Env e, Term path_t, u32 flags) {
     close(fd);
     fd = -1;
   }
+  int dfd = -1;
+#ifndef __APPLE__
+  // :nocache (Access.flags_of, 8) on Linux: a second open with O_DIRECT,
+  // which the guest's aligned transfers take (the rest, and the image's
+  // own metadata, go through fd); a file system without O_DIRECT (tmpfs
+  // before 6.6) keeps the cache
+  if (fd >= 0 && nocache) {
+    dfd = open(path, (ro ? O_RDONLY : O_RDWR) | O_CLOEXEC | O_DIRECT);
+    if (dfd < 0) {
+      fprintf(stderr, "bend-vmm: %s: no O_DIRECT here (%s): :nocache has no effect\n", path, strerror(errno));
+    }
+  }
+#endif
   free(path);
   if (fd < 0) {
     return (Term)HVF_ERR;
   }
 #ifdef __APPLE__
   // :nocache (Access.flags_of, 8): the image's blocks skip the host's
-  // unified buffer cache. (Linux: no effect; O_DIRECT would need every
-  // buffer aligned.)
+  // unified buffer cache (aligned transfers; the rest go through it)
   if (nocache) {
     fcntl(fd, F_NOCACHE, 1);
   }
-#else
-  (void)nocache;
 #endif
+  hvf_disks_direct[hvf_ndisks] = dfd + 1;
   hvf_disks[hvf_ndisks] = fd;
   return (Term)(u32)hvf_ndisks++;
 }
@@ -2054,14 +2068,28 @@ Term hvf_disk_copy_run(Env e, Term* f, IoWork* w) {
   int     err = fd < 0 ? EBADF : EINVAL;
   if (fd >= 0 && n >= 0) {
     struct iovec v[HVF_MAX_IOVS];
-    u64          want = 0, cap = hvf_short_cap(), cap0 = cap;
+    u64          want = 0, cap = hvf_short_cap(), cap0 = cap, mis = (u64)off;
     for (int i = 0; i < n; i++) {
       v[i].iov_base = hva[i];
       v[i].iov_len  = len[i] < cap ? len[i] : cap;
       cap -= v[i].iov_len;
       want += len[i];
+      mis |= (u64)(uintptr_t)hva[i] | len[i];
     }
-    k   = cap0 == 0 && (errno = EINTR) ? -1 : out ? pwritev(fd, v, n, off) : preadv(fd, v, n, off);
+    // a :nocache image on Linux: an aligned transfer skips the page cache
+    // (O_DIRECT); one it refuses goes through the cache
+    u32 di  = (u32)f[0];
+    int dfd = di < (u32)hvf_ndisks && cap == cap0 - want && (mis & 4095) == 0 ? hvf_disks_direct[di] - 1 : -1;
+    k       = -1;
+    errno   = EINVAL;
+    if (dfd >= 0 && cap0 != 0) {
+      do {
+        k = out ? pwritev(dfd, v, n, off) : preadv(dfd, v, n, off);
+      } while (k < 0 && errno == EINTR);
+    }
+    if (k < 0 && errno == EINVAL) {
+      k = cap0 == 0 && (errno = EINTR) ? -1 : out ? pwritev(fd, v, n, off) : preadv(fd, v, n, off);
+    }
     err = errno;
     if (k >= 0 && (u64)k == want) {
       return (Term)0;
@@ -5404,13 +5432,84 @@ Term hvf_rmdir_run(Env e, Term* f, IoWork* w) {
   return (Term)(u32)err;
 }
 
-// Hvf.size_kib(path) -> U32: the KiB a file takes on the host's disk (its
-// allocated blocks: a sparse file counts what it holds), 0 when none.
+// Hvf.size_kib(path) -> U32: the KiB a file holds on the host's disk on its
+// own: its allocated blocks (a sparse file counts what it holds) less those
+// it shares with a clone (a snapshot's disk copy, cloned copy-on-write,
+// shares nearly all of its disk's blocks at first), 0 when none. Where the
+// file system cannot say what is shared, all its blocks.
+#ifdef __APPLE__
+#include <sys/attr.h>
+static int hvf_own_bytes(const char* path, u64* out) {
+  struct attrlist al;
+  memset(&al, 0, sizeof al);
+  al.bitmapcount = ATTR_BIT_MAP_COUNT;
+  al.forkattr    = ATTR_CMNEXT_PRIVATESIZE;
+  struct {
+    uint32_t len;
+    off_t    priv;
+  } __attribute__((packed)) b;
+  if (getattrlist(path, &al, &b, sizeof b, FSOPT_ATTR_CMN_EXTENDED | FSOPT_NOFOLLOW) != 0 || b.len < sizeof b) {
+    return -1;
+  }
+  *out = b.priv > 0 ? (u64)b.priv : 0;
+  return 0;
+}
+#else
+#include <linux/fiemap.h>
+static int hvf_own_bytes(const char* path, u64* out) {
+  int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0) {
+    return -1;
+  }
+  enum { N = 256 };
+  static union {
+    struct fiemap m;
+    char          b[sizeof(struct fiemap) + N * sizeof(struct fiemap_extent)];
+  } u;
+  u64 at = 0, own = 0;
+  int ok = 0;
+  for (;;) {
+    memset(&u.m, 0, sizeof u.m);
+    u.m.fm_start        = at;
+    u.m.fm_length       = ~0ULL - at;
+    u.m.fm_flags        = FIEMAP_FLAG_SYNC;
+    u.m.fm_extent_count = N;
+    if (ioctl(fd, FS_IOC_FIEMAP, &u.m) != 0) {
+      break;
+    }
+    int last = u.m.fm_mapped_extents == 0;
+    for (u32 i = 0; i < u.m.fm_mapped_extents; i++) {
+      struct fiemap_extent* x = &u.m.fm_extents[i];
+      if (!(x->fe_flags & FIEMAP_EXTENT_SHARED)) {
+        own += x->fe_length;
+      }
+      at   = x->fe_logical + x->fe_length;
+      last = last || (x->fe_flags & FIEMAP_EXTENT_LAST);
+    }
+    if (last) {
+      ok = 1;
+      break;
+    }
+  }
+  close(fd);
+  if (!ok) {
+    return -1;
+  }
+  *out = own;
+  return 0;
+}
+#endif
 Term hvf_size_kib_run(Env e, Term* f, IoWork* w) {
   u64         n;
   char*       path = io_cstr(e, f[0], &n);
   struct stat st;
-  u64         k = lstat(path, &st) == 0 ? (u64)st.st_blocks / 2 : 0;
+  u64         k = 0, own;
+  if (lstat(path, &st) == 0) {
+    k = (u64)st.st_blocks / 2;
+    if (S_ISREG(st.st_mode) && hvf_own_bytes(path, &own) == 0 && own / 1024 < k) {
+      k = (own + 1023) / 1024;
+    }
+  }
   free(path);
   return (Term)(u32)(k > 0xffffffffu ? 0xffffffffu : k);
 }

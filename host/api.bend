@@ -249,15 +249,38 @@ def Api.rm_dir(+dir: String) -> IO(U32):
     Api.rm_files(xs, dir)
     H.Hvf.rmdir(dir)
 
+# The KiB a snapshot's disk copies hold on their own (Hvf.size_kib: blocks
+# not shared with the disk they were cloned from, nor other copies).
+def Api.disk_kib(xs: List<String>, +dir: String) -> IO(U32):
+  match xs:
+    case Nil{}:
+      IO.pure(U32, 0)
+    case Con{+x, rest}:
+      do IO<U32>:
+        +k : U32 <- Bool.pick(IO(U32), String.starts_with(x, "disk"), H.Hvf.size_kib(dir ++ "/" ++ x), IO.pure(U32, 0))
+        +more : U32 <- Api.disk_kib(rest, dir)
+        return (k + more : U32)
+
+# A snapshot's info with what its disks hold now: a copy cloned from the
+# disk shares nearly all of it at first and takes more as the disk moves on
+# (the space removing the snapshot gives back).
+def Api.info.now(i: Sd.Info, +dk: U32) -> Sd.Info:
+  match i:
+    case Sd.Info{n, t, p, m, d, note}:
+      Sd.Info{n, t, p, m, dk, note}
+
 def Api.infos(ns: List<&2, String>, +dir: String) -> IO(List<&2, Sd.Info>):
   match ns:
     case Nil{}:
       IO.pure(List<&2, Sd.Info>, [])
-    case Con{n, rest}:
+    case Con{+n, rest}:
       do IO<List<&2, Sd.Info>>:
-        +text : String <- Api.read(Sd.Sdir.info(Sd.Sdir.dir(dir, n)))
+        +sd : String = Sd.Sdir.dir(dir, n)
+        +text : String <- Api.read(Sd.Sdir.info(sd))
+        xs : List<String> <- H.Hvf.ls(sd)
+        +dk : U32 <- Api.disk_kib(xs, sd)
         more : List<&2, Sd.Info> <- Api.infos(rest, dir)
-        return Con{Sd.Sdir.info.parse(text), more}
+        return Con{Api.info.now(Sd.Sdir.info.parse(text), dk), more}
 
 def Api.no_dir() -> Err:
   EFailed{"snapshots need a VM folder (for a socket: bend-vmm ctl SOCKET snapshot PATH)"}
@@ -365,16 +388,6 @@ def Api.stopped(e: Err) -> Bool:
       True{}
     case _:
       False{}
-
-def Api.disk_kib(xs: List<String>, +dir: String) -> IO(U32):
-  match xs:
-    case Nil{}:
-      IO.pure(U32, 0)
-    case Con{+x, rest}:
-      do IO<U32>:
-        +k : U32 <- Bool.pick(IO(U32), String.starts_with(x, "disk"), H.Hvf.size_kib(dir ++ "/" ++ x), IO.pure(U32, 0))
-        +more : U32 <- Api.disk_kib(rest, dir)
-        return (k + more : U32)
 
 def Api.snap.renamed(+rc: U32, +info: Sd.Info, +dst: String) -> Result<&1, &1, Err, Sd.Info>:
   Bool.pick(Result<&1, &1, Err, Sd.Info>, U32.is_eq(rc, 0), Done{info}, Fail{EFailed{"cannot place " ++ dst ++ " (" ++ U32.show(rc) ++ ")"}})
