@@ -156,6 +156,78 @@ def Machine.irqs.at(-R: Type, +now: U32, m: Machine) -> V.Op<R, Machine>:
         ri : Bool <- Machine.line(R, L.Layout.rtc_intid(), ri, Rtc.Pl031.irq(rt, now))
         return Machine{p, u, ui, devs, lines, rt, ri, nt, fl}
 
+# The line of virtio device k only: the old level at k, the device's, one
+# raise or lower when they differ, the level recorded at k (the others
+# untouched, without a step each).
+def Machine.nth_dev_irq(devs: +List<D.Dev>, k: Nat) -> Bool:
+  match devs k:
+    case Nil{} _:
+      False{}
+    case d <> t 0n:
+      D.Dev.irq(d)
+    case d <> t 1n+i:
+      Machine.nth_dev_irq(t, i)
+
+def Machine.nth_line(lines: +List<Bool>, k: Nat) -> Bool:
+  match lines k:
+    case Nil{} _:
+      False{}
+    case l <> t 0n:
+      l
+    case l <> t 1n+i:
+      Machine.nth_line(t, i)
+
+def Machine.set_line(lines: +List<Bool>, k: Nat, +v: Bool) -> +List<Bool>:
+  match lines k:
+    case Nil{} _:
+      []
+    case l <> t 0n:
+      v <> t
+    case l <> t 1n+i:
+      l <> Machine.set_line(t, i, v)
+
+def Machine.line_at(-R: Type, +k: Nat, m: Machine) -> V.Op<R, Machine>:
+  match m:
+    case Machine{p, u, ui, +devs, +lines, rt, ri, nt, fl}:
+      do V.Op<R, Machine>:
+        l : Bool <- Machine.line(R, L.Layout.virtio_intid(U32.from_nat(k)), Machine.nth_line(lines, k), Machine.nth_dev_irq(devs, k))
+        return Machine{p, u, ui, devs, Machine.set_line(lines, k, l), rt, ri, nt, fl}
+
+# The slot of the first net device (the NAT's), or none (the list's length).
+def Machine.net_slot(devs: +List<D.Dev>, +i: Nat) -> Nat:
+  match devs:
+    case Nil{}:
+      i
+    case Con{d, t}:
+      match d:
+        case D.Dev{+k, mm, qs, st}:
+          Bool.pick(Nat, D.Dev.is_net(k), i, Machine.net_slot(t, 1n+i))
+
+def Machine.devs_of(m: Machine) -> +List<D.Dev>:
+  match m:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      devs
+
+# The RTC's line only, at time now.
+def Machine.rtc_line(-R: Type, +now: U32, m: Machine) -> V.Op<R, Machine>:
+  match m:
+    case Machine{p, u, ui, devs, lines, +rt, ri, nt, fl}:
+      do V.Op<R, Machine>:
+        ri : Bool <- Machine.line(R, L.Layout.rtc_intid(), ri, Rtc.Pl031.irq(rt, now))
+        return Machine{p, u, ui, devs, lines, rt, ri, nt, fl}
+
+# The UART's and the RTC's lines only: after an access to the UART or the
+# RTC, which
+# leaves every virtio device as it was, so their lines cannot change (the
+# virtio pass of Machine.irqs.at costs a step per device on every exit).
+def Machine.irqs_uart.at(-R: Type, +now: U32, m: Machine) -> V.Op<R, Machine>:
+  match m:
+    case Machine{p, +u, ui, devs, lines, +rt, ri, nt, fl}:
+      do V.Op<R, Machine>:
+        ui : Bool <- Machine.line(R, L.Layout.uart_intid(), ui, Uart.Pl011.irq(u))
+        ri : Bool <- Machine.line(R, L.Layout.rtc_intid(), ri, Rtc.Pl031.irq(rt, now))
+        return Machine{p, u, ui, devs, lines, rt, ri, nt, fl}
+
 # Whether the RTC's alarm interrupt is unmasked (IMSC bit 0): only then does
 # its line depend on the time.
 def Machine.alarm_armed(m: Machine) -> Bool:
@@ -177,6 +249,47 @@ def Machine.irqs.go(-R: Type, armed: Bool, m: Machine) -> V.Op<R, Machine>:
 # which keeps a host clock call off every exit).
 def Machine.irqs(-R: Type, +m: Machine) -> V.Op<R, Machine>:
   Machine.irqs.go(R, Machine.alarm_armed(m), m)
+
+def Machine.irqs_uart.go(-R: Type, armed: Bool, m: Machine) -> V.Op<R, Machine>:
+  match armed:
+    case True{}:
+      do V.Op<R, Machine>:
+        t : U.U64 <- V.Op.now(R)
+        Machine.irqs_uart.at(R, U.U64.lo(t), m)
+    case False{}:
+      Machine.irqs_uart.at(R, 0, m)
+
+def Machine.irqs_uart(-R: Type, +m: Machine) -> V.Op<R, Machine>:
+  Machine.irqs_uart.go(R, Machine.alarm_armed(m), m)
+
+# After a write to virtio device k: only its line and the net device's can
+# change (the frames it sent go through the NAT, whose answers go to the net
+# device; console bytes, vsock commands and LAN frames go to the host),
+# and the RTC's when its alarm is armed (time passes).
+def Machine.virtio_lines.rtc(-R: Type, armed: Bool, m: Machine) -> V.Op<R, Machine>:
+  match armed:
+    case True{}:
+      do V.Op<R, Machine>:
+        t : U.U64 <- V.Op.now(R)
+        Machine.rtc_line(R, U.U64.lo(t), m)
+    case False{}:
+      V.Op.pure(R, Machine, m)
+
+def Machine.virtio_lines(-R: Type, +k: Nat, +m: Machine) -> V.Op<R, Machine>:
+  +net = Machine.net_slot(Machine.devs_of(m), 0n)
+  do V.Op<R, Machine>:
+    m1 : Machine <- Machine.virtio_lines.rtc(R, Machine.alarm_armed(m), m)
+    +m2 : Machine <- Machine.line_at(R, k, m1)
+    Bool.pick(V.Op<R, Machine>, Nat.is_eq(net, k), V.Op.pure(R, Machine, m2), Machine.line_at(R, net, m2))
+
+# The lines after a write to device n: the UART's (n 0) changes no virtio
+# line; virtio device k's, its own and the net device's (Machine.virtio_lines).
+def Machine.write_lines(-R: Type, +n: Nat, +m: Machine) -> V.Op<R, Machine>:
+  match n:
+    case 0n:
+      Machine.irqs_uart(R, m)
+    case 1n+k:
+      Machine.virtio_lines(R, k, m)
 
 # Device access
 
@@ -408,7 +521,7 @@ def Machine.unmapped(write: Bool, m: Machine, ipa: U.U64, size: U32, +srt: U32) 
 def Machine.read_lines(-R: Type, lines: Bool, +m: Machine) -> V.Op<R, Machine>:
   match lines:
     case True{}:
-      Machine.irqs(R, m)
+      Machine.irqs_uart(R, m)
     case False{}:
       V.Op.pure(R, Machine, m)
 
@@ -427,7 +540,7 @@ def Machine.access(write: Bool, +n: Nat, m: Machine, off: U32, size: U32, srt: U
     case True{}:
       do V.Op<Step, Step>:
         m : Machine <- Machine.dev_write(Step, n, m, off, U.U64.lo(value))
-        m : Machine <- Machine.irqs(Step, m)
+        m : Machine <- Machine.write_lines(Step, n, m)
         V.Op.advance_pc(Step)
         return Step{m, Run{}}
     case False{}:
@@ -464,7 +577,7 @@ def Machine.rtc_loaded(r: Machine & U32, +size: U32, srt: U32, sse: Bool, sf: Bo
     case (m, v):
       do V.Op<Step, Step>:
         Machine.put_reg(Step, srt, Machine.extend(v, size, sse, sf))
-        m : Machine <- Machine.irqs.at(Step, now, m)
+        m : Machine <- Machine.irqs_uart.at(Step, now, m)
         V.Op.advance_pc(Step)
         return Step{m, Run{}}
 
@@ -473,7 +586,7 @@ def Machine.rtc_access(write: Bool, m: Machine, off: U32, size: U32, srt: U32, v
   match write:
     case True{}:
       do V.Op<Step, Step>:
-        m : Machine <- Machine.irqs.at(Step, now, Machine.rtc_write(m, off, U.U64.lo(value), now))
+        m : Machine <- Machine.irqs_uart.at(Step, now, Machine.rtc_write(m, off, U.U64.lo(value), now))
         V.Op.advance_pc(Step)
         return Step{m, Run{}}
     case False{}:
