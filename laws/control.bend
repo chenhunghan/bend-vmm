@@ -106,3 +106,7 @@ law control.balloon_pages:
 
 law control.status_json_balloon:
   {C.Ctl.status_json_balloon(False{}, 262144, 131072) == "{\"state\":\"running\",\"balloon\":{\"target_mib\":1024,\"actual_mib\":512}}" : String}
+
+# Proposed: balloon auto hands the target back to the automatic balloon.
+law control.balloon_auto:
+  {C.Ctl.parse("balloon auto") == C.CBalloonAuto{} : C.Cmd}

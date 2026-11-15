@@ -81,7 +81,7 @@ type DevKind is Data:
   # address its DHCP answers give (ip 0: none) with its prefix length.
   LanKind{mac: +List<U32>, ip: U32, prefix: U32}
   # virtio-balloon with free page reporting (src/virtio/balloon.bend).
-  BalloonKind{}
+  BalloonKind{auto: Bool}
 
 # The per-kind state of a device.
 type DevState is Data:
@@ -95,7 +95,7 @@ type DevState is Data:
   InDev{input: In.InputState}
   LanDev{lan: Ln.Lan}
   # The balloon's target, count and partly inflated blocks.
-  BalDev{bal: Bl.Bal}
+  BalDev{bal: Bl.Bal, auto: Bl.AutoSt}
 
 type Dev is Data:
   Dev{kind: DevKind, mmio: M.VirtioMmio, queues: +List<Q.Vq>, state: DevState}
@@ -119,7 +119,7 @@ def Dev.mmio(kind: DevKind) -> M.VirtioMmio:
     case RngKind{}:
       M.VirtioMmio.new(4, Dev.features(), 1n, 256, [])
     case BlkKind{disk, sectors}:
-      M.VirtioMmio.new(2, Blk.Blk.offered_dis(False{}), 1n, 256, Blk.Blk.config_dis(sectors))
+      M.VirtioMmio.new(2, Blk.Blk.offered_wz(False{}), 1n, 256, Blk.Blk.config_wz(sectors))
     case BlkRoKind{disk, sectors}:
       M.VirtioMmio.new(2, Blk.Blk.offered(True{}), 1n, 256, Blk.Blk.config_limits(sectors))
     case BlkStoreKind{store, sectors, +ro}:
@@ -136,8 +136,9 @@ def Dev.mmio(kind: DevKind) -> M.VirtioMmio:
       M.VirtioMmio.new(18, Dev.features(), 2n, 256, In.Input.config(tablet, 0, 0))
     case LanKind{mac, ip, prefix}:
       M.VirtioMmio.new(1, Ln.Lan.features(), 2n, 256, Ln.Lan.config(mac))
-    case BalloonKind{}:
-      M.VirtioMmio.new(5, Bl.Balloon.offered(), Bl.Balloon.queues(), 256, Bl.Balloon.config())
+    case BalloonKind{+auto}:
+      Bool.pick(M.VirtioMmio, auto, M.VirtioMmio.new(5, Bl.Balloon.offered_auto(), Bl.Balloon.queues_auto(), 256, Bl.Balloon.config()),
+        M.VirtioMmio.new(5, Bl.Balloon.offered(), Bl.Balloon.queues(), 256, Bl.Balloon.config()))
 
 # The state of a fresh device of the given kind.
 def Dev.state(kind: DevKind) -> DevState:
@@ -162,8 +163,8 @@ def Dev.state(kind: DevKind) -> DevState:
       InDev{In.InputState.new()}
     case LanKind{mac, ip, prefix}:
       LanDev{Ln.Lan.new(mac, ip, prefix)}
-    case BalloonKind{}:
-      BalDev{Bl.Balloon.new()}
+    case BalloonKind{auto}:
+      BalDev{Bl.Balloon.new(), Bl.Balloon.auto_new()}
 
 def Dev.new(kind: DevKind) -> Dev:
   +kind = kind
@@ -241,7 +242,7 @@ def Dev.process(-R: Type, k: DevKind, q: Q.Vq) -> V.Op<R, Q.Vq & Bool>:
       V.Op.pure(R, Q.Vq & Bool, (q, False{}))
     case LanKind{mac, ip, prefix}:
       V.Op.pure(R, Q.Vq & Bool, (q, False{}))
-    case BalloonKind{}:
+    case BalloonKind{auto}:
       V.Op.pure(R, Q.Vq & Bool, (q, False{}))
 
 # The pending console input of a state (none for other kinds).
@@ -261,7 +262,7 @@ def Dev.input_of(st: DevState) -> +List<U32>:
       []
     case LanDev{l}:
       []
-    case BalDev{b}:
+    case BalDev{b, a}:
       []
 
 # The pending frames of a state (none for other kinds).
@@ -281,7 +282,7 @@ def Dev.frames_of(st: DevState) -> +List<+List<U32>>:
       []
     case LanDev{l}:
       []
-    case BalDev{b}:
+    case BalDev{b, a}:
       []
 
 # The 9p server state of a state (a fresh one for other kinds).
@@ -301,7 +302,7 @@ def Dev.p9_of(st: DevState) -> P.P9State:
       P.P9State.new()
     case LanDev{l}:
       P.P9State.new()
-    case BalDev{b}:
+    case BalDev{b, a}:
       P.P9State.new()
 
 # The last Dev.max_frames() frames.
@@ -384,7 +385,7 @@ def Dev.vs_of(st: DevState) -> Vs.Vsock:
       Vs.Vsock.new(U.U64{0, 3})
     case LanDev{l}:
       Vs.Vsock.new(U.U64{0, 3})
-    case BalDev{b}:
+    case BalDev{b, a}:
       Vs.Vsock.new(U.U64{0, 3})
 
 def Dev.pass.vs_tx(r: Vs.VsTx) -> Pass:
@@ -454,15 +455,38 @@ def Dev.lan_of(st: DevState) -> Ln.Lan:
 # The balloon's state (a fresh one for a snapshot taken before it had one).
 def Dev.bal_of(st: DevState) -> Bl.Bal:
   match st:
-    case BalDev{b}:
+    case BalDev{b, a}:
       b
     case _:
       Bl.Balloon.new()
 
-def Dev.pass.bal(r: Bl.BalPass) -> Pass:
+# The automatic balloon's state (a fresh one for a snapshot taken before it
+# had one).
+def Dev.auto_of(st: DevState) -> Bl.AutoSt:
+  match st:
+    case BalDev{b, a}:
+      a
+    case _:
+      Bl.Balloon.auto_new()
+
+def Dev.pass.bal(r: Bl.BalPass, a: Bl.AutoSt) -> Pass:
   match r:
     case Bl.BalPass{q, b, used}:
-      Pass{q, BalDev{b}, [], [], [], used}
+      Pass{q, BalDev{b, a}, [], [], [], used}
+
+def Dev.pass.stats(r: Bl.StatsPass) -> Pass:
+  match r:
+    case Bl.StatsPass{q, b, a}:
+      Pass{q, BalDev{b, a}, [], [], [], False{}}
+
+# The balloon's pass on its queue sel (the module's own numbering:
+# Bl.Balloon.logical).
+def Dev.pass.balloon(-R: Type, stats: Bool, +sel: U32, +st: DevState, q: Q.Vq) -> V.Op<R, Pass>:
+  match stats:
+    case True{}:
+      V.Op.bind(R, Bl.StatsPass, Pass, Bl.Balloon.stats_pass(R, Dev.bal_of(st), Dev.auto_of(st), q), r => V.Op.pure(R, Pass, Dev.pass.stats(r)))
+    case False{}:
+      V.Op.bind(R, Bl.BalPass, Pass, Bl.Balloon.pass(R, sel, Dev.bal_of(st), q), r => V.Op.pure(R, Pass, Dev.pass.bal(r, Dev.auto_of(st))))
 
 def Dev.pass.lan_tx(r: Ln.LanTx) -> Pass:
   match r:
@@ -504,10 +528,8 @@ def Dev.pass(-R: Type, k: DevKind, st: DevState, +sel: U32, q: Q.Vq) -> V.Op<R, 
       Dev.pass.input(R, U32.is_eq(sel, 0), st, q)
     case LanKind{mac, ip, prefix}:
       Dev.pass.lan(R, U32.is_eq(sel, 1), st, q)
-    case BalloonKind{}:
-      do V.Op<R, Pass>:
-        r : Bl.BalPass <- Bl.Balloon.pass(R, sel, Dev.bal_of(st), q)
-        return Dev.pass.bal(r)
+    case BalloonKind{auto}:
+      Dev.pass.balloon(R, U32.is_eq(sel, Bl.Balloon.stats_queue()), sel, st, q)
     case RngKind{}:
       do V.Op<R, Pass>:
         r : Q.Vq & Bool <- Dev.process(R, RngKind{}, q)
@@ -529,19 +551,38 @@ def Dev.pass(-R: Type, k: DevKind, st: DevState, +sel: U32, q: Q.Vq) -> V.Op<R, 
 def Dev.out(d: Dev) -> DevOut:
   DevOut{d, [], [], []}
 
+# A balloon whose target moved (the automatic balloon: Bl.Balloon.stats_pass)
+# tells the driver (config change interrupt).
+def Dev.bal_sync(+st: DevState, +m: M.VirtioMmio) -> M.VirtioMmio:
+  match st:
+    case BalDev{b, a}:
+      Bool.pick(M.VirtioMmio, U32.is_eq(Bl.Balloon.target(b), M.VirtioMmio.config_word(m)), m, M.VirtioMmio.config_changed(m, Bl.Balloon.config_of(b)))
+    case _:
+      m
+
 def Dev.notify.fin(k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, sel: U32, r: Pass) -> DevOut:
   match r:
-    case Pass{q, st, bs, fs, vc, used}:
-      DevOut{Dev{k, Dev.raise_if(used, m), Dev.qput(qs, 0, sel, q), st}, bs, fs, vc}
+    case Pass{q, +st, bs, fs, vc, used}:
+      DevOut{Dev{k, Dev.bal_sync(st, Dev.raise_if(used, m)), Dev.qput(qs, 0, sel, q), st}, bs, fs, vc}
+
+# The queue number a kind's pass takes: the balloon's own numbering
+# (Bl.Balloon.logical: it depends on whether the driver accepted the stats
+# queue, bit 1); others as the driver's.
+def Dev.sel_of(k: DevKind, +m: M.VirtioMmio, +sel: U32) -> U32:
+  match k:
+    case BalloonKind{auto}:
+      Bl.Balloon.logical(M.VirtioMmio.accepts(m, 2), sel)
+    case _:
+      sel
 
 # Runs the pass on queue sel when it exists.
-def Dev.notify(-R: Type, mq: Maybe<&2, Q.Vq>, +k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState, +sel: U32) -> V.Op<R, DevOut>:
+def Dev.notify(-R: Type, mq: Maybe<&2, Q.Vq>, +k: DevKind, +m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState, +sel: U32) -> V.Op<R, DevOut>:
   match mq:
     case None{}:
       V.Op.pure(R, DevOut, Dev.out(Dev{k, m, qs, st}))
     case Some{q}:
       do V.Op<R, DevOut>:
-        r : Pass <- Dev.pass(R, k, st, sel, q)
+        r : Pass <- Dev.pass(R, k, st, Dev.sel_of(k, m, sel), q)
         return Dev.notify.fin(k, m, qs, sel, r)
 
 # Acts on the event of a transport write.
@@ -665,7 +706,7 @@ def Dev.is_console(k: DevKind) -> Bool:
       False{}
     case LanKind{mac, ip, prefix}:
       False{}
-    case BalloonKind{}:
+    case BalloonKind{auto}:
       False{}
 
 def Dev.is_net(k: DevKind) -> Bool:
@@ -690,7 +731,7 @@ def Dev.is_net(k: DevKind) -> Bool:
       False{}
     case LanKind{mac, ip, prefix}:
       False{}
-    case BalloonKind{}:
+    case BalloonKind{auto}:
       False{}
 
 def Dev.input.go(-R: Type, console: Bool, k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState, bytes: +List<U32>) -> V.Op<R, Dev>:
@@ -822,25 +863,81 @@ def Dev.forget_lan(d: Dev) -> Dev:
 # The host sets the balloon's target (`balloon MiB` on the control socket):
 # a balloon device takes it (pages of 4 KiB) and tells the driver (config
 # change interrupt); other kinds are unchanged.
-def Dev.balloon.go(bal: Bool, +k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState, +pages: U32) -> Dev:
+def Dev.balloon.go(bal: Bool, +k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, +st: DevState, +pages: U32) -> Dev:
   match bal:
     case True{}:
       +b = Bl.Balloon.set_target(Dev.bal_of(st), pages)
-      Dev{k, M.VirtioMmio.config_changed(m, Bl.Balloon.config_of(b)), qs, BalDev{b}}
+      Dev{k, M.VirtioMmio.config_changed(m, Bl.Balloon.config_of(b)), qs, BalDev{b, Bl.Balloon.auto_manual(Dev.auto_of(st), True{})}}
     case False{}:
       Dev{k, m, qs, st}
 
 def Dev.is_balloon(k: DevKind) -> Bool:
   match k:
-    case BalloonKind{}:
+    case BalloonKind{auto}:
       True{}
     case _:
       False{}
+
+# Whether this is the automatic balloon (--balloon auto, the default).
+def Dev.auto_kind(k: DevKind) -> Bool:
+  match k:
+    case BalloonKind{auto}:
+      auto
+    case _:
+      False{}
+
+def Dev.is_auto_balloon(d: Dev) -> Bool:
+  match d:
+    case Dev{k, m, qs, st}:
+      Dev.auto_kind(k)
 
 def Dev.balloon(d: Dev, +pages: U32) -> Dev:
   match d:
     case Dev{+k, m, qs, st}:
       Dev.balloon.go(Dev.is_balloon(k), k, m, qs, st, pages)
+
+# `balloon auto`: the automatic balloon takes over again from a target set
+# by hand.
+def Dev.balloon_auto.go(bal: Bool, +k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, +st: DevState) -> Dev:
+  match bal:
+    case True{}:
+      Dev{k, m, qs, BalDev{Dev.bal_of(st), Bl.Balloon.auto_manual(Dev.auto_of(st), False{})}}
+    case False{}:
+      Dev{k, m, qs, st}
+
+def Dev.balloon_auto(d: Dev) -> Dev:
+  match d:
+    case Dev{+k, m, qs, st}:
+      Dev.balloon_auto.go(Dev.is_balloon(k), k, m, qs, st)
+
+# Asking the automatic balloon's driver for fresh statistics: a stats
+# buffer it posted and the device has not read yet is read first (the
+# driver posts its first one before DRIVER_OK, when there are no queues to
+# take it), then the one held goes back (Bl.Balloon.poll: on the driver's
+# queue 2, with a used-buffer interrupt). Only when the driver accepted the
+# stats queue: else its queue 2 reports free pages.
+def Dev.poll.fin(+k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, b: Bl.Bal, r: (Q.Vq & Bl.AutoSt) & Bool) -> Dev:
+  match r:
+    case ((q, a), used):
+      +st : DevState = BalDev{b, a}
+      Dev{k, Dev.bal_sync(st, Dev.raise_if(used, m)), Dev.qput(qs, 0, 2, q), st}
+
+def Dev.poll.held(-R: Type, +k: DevKind, m: M.VirtioMmio, +qs: +List<Q.Vq>, sp: Bl.StatsPass) -> V.Op<R, Dev>:
+  match sp:
+    case Bl.StatsPass{q, b, a}:
+      V.Op.bind(R, (Q.Vq & Bl.AutoSt) & Bool, Dev, Bl.Balloon.poll(R, a, q), r => V.Op.pure(R, Dev, Dev.poll.fin(k, m, qs, b, r)))
+
+def Dev.poll.go(-R: Type, mq: Maybe<&2, Q.Vq>, +k: DevKind, m: M.VirtioMmio, +qs: +List<Q.Vq>, +st: DevState) -> V.Op<R, Dev>:
+  match mq:
+    case None{}:
+      V.Op.pure(R, Dev, Dev{k, m, qs, st})
+    case Some{q}:
+      V.Op.bind(R, Bl.StatsPass, Dev, Bl.Balloon.stats_pass(R, Dev.bal_of(st), Dev.auto_of(st), q), sp => Dev.poll.held(R, k, m, qs, sp))
+
+def Dev.balloon_poll(-R: Type, d: Dev) -> V.Op<R, Dev>:
+  match d:
+    case Dev{+k, +m, +qs, st}:
+      Dev.poll.go(R, Bool.pick(Maybe<&2, Q.Vq>, Dev.auto_kind(k) && M.VirtioMmio.accepts(m, 2), Dev.qget(qs, 0, 2), None{}), k, m, qs, st)
 
 # The balloon's target and count (4 KiB pages), when this is the balloon.
 def Dev.balloon_info(d: Dev) -> Maybe<&2, Bl.Bal>:

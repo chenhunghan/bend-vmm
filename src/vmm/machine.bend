@@ -944,6 +944,56 @@ def Machine.balloon.go(-R: Type, m: Machine, +pages: U32) -> V.Op<R, Machine>:
 def Machine.balloon(m: Machine, +pages: U32) -> V.Vm<Machine>:
   V.Op.finish(Machine, Machine.balloon.go(Machine, m, pages))
 
+# `balloon auto` on the control socket: the automatic balloon takes over
+# again from a target set by hand.
+def Machine.devs_balloon_auto(devs: +List<D.Dev>) -> +List<D.Dev>:
+  match devs:
+    case Nil{}:
+      []
+    case d <> t:
+      D.Dev.balloon_auto(d) <> Machine.devs_balloon_auto(t)
+
+def Machine.balloon_auto(m: Machine) -> Machine:
+  match m:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      Machine{p, u, ui, Machine.devs_balloon_auto(devs), lines, rt, ri, nt, fl}
+
+# Whether the machine has the automatic balloon.
+def Machine.devs_auto(devs: +List<D.Dev>) -> Bool:
+  match devs:
+    case Nil{}:
+      False{}
+    case d <> t:
+      D.Dev.is_auto_balloon(d) || Machine.devs_auto(t)
+
+def Machine.auto_balloon(m: Machine) -> Bool:
+  match m:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      Machine.devs_auto(devs)
+
+# Every Auto.period_ms() (host/main.bend's balloon_poll): the automatic
+# balloon asks its driver for fresh statistics (D.Dev.balloon_poll), and the
+# interrupt lines follow.
+def Machine.devs_poll(-R: Type, devs: +List<D.Dev>) -> V.Op<R, +List<D.Dev>>:
+  match devs:
+    case Nil{}:
+      V.Op.pure(R, +List<D.Dev>, [])
+    case d <> t:
+      do V.Op<R, +List<D.Dev>>:
+        d : D.Dev <- D.Dev.balloon_poll(R, d)
+        t : +List<D.Dev> <- Machine.devs_poll(R, t)
+        return d <> t
+
+def Machine.balloon_poll.go(-R: Type, m: Machine) -> V.Op<R, Machine>:
+  match m:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      do V.Op<R, Machine>:
+        ds : +List<D.Dev> <- Machine.devs_poll(R, devs)
+        Machine.irqs(R, Machine{p, u, ui, ds, lines, rt, ri, nt, fl})
+
+def Machine.balloon_poll(m: Machine) -> V.Vm<Machine>:
+  V.Op.finish(Machine, Machine.balloon_poll.go(Machine, m))
+
 # The balloon's state, when the machine has one.
 def Machine.balloon_of(devs: +List<D.Dev>) -> Maybe<&2, Bl.Bal>:
   match devs:

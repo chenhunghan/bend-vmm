@@ -65,3 +65,5 @@ import ./proofs/disksnap.bend as Proofs_disksnap
 import ./proofs/snapdir.bend as Proofs_snapdir
 import ./proofs/cmds.bend as Proofs_cmds
 import ./proofs/balloon.bend as Proofs_balloon
+import ./proofs/balauto.bend as Proofs_balauto
+import ./proofs/ext4free.bend as Proofs_ext4free

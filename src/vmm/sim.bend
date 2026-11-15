@@ -346,10 +346,10 @@ def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
           Sim.run(f, A, Sim.flush(s), next)
         case V.VmDiskSpace{dk, +op, off, len, k}:
           # the simulator keeps no hint: every allocation looks from the
-          # start (correct, only slower); op 2 zeros the range
+          # start (correct, only slower); ops 2 and 3 zero the range
           +s = s
           +sz = U32.from_nat(List.length(&2, U32, Sim.disk(s)))
-          Sim.run(f, A, Bool.pick(Sim, U32.is_eq(op, 2), Sim.disk_write(s, dk, off, B.Bytes.zeros(U32.to_nat(len))), s),
+          Sim.run(f, A, Bool.pick(Sim, U32.is_eq(op, 2) || U32.is_eq(op, 3), Sim.disk_write(s, dk, off, B.Bytes.zeros(U32.to_nat(len))), s),
             k(Bool.pick(+List<U32>, U32.is_eq(op, 0), [0, 0, 0, sz], [])))
         case V.VmDiskDiscard{dk, off, len, next}:
           # a hole reads as zeros

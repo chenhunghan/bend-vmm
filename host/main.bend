@@ -16,6 +16,7 @@ import ../src/disk/access.bend as Acc
 import ../src/vmm/hostfiles.bend as Hf
 import ../src/vmm/disksnap.bend as Ds
 import ../src/virtio/balloon.bend as Bl
+import ../src/virtio/balauto.bend as Au
 import ../src/vmm/snapdir.bend as Sd
 import ../src/vmm/cmds.bend as Cm
 import ./api.bend as Api
@@ -882,6 +883,12 @@ def balloon_reply(has: Bool, info: Maybe<&2, Bl.Bal>) -> String:
         +info : Maybe<&2, Bl.Bal> = M.Machine.balloon_info(m1)
         put(mc, m1)
         return balloon_reply(has, info)
+    case Ctl.CBalloonAuto{}:
+      do IO<String>:
+        +m0 : M.Machine <- take(mc)
+        +has : Bool = M.Machine.auto_balloon(m0)
+        put(mc, M.Machine.balloon_auto(m0))
+        return Bool.pick(String, has, "balloon auto", "error: no automatic balloon (start the VM with --balloon auto)")
     case Ctl.CQuit{}:
       do IO<String>:
         _ : Result<&1, &1, U32, Unit> <- Chan.send(U32, done, 0)
@@ -1539,14 +1546,14 @@ def devices.input(none: Bool) -> +List<D.DevKind>:
 
 # The balloon (on unless --balloon off; a restore has it when its snapshot
 # has it): it goes last, so the other devices keep their slots.
-def devices.balloon(on: Bool) -> +List<D.DevKind>:
+def devices.balloon(on: Bool, +auto: Bool) -> +List<D.DevKind>:
   match on:
     case True{}:
-      [D.BalloonKind{}]
+      [D.BalloonKind{auto}]
     case False{}:
       []
 
-@unsafe def devices(o: Op.Opts, +balloon: Bool) -> IO(+List<D.DevKind>):
+@unsafe def devices(o: Op.Opts, +balloon: Bool, +auto: Bool) -> IO(+List<D.DevKind>):
   match o:
     case Op.Opts{k, i, p, c, m, n, +d, +sh, rs, ct, +vk, dp, fw, nv, fd, +ln}:
       do IO<+List<D.DevKind>>:
@@ -1554,7 +1561,7 @@ def devices.balloon(on: Bool) -> +List<D.DevKind>:
         +disks : +List<D.DevKind> <- devices.disk(String.is_empty(d), d)
         +shares : +List<D.DevKind> <- devices.share(String.is_empty(sh), sh)
         +socks : +List<D.DevKind> <- devices.vsock(String.is_empty(vk), vk)
-        +bl : +List<D.DevKind> = devices.balloon(balloon)
+        +bl : +List<D.DevKind> = devices.balloon(balloon, auto)
         return List.append(&2, D.DevKind, base_devices(), List.append(&2, D.DevKind, lan, List.append(&2, D.DevKind, disks, List.append(&2, D.DevKind, shares, List.append(&2, D.DevKind, socks, List.append(&2, D.DevKind, devices.input(String.is_empty(dp)), bl))))))
 
 def initrd_of(present: Bool, start: U.U64, end: U.U64) -> Maybe<&2, T.Initrd>:
@@ -1802,6 +1809,32 @@ def shutdown_ms() -> U32:
     +sig : U32 <- H.Hvf.signal_wait()
     signals.on(U32.is_eq(sig, err()), first, sig, mc, done)
 
+# The automatic balloon's clock (src/virtio/balauto.bend): every
+# Auto.period_ms(), its driver is asked for fresh statistics
+# (M.Machine.balloon_poll), which move the balloon's target. Ends at once on
+# a machine without the automatic balloon.
+@unsafe def balloon_poll.on(on: Bool, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+  match on:
+    case False{}:
+      IO.pure(Unit, Unit{})
+    case True{}:
+      do IO<Unit>:
+        # (a pipe the host's ticker writes: IO.sleep alone does not wake the
+        # event loop while nothing else happens, an idle guest)
+        _ : U32 <- H.Hvf.tick_wait(Au.Auto.period_ms())
+        +m0 : M.Machine <- take(mc)
+        +m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.balloon_poll(m0))
+        put(mc, m1)
+        balloon_poll.on(True{}, mc, done)
+
+@unsafe def balloon_poll(+mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+  do IO<Unit>:
+    +m0 : M.Machine <- take(mc)
+    +on : Bool = M.Machine.auto_balloon(m0)
+    put(mc, m0)
+    _ : U32 <- Bool.pick(IO(U32), on, H.Hvf.tick_wait(Au.Auto.start_ms()), IO.pure(U32, 0))
+    balloon_poll.on(on, mc, done)
+
 # Runs a machine: the vCPU loops of the given CPUs, console input and the
 # control socket; ends when a vCPU stops the VM.
 @unsafe def run_machine(+mc: Chan(M.Machine), +done: Chan(U32), +ctl: String, disp: String, fwd: String, cpus: +List<U32>) -> IO(Unit):
@@ -1814,6 +1847,7 @@ def shutdown_ms() -> U32:
     IO.spawn(Unit, signals(True{}, mc, done))
     IO.spawn(Unit, vs_accept_loop(mc, done))
     IO.spawn(Unit, lan_loop(mc, done))
+    IO.spawn(Unit, balloon_poll(mc, done))
     control(String.is_empty(ctl), ctl, mc, done)
     got : Maybe<&1, U32> <- Chan.recv(U32, done)
     +code : U32 = Maybe.default(&1, U32, got, 2)
@@ -1953,6 +1987,13 @@ def has_balloon(ks: +List<D.DevKind>) -> Bool:
     case Con{k, rest}:
       D.Dev.is_balloon(k) || has_balloon(rest)
 
+def has_auto_balloon(ks: +List<D.DevKind>) -> Bool:
+  match ks:
+    case Nil{}:
+      False{}
+    case Con{k, rest}:
+      D.Dev.auto_kind(k) || has_auto_balloon(rest)
+
 def machine_kinds(m: Maybe<&2, M.Machine>) -> +List<D.DevKind>:
   match m:
     case None{}:
@@ -2043,7 +2084,7 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     +got : Maybe<&2, M.Machine> = Snap.Snap.decode(ws)
     # the balloon as the snapshot has it (snapshots from before it was the
     # default have none)
-    +kinds : +List<D.DevKind> <- devices(o, has_balloon(machine_kinds(got)))
+    +kinds : +List<D.DevKind> <- devices(o, has_balloon(machine_kinds(got)), has_auto_balloon(machine_kinds(got)))
     # the devices as this run opened them (a disk's size, read-only, its
     # format) must be the snapshot's
     die_if(Bool.not(words_eq(kinds_words(machine_kinds(got)), kinds_words(kinds))), "the snapshot's devices differ from the ones opened now (a disk changed size or format?)")
@@ -2057,7 +2098,8 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     display.map(display_of(Op.Opts.display(o)))
     args : List<String> <- H.Hvf.args()
     +prog : U32 <- H.Hvf.prog()
-    +kinds : +List<D.DevKind> <- devices(o, Cli.Cli.balloon_on(Cli.Cli.find(List.drop(&1, String, args, U32.to_nat(prog)), "--balloon")))
+    +bv : String = Cli.Cli.find(List.drop(&1, String, args, U32.to_nat(prog)), "--balloon")
+    +kinds : +List<D.DevKind> <- devices(o, Cli.Cli.balloon_on(bv), Cli.Cli.balloon_auto(bv))
     entry : U.U64 & U.U64 <- boot(o, List.length(&2, D.DevKind, kinds))
     start(o, kinds, entry)
 
@@ -2074,7 +2116,7 @@ def usage() -> String:
     "                [--disk IMG[:ro][:nocache],...] [--share DIR] [--vsock PATH] [--control PATH]",
     "                [--display WxH[,headless]] [--forward [ADDR:]HOSTPORT:GUESTPORT,...]",
     "                [--lan DIR,ip=A.B.C.D/N[,mac=xx:xx:xx:xx:xx:xx]] [--share DIR,quota=SIZE]",
-    "                [--console-log PATH,max=SIZE[,keep=N]] [--balloon off]",
+    "                [--console-log PATH,max=SIZE[,keep=N]] [--balloon auto|free-page-reporting|off]",
     "       bend-vmm --firmware CODE.fd --vars VARS.fd [--disk IMG] ...   (UEFI)",
     "       bend-vmm --restore SNAPSHOT [--disk, --share, ... as taken] [--control PATH] [--forward ...]",
     "       bend-vmm --payload FILE.bin                                   (bare metal)",
@@ -2085,6 +2127,7 @@ def usage() -> String:
     "       bend-vmm run [DIR]                           run it (its control socket: DIR/control.sock)",
     "       bend-vmm status|pause|resume|stop|powerdown [--vm DIR]",
     "       bend-vmm snapshot [NAME] [--note TEXT] [--vm DIR]   memory and disks (disks of a stopped VM)",
+    "       bend-vmm sparsify [IMG...] [--vm DIR]   a stopped VM's unused ext4 space back to the host",
     "       bend-vmm snapshots [--vm DIR]",
     "       bend-vmm restore NAME [--vm DIR]             saves the current state first, then runs NAME",
     "       bend-vmm snapshot-rm NAME [--vm DIR]",

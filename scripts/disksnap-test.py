@@ -6,7 +6,7 @@ over s1 removes s1's old copies.
 
 usage: disksnap-test.py VMM DIR [SLOW]      (DIR: a fresh, empty directory)
 """
-import os, socket, subprocess, sys, time, glob
+import re, os, socket, subprocess, sys, time, glob
 
 vmm, d = sys.argv[1], sys.argv[2]
 slow = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
@@ -48,10 +48,13 @@ class Vm:
         return self.wait("WROTE-%s\r" % m) or self.wait("WROTE-%s\n" % m)
     def read(self, tag):
         self.type("echo GOT-%s-$(dd if=/dev/vda bs=512 skip=10 count=1 2>/dev/null | head -c 6)\n" % tag)
-        self.wait("GOT-%s-MARK" % tag, 30)
-        for line in self.out.decode(errors="replace").splitlines():
-            if line.startswith("GOT-%s-" % tag):
-                return line.strip()[len("GOT-%s-" % tag):]
+        # the whole line: on a slow host it arrives in pieces
+        end = time.time() + 30 * slow
+        while time.time() < end:
+            m = re.search(r"^GOT-%s-([^\r\n]*)[\r\n]" % re.escape(tag), self.out.decode(errors="replace"), re.M)
+            if m:
+                return m.group(1).strip()
+            self.wait("\x00", 0.2)
         return None
     def end(self):
         self.type("poweroff -f\n")

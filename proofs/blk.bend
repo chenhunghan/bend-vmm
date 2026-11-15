@@ -48,3 +48,15 @@ def L.blk.offered_discard_ro():
 
 def L.blk.config_discard():
   {==}
+
+def L.blk.kind_write_zeroes():
+  {==}
+
+def L.blk.offered_write_zeroes():
+  {==}
+
+def L.blk.offered_write_zeroes_ro():
+  {==}
+
+def L.blk.config_write_zeroes():
+  {==}

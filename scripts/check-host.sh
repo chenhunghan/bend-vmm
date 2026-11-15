@@ -326,7 +326,10 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   slp 1
   ( peak=0; base=0; while :; do
       p=$(pgrep -f '^./out/bend-vmm .*bendnetfault' | head -1); [ -n "$p" ] || { sleep 0.2; continue; }
-      r=$(ps -o rss= -p "$p" 2>/dev/null | tr -d ' '); [ -n "$r" ] || break
+      # (KiB; Linux: /proc, as a minimal ps may not take -o)
+      if [ -r "/proc/$p/status" ]; then r=$(awk '/^VmRSS:/ {print $2}' "/proc/$p/status" 2>/dev/null)
+      else r=$(ps -o rss= -p "$p" 2>/dev/null | tr -d ' '); fi
+      [ -n "$r" ] || break
       [ -f "$t/slow.start" ] && [ "$base" = 0 ] && base=$r
       [ "$r" -gt "$peak" ] && peak=$r
       echo "$base $peak" > "$t/rss"; sleep 0.2
@@ -578,6 +581,52 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && command -v qemu-img >
       && [ $cok = 1 ] && [ $same = 1 ] && [ "$csize2" -lt "$csize1" ]; then
     grn "ok: discard of compressed clusters ($csize1 -> $csize2 KiB, reads zeros, qemu-img check clean); an image with internal snapshots stays read-only and unchanged"
   else red "failed: compressed/snapshot qcow2 discard (compressed $csize1 -> $csize2 KiB, check $cok, snapshot image unchanged $same)"; grep -a "DIS-\\|NONZERO\\|internal" "$t/out" | tail -5; qemu-img check "$t/comp.qcow2" | tail -3; fail=1; fi
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 8g. write zeroes: with UNMAP the host frees the blocks; without, they stay allocated"
+  # the guest's fallocate on /dev/vda (tests/guest/bench.c punch, zero):
+  # virtio-blk WRITE_ZEROES (src/virtio/blk.bend). Both ranges read zeros
+  t=$(mktemp -d)
+  head -c 33554432 /dev/urandom > "$t/d.img"
+  full=$(du -k "$t/d.img" | cut -f1)
+  out=$(drive 60 "busybox shell" '/bin/bench punch /dev/vda 4096 16777216; echo; echo NZ1-$(dd if=/dev/vda bs=4096 skip=1 count=4096 2>/dev/null | tr -d "\\000" | wc -c); /bin/bench zero /dev/vda 20971520 4194304; echo; echo NZ2-$(dd if=/dev/vda bs=1048576 skip=20 count=4 2>/dev/null | tr -d "\\000" | wc -c)-DONE\n' "-DONE" 'poweroff -f\n' -- \
+    ./out/bend-vmm --mem 256 --kernel out/guest/Image --initrd out/guest/guest.cpio --disk "$t/d.img" --cmdline "console=ttyAMA0 quiet" 2>&1 | tr -d '\r')
+  after=$(du -k "$t/d.img" | cut -f1)
+  if [ "$(grep -ac '^FALLOC-0' <<<"$out")" = 2 ] && grep -aq '^NZ1-0' <<<"$out" && grep -aq '^NZ2-0-DONE' <<<"$out" && [ "$after" -le $((full - 15000)) ]; then
+    grn "ok: write zeroes: 16 MiB with UNMAP freed ($full -> $after KiB), 4 MiB without stays allocated; both read zeros"
+  else red "failed: write zeroes ($full -> $after KiB)"; grep -a "FALLOC\|NZ" <<<"$out" | tail -4; fail=1; fi
+  rm -rf "$t"
+fi
+
+e2=""
+for d in "" /opt/homebrew/opt/e2fsprogs/sbin/ /usr/local/opt/e2fsprogs/sbin/ /sbin/ /usr/sbin/; do [ -x "${d}mke2fs" ] && [ -x "${d}debugfs" ] && [ -x "${d}e2fsck" ] && { e2=${d:-$(dirname "$(command -v mke2fs)")/}; break; }; done
+if [ -f host/main.bend ] && [ -n "$e2" ]; then
+  echo "== 8h. bend-vmm sparsify: a stopped VM's ext4 free space back to the host"
+  # an ext4 image with a file deleted (debugfs), on the whole disk and in a
+  # partition at 1 MiB (MBR): sparsify punches the free blocks; e2fsck stays
+  # clean, the file kept reads back; a file system not cleanly unmounted is
+  # skipped, an image in use refused
+  t=$(mktemp -d); mkdir "$t/d"
+  head -c 41943040 /dev/urandom > "$t/d/gone"; head -c 20971520 /dev/urandom > "$t/d/keep"
+  want=$(python3 -c 'import hashlib,sys; print(hashlib.md5(open(sys.argv[1],"rb").read()).hexdigest())' "$t/d/keep")
+  truncate -s 128m "$t/fs.img"; "${e2}mke2fs" -q -t ext4 -b 4096 -d "$t/d" "$t/fs.img"; "${e2}debugfs" -w -R "rm gone" "$t/fs.img" >/dev/null 2>&1
+  python3 -c 'import struct,sys; fs=open(sys.argv[1],"rb").read(); m=bytearray(512); m[446:462]=struct.pack("<BBBBBBBBII",0,0,0,0,0x83,0,0,0,2048,len(fs)//512); m[510]=0x55; m[511]=0xAA; f=open(sys.argv[2],"wb"); f.write(m); f.seek(1048576); f.write(fs)' "$t/fs.img" "$t/part.img"
+  cp "$t/fs.img" "$t/whole.img"; cp "$t/fs.img" "$t/dirty.img"; printf '\000' | dd of="$t/dirty.img" bs=1 seek=1082 conv=notrunc 2>/dev/null
+  b1=$(du -k "$t/whole.img" | cut -f1); b2=$(du -k "$t/part.img" | cut -f1)
+  o=$(./out/bend-vmm sparsify "$t/whole.img" "$t/part.img" "$t/dirty.img" 2>&1)
+  a1=$(du -k "$t/whole.img" | cut -f1); a2=$(du -k "$t/part.img" | cut -f1)
+  dd if="$t/part.img" of="$t/p.img" bs=1048576 skip=1 2>/dev/null
+  ok=1
+  for img in whole p; do "${e2}e2fsck" -fn "$t/$img.img" >/dev/null 2>&1 || ok=0
+    "${e2}debugfs" -R "dump keep $t/$img.keep" "$t/$img.img" >/dev/null 2>&1
+    [ "$(python3 -c 'import hashlib,sys; print(hashlib.md5(open(sys.argv[1],"rb").read()).hexdigest())' "$t/$img.keep" 2>/dev/null)" = "$want" ] || ok=0; done
+  python3 -c 'import fcntl,time,sys; f=open(sys.argv[1],"r+b"); fcntl.flock(f, fcntl.LOCK_EX); time.sleep(5)' "$t/whole.img" & lk=$!; slp 1
+  busy=$(./out/bend-vmm sparsify "$t/whole.img" 2>&1); wait $lk
+  if [ $ok = 1 ] && [ "$a1" -le $((b1 - 30000)) ] && [ "$a2" -le $((b2 - 30000)) ] && grep -q "skipped" <<<"$o" && grep -q "cannot open" <<<"$busy"; then
+    grn "ok: sparsify ($b1 -> $a1 KiB on the whole disk, $b2 -> $a2 KiB in a partition; e2fsck clean, the kept file intact; a dirty one skipped, one in use refused)"
+  else red "failed: sparsify ($b1 -> $a1, $b2 -> $a2 KiB, checks $ok)"; echo "$o" | tail -6; echo "$busy"; fail=1; fi
   rm -rf "$t"
 fi
 

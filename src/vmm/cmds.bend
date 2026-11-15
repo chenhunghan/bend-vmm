@@ -17,6 +17,9 @@ import ../disk/access.bend as Ac
 #   bend-vmm prune --keep N [--vm DIR]
 #   bend-vmm status|pause|resume|stop|powerdown [--vm DIR]
 #   bend-vmm ctl SOCKET COMMAND...        a raw control line (--control)
+#   bend-vmm sparsify [IMG...] [--vm DIR] a stopped VM's disks: the free
+#                                         space of their ext4 file systems
+#                                         back to the host (src/disk/ext4free.bend)
 
 type Sub is Data:
   SubNone{}
@@ -30,6 +33,7 @@ type Sub is Data:
   SubPrune{vm: String, keep: U32}
   SubCtl{vm: String, line: String}
   SubRaw{sock: String, line: String}
+  SubSparsify{vm: String, paths: List<&2, String>}
 
 def Sub.l2(xs: List<String>) -> List<&2, String>:
   match xs:
@@ -107,10 +111,11 @@ def Sub.go(+cmd: String, +rest: List<&2, String>) -> Sub:
       SubBad{"usage: bend-vmm prune --keep N [--vm DIR]"},
       SubPrune{vm, Maybe.default(&2, U32, U32.read(Sub.opt(rest, "--keep", "0")), 0)}),
   Bool.pick(Sub, Sub.ctl_verb(cmd), SubCtl{vm, Sub.ctl_line(cmd)},
+  Bool.pick(Sub, String.eq(cmd, "sparsify"), SubSparsify{vm, p},
   Bool.pick(Sub, String.eq(cmd, "ctl"),
     Bool.pick(Sub, U32.is_lt(Sub.count(rest), 2), SubBad{"usage: bend-vmm ctl SOCKET COMMAND..."},
       SubRaw{Sub.first(rest, ""), String.join(List.drop(&2, String, rest, 1n), " ")}),
-    SubBad{"unknown command " ++ cmd ++ " (bend-vmm --help)"})))))))))
+    SubBad{"unknown command " ++ cmd ++ " (bend-vmm --help)"}))))))))))
 
 # Which command a command line is: options first (or none) is no
 # subcommand.

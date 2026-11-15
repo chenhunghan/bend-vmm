@@ -336,6 +336,26 @@ def big_disk() -> +List<U32>:
 def run_big(s: S.Sim) -> Maybe<&1, S.Sim & (Q.Vq & Bool)>:
   S.Sim.exec(Q.Vq & Bool, S.Sim.with_disk(s, big_disk()), K.Blk.process(Q.Vq & Bool, 0, u64(16), queue()))
 
+# WRITE_ZEROES (type 13): the same segments. With UNMAP (bit 0) the whole
+# blocks inside are freed and the partial ones written with zeros; without
+# it every sector is written with zeros: either way the range reads zeros.
+def wz_sim(+data: +List<U32>) -> S.Sim:
+  +n = U32.from_nat(List.length(&2, U32, data))
+  +t = cat(desc(16384, 16, 1, 1), cat(desc(16400, n, 1, 2), desc(16900, 1, 2, 0)))
+  +s = S.Sim.write(machine(t, 1, [0]), u64(16384), hdr(13, 0))
+  S.Sim.write(s, u64(16400), data)
+
+def write_zeroes() -> IO(Unit):
+  do IO<Unit>:
+    check("blk write zeroes with unmap: sectors 1..15 read zeros", run_big(wz_sim(dseg(1, 15, 1))), 16900, [0], used(1, [0, 1]), True{}, 1, cat(slice(big_disk(), 0n, 512n), List.replicate(U32, 7680n, 0)))
+    check("blk write zeroes without unmap: sectors 0..3 read zeros", run(wz_sim(dseg(0, 4, 0))), 16900, [0], used(1, [0, 1]), True{}, 1, List.replicate(U32, 2048n, 0))
+    check("blk write zeroes of other flags is UNSUPP", run(wz_sim(dseg(0, 4, 2))), 16900, [2], used(1, [0, 1]), True{}, 1, disk())
+    check("blk write zeroes past the end is IOERR", run(wz_sim(dseg(2, 4, 1))), 16900, [1], used(1, [0, 1]), True{}, 1, disk())
+    check("blk write zeroes on a read-only disk is UNSUPP", run_ro(wz_sim(dseg(0, 4, 1))), 16900, [2], used(1, [0, 1]), True{}, 1, disk())
+    T.eq_str("blk features with write zeroes", show(feats(K.Blk.offered_wz(False{}))), "[1, 25094]")
+    T.eq_str("blk read-only: no write zeroes", show(feats(K.Blk.offered_wz(True{}))), "[1, 550]")
+    T.eq_u32("blk config with write zeroes: 60 bytes", U32.from_nat(List.length(&2, U32, K.Blk.config_wz(u64(16)))), 60)
+
 def discard() -> IO(Unit):
   do IO<Unit>:
     check("blk discard inside one block frees nothing", run(dis_sim(dseg(0, 4, 0))), 16900, [0], used(1, [0, 1]), True{}, 1, disk())
@@ -369,6 +389,7 @@ def main() -> IO(Unit):
     short_header()
     host_errors()
     discard()
+    write_zeroes()
     T.eq_str("blk features rw", show(feats(K.Blk.features(False{}))), "[1, 512]")
     T.eq_str("blk features ro", show(feats(K.Blk.features(True{}))), "[1, 544]")
     big_requests()

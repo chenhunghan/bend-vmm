@@ -412,7 +412,7 @@ def Fwd.all_ok(ss: List<&2, String>) -> Bool:
 # --balloon off leaves it out. --balloon free-page-reporting is accepted
 # and changes nothing (it was the switch before the default).
 def Cli.balloon(+v: String) -> Bool:
-  String.eq(v, "free-page-reporting")
+  String.eq(v, "free-page-reporting") || String.eq(v, "auto")
 
 def Cli.balloon_ok(+v: String) -> Bool:
   Cli.balloon(v) || String.eq(v, "off")
@@ -421,6 +421,12 @@ def Cli.balloon_ok(+v: String) -> Bool:
 # given).
 def Cli.balloon_on(+v: String) -> Bool:
   Bool.not(String.eq(v, "off"))
+
+# Whether the balloon is the automatic one (src/virtio/balauto.bend): the
+# default, and --balloon auto; --balloon free-page-reporting keeps free page
+# reporting alone.
+def Cli.balloon_auto(+v: String) -> Bool:
+  String.is_empty(v) || String.eq(v, "auto")
 
 def Cli.why(+flag: String, +v: String) -> String:
   Bool.pick(String, Bool.not(Cli.known(flag, Cli.flags())), "unknown option " ++ flag,

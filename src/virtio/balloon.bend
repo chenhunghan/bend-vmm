@@ -3,6 +3,7 @@ import ../lib/u64.bend as U
 import ../lib/bytes.bend as B
 import ../vmm/abi.bend as V
 import ./queue.bend as Q
+import ./balauto.bend as A
 
 # virtio-balloon (Virtio 1.2 section 5.5), device id 5, offered with
 # --balloon free-page-reporting: VIRTIO_F_VERSION_1 and
@@ -302,3 +303,97 @@ def Balloon.pass.go(-R: Type, report: Bool, +sel: U32, +b: Bal, q: Q.Vq) -> V.Op
 
 def Balloon.pass(-R: Type, +sel: U32, +b: Bal, q: Q.Vq) -> V.Op<R, BalPass>:
   Balloon.pass.go(R, U32.is_eq(sel, Balloon.report_queue()), sel, b, q)
+
+# The automatic balloon (src/virtio/balauto.bend)
+# ===============================================
+#
+# --balloon auto (the default) offers the stats queue too
+# (VIRTIO_BALLOON_F_STATS_VQ, bit 1): four queues. The driver numbers its
+# queues by what it accepted: with the stats queue, 2 is stats and 3
+# reporting. Dev.notify maps them to this module's own numbers, which do
+# not depend on it: 0 inflate, 1 deflate, 2 reporting
+# (Balloon.report_queue()), 3 stats (Balloon.stats_queue()).
+
+def Balloon.offered_auto() -> U.U64:
+  U.U64{1, 38}
+
+def Balloon.queues_auto() -> Nat:
+  4n
+
+def Balloon.stats_queue() -> U32:
+  3
+
+# The driver's number for one of ours (stats: it accepted the stats queue).
+def Balloon.logical(+stats: Bool, +sel: U32) -> U32:
+  Bool.pick(U32, stats && U32.is_eq(sel, 2), 3, Bool.pick(U32, stats && U32.is_eq(sel, 3), 2, sel))
+
+# What the automatic balloon keeps: the stats buffer the driver posted and
+# the device holds (its head; Auto.none() when none), whether the host asked
+# for the statistics it will bring (only an answer moves the target: the
+# first buffer, posted at the driver's start, does not), whether a target
+# was set by hand (`balloon MiB`: the automatic balloon stands aside), and
+# the latest statistics.
+type AutoSt is Data:
+  AutoSt{held: U32, asked: Bool, manual: Bool, stats: A.Stats}
+
+def Balloon.auto_new() -> AutoSt:
+  AutoSt{A.Auto.none(), False{}, False{}, A.Auto.fresh()}
+
+def Balloon.auto_manual(+a: AutoSt, +manual: Bool) -> AutoSt:
+  match a:
+    case AutoSt{h, k, m, st}:
+      AutoSt{h, k, manual, st}
+
+def Balloon.auto_held(+a: AutoSt) -> U32:
+  match a:
+    case AutoSt{h, k, m, st}:
+      h
+
+def Balloon.auto_on(+a: AutoSt) -> Bool:
+  match a:
+    case AutoSt{h, k, m, st}:
+      Bool.not(m)
+
+# The target after a stats buffer: moved only when the host asked for it
+# and no target was set by hand.
+def Balloon.auto_target(+asked: Bool, +manual: Bool, +st: A.Stats, +b: Bal) -> Bal:
+  Bool.pick(Bal, asked && Bool.not(manual), Balloon.set_target(b, A.Auto.target(st, U32.min(Balloon.target(b), Balloon.actual(b)))), b)
+
+type StatsPass is Data:
+  StatsPass{q: Q.Vq, bal: Bal, auto: AutoSt}
+
+def Balloon.stats.serve(-R: Type, +b: Bal, a: AutoSt, q: Q.Vq, c: Q.Chain) -> V.Op<R, StatsPass>:
+  match a c:
+    case AutoSt{old, +asked, +manual, +st0} Q.Chain{+h, r, w}:
+      do V.Op<R, StatsPass>:
+        +bs : +List<U32> <- Q.Vq.read_segs(R, Q.Vq.segs(r, 0, 640))
+        +st : A.Stats = A.Auto.stats(bs, st0)
+        return StatsPass{q, Balloon.auto_target(asked, manual, st, b), AutoSt{h, False{}, manual, st}}
+
+def Balloon.stats.got(-R: Type, +b: Bal, +a: AutoSt, r: Q.Vq & Maybe<&2, Q.Chain>) -> V.Op<R, StatsPass>:
+  match r:
+    case (q, None{}):
+      V.Op.pure(R, StatsPass, StatsPass{q, b, a})
+    case (q, Some{c}):
+      Balloon.stats.serve(R, b, a, q, c)
+
+# The stats queue's pass: the buffer the driver posted is read and held
+# (the host returns it when it wants fresh statistics: Balloon.poll).
+def Balloon.stats_pass(-R: Type, +b: Bal, +a: AutoSt, q: Q.Vq) -> V.Op<R, StatsPass>:
+  V.Op.bind(R, Q.Vq & Maybe<&2, Q.Chain>, StatsPass, Q.Vq.pop(R, q), r => Balloon.stats.got(R, b, a, r))
+
+# Asking for fresh statistics: the held buffer returned (used length 0);
+# the driver posts it again with new values. Nothing when none is held or
+# a target was set by hand.
+def Balloon.poll.go(-R: Type, skip: Bool, +h: U32, +k: Bool, +manual: Bool, +st: A.Stats, q: Q.Vq) -> V.Op<R, (Q.Vq & AutoSt) & Bool>:
+  match skip:
+    case True{}:
+      V.Op.pure(R, (Q.Vq & AutoSt) & Bool, ((q, AutoSt{h, k, manual, st}), False{}))
+    case False{}:
+      V.Op.bind(R, Q.Vq, (Q.Vq & AutoSt) & Bool, Q.Vq.push(R, q, h, 0), q2 =>
+        V.Op.pure(R, (Q.Vq & AutoSt) & Bool, ((q2, AutoSt{A.Auto.none(), True{}, manual, st}), True{})))
+
+def Balloon.poll(-R: Type, +a: AutoSt, q: Q.Vq) -> V.Op<R, (Q.Vq & AutoSt) & Bool>:
+  match a:
+    case AutoSt{+h, k, +manual, st}:
+      Balloon.poll.go(R, U32.is_eq(h, A.Auto.none()) || manual, h, k, manual, st, q)

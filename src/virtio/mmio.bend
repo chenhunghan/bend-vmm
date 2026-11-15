@@ -286,6 +286,18 @@ def VirtioMmio.queue(s: VirtioMmio, q: U32) -> Maybe<&2, QueueCfg>:
       Mmio.qget(qs, 0, q)
 
 # Sets bits in InterruptStatus (1 = used buffer, 2 = config change).
+# Whether the driver accepted a feature of the low word (its bit mask).
+def VirtioMmio.accepts(s: VirtioMmio, +mask: U32) -> Bool:
+  match s:
+    case VirtioMmio{id, df, drf, dsel, drsel, qsel, qs, st, ist, cg, cfg}:
+      Bool.not(U32.is_zero((U.U64.lo(drf) .&. mask : U32)))
+
+# The first 32-bit word of the config space, little-endian.
+def VirtioMmio.config_word(s: VirtioMmio) -> U32:
+  match s:
+    case VirtioMmio{id, df, drf, dsel, drsel, qsel, qs, st, ist, cg, cfg}:
+      B.Bytes.read_le32(cfg)
+
 def VirtioMmio.raise(s: VirtioMmio, bits: U32) -> VirtioMmio:
   match s:
     case VirtioMmio{id, df, drf, dsel, drsel, qsel, qs, st, ist, cg, cfg}:

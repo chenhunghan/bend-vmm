@@ -17,6 +17,7 @@ import ../disk/store.bend as St
 import ../disk/qcow2.bend as Qc
 import ../virtio/lan.bend as Ln
 import ../virtio/balloon.bend as Bl
+import ../virtio/balauto.bend as Au
 
 # The machine's device state as a stream of 32-bit words, for snapshots.
 # Snap.encode and Snap.decode are inverses (laws/snapshot.bend). The stream
@@ -138,8 +139,9 @@ def Enc.kind(k: D.DevKind) -> +List<U32>:
       List.append(&2, U32, [8, Bool.to_u32(ro)], List.append(&2, U32, X.Enc.u64(s), Enc.store(st)))
     case D.LanKind{mac, ip, prefix}:
       List.append(&2, U32, 9 <> X.Enc.bytes(mac), [ip, prefix])
-    case D.BalloonKind{}:
-      [10]
+    case D.BalloonKind{auto}:
+      # 10: free page reporting only; 11: the automatic balloon too
+      Bool.pick(+List<U32>, auto, [11], [10])
 
 def Enc.fids(fs: +List<F.Fid>) -> +List<U32>:
   match fs:
@@ -193,8 +195,9 @@ def Enc.state(s: D.DevState) -> +List<U32>:
       List.append(&2, U32, [5, sel, sub, Enc.len(+List<U32>, evs)], Enc.frames(evs))
     case D.LanDev{Ln.Lan{mac, ip, p, +rx}}:
       List.append(&2, U32, 6 <> X.Enc.bytes(mac), List.append(&2, U32, [ip, p, Enc.len(Ln.LanRx, rx)], Enc.lanrx(rx)))
-    case D.BalDev{Bl.Bal{t, a, +ps}}:
-      List.append(&2, U32, [7, t, a, Enc.len(Bl.Part, ps)], Enc.parts(ps))
+    case D.BalDev{Bl.Bal{t, a, +ps}, Bl.AutoSt{h, asked, manual, Au.Stats{f, tot, av}}}:
+      # 8: 7's balloon, then the automatic balloon's state
+      List.append(&2, U32, [8, t, a, Enc.len(Bl.Part, ps)], List.append(&2, U32, Enc.parts(ps), [h, Bool.to_u32(asked), Bool.to_u32(manual), f, tot, av]))
 
 def Enc.dev(d: D.Dev) -> +List<U32>:
   match d:
@@ -475,14 +478,21 @@ def Dec.kind.top(lan: Bool, +t: U32) -> X.Dec<D.DevKind>:
 def Dec.kind.top2(balloon: Bool, +t: U32) -> X.Dec<D.DevKind>:
   match balloon:
     case True{}:
-      X.Dec.pure(D.DevKind, D.BalloonKind{})
+      X.Dec.pure(D.DevKind, D.BalloonKind{False{}})
     case False{}:
       Dec.kind.top(U32.is_eq(t, 9), t)
+
+def Dec.kind.top3(auto: Bool, +t: U32) -> X.Dec<D.DevKind>:
+  match auto:
+    case True{}:
+      X.Dec.pure(D.DevKind, D.BalloonKind{True{}})
+    case False{}:
+      Dec.kind.top2(U32.is_eq(t, 10), t)
 
 def Dec.kind() -> X.Dec<D.DevKind>:
   do X.Dec<D.DevKind>:
     +t : U32 <- X.Dec.u32()
-    Dec.kind.top2(U32.is_eq(t, 10), t)
+    Dec.kind.top3(U32.is_eq(t, 11), t)
 
 def Dec.fids(n: Nat) -> X.Dec<+List<F.Fid>>:
   match n:
@@ -618,7 +628,21 @@ def Dec.state.bal() -> X.Dec<D.DevState>:
     a : U32 <- X.Dec.u32()
     n : Nat <- Dec.count()
     ps : +List<Bl.Part> <- Dec.parts(n)
-    return D.BalDev{Bl.Bal{t, a, ps}}
+    return D.BalDev{Bl.Bal{t, a, ps}, Bl.Balloon.auto_new()}
+
+def Dec.state.bal2() -> X.Dec<D.DevState>:
+  do X.Dec<D.DevState>:
+    t : U32 <- X.Dec.u32()
+    a : U32 <- X.Dec.u32()
+    n : Nat <- Dec.count()
+    ps : +List<Bl.Part> <- Dec.parts(n)
+    h : U32 <- X.Dec.u32()
+    asked : Bool <- X.Dec.bool()
+    manual : Bool <- X.Dec.bool()
+    f : U32 <- X.Dec.u32()
+    tot : U32 <- X.Dec.u32()
+    av : U32 <- X.Dec.u32()
+    return D.BalDev{Bl.Bal{t, a, ps}, Bl.AutoSt{h, asked, manual, Au.Stats{f, tot, av}}}
 
 def Dec.state.top(lan: Bool, +t: U32) -> X.Dec<D.DevState>:
   match lan:
@@ -634,10 +658,17 @@ def Dec.state.top2(bal: Bool, +t: U32) -> X.Dec<D.DevState>:
     case False{}:
       Dec.state.top(U32.is_eq(t, 6), t)
 
+def Dec.state.top3(auto: Bool, +t: U32) -> X.Dec<D.DevState>:
+  match auto:
+    case True{}:
+      Dec.state.bal2()
+    case False{}:
+      Dec.state.top2(U32.is_eq(t, 7), t)
+
 def Dec.state() -> X.Dec<D.DevState>:
   do X.Dec<D.DevState>:
     +t : U32 <- X.Dec.u32()
-    Dec.state.top2(U32.is_eq(t, 7), t)
+    Dec.state.top3(U32.is_eq(t, 8), t)
 
 def Dec.dev() -> X.Dec<D.Dev>:
   do X.Dec<D.Dev>:

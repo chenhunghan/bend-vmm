@@ -412,6 +412,12 @@ def Op.disk_set_hint(-R: Type, disk: U32, at: U.U64) -> Op<R, Unit>:
 def Op.disk_zero(-R: Type, disk: U32, offset: U.U64, len: U32) -> Op<R, Unit>:
   Op{k => VmDiskSpace{disk, 2, offset, len, ws => k(Unit{})}}
 
+# The range reads as zeros afterwards and stays allocated (virtio-blk
+# WRITE_ZEROES without UNMAP): zeros written, or the file system's zero
+# range where it has one.
+def Op.disk_zero_keep(-R: Type, disk: U32, offset: U.U64, len: U32) -> Op<R, Unit>:
+  Op{k => VmDiskSpace{disk, 3, offset, len, ws => k(Unit{})}}
+
 def Op.net(-R: Type, cmd: NetCmd) -> Op<R, Unit>:
   Op{k => VmNet{cmd, k(Unit{})}}
 

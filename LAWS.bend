@@ -64,3 +64,5 @@ import ./laws/disksnap.bend as Laws_disksnap
 import ./laws/snapdir.bend as Laws_snapdir
 import ./laws/cmds.bend as Laws_cmds
 import ./laws/balloon.bend as Laws_balloon
+import ./laws/balauto.bend as Laws_balauto
+import ./laws/ext4free.bend as Laws_ext4free

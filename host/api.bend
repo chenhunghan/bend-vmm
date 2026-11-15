@@ -7,6 +7,8 @@ import ../src/vmm/opts.bend as Op
 import ../src/vmm/hostfiles.bend as Hf
 import ../src/vmm/cli.bend as Cli
 import ../src/lib/u64.bend as U
+import ../src/disk/ext4free.bend as Ex
+import ../src/disk/access.bend as Ac
 
 # bend-vmm as a library: typed calls on a VM from another process (this
 # one runs no VM). A VM is named by its folder (bend-vmm create; its
@@ -662,6 +664,137 @@ def vmdir.wait_stop(fuel: Nat, +vm: String) -> IO(Unit):
     +ws : +List<U32> <- H.Hvf.sock_facts(snap ++ "/memory")
     vmdir.restore.go(U32.is_eq(H.Host.first(ws), 2), run, prog, vm, snap, Cm.Conf.flags(vm, text))
 
+# bend-vmm sparsify: each image's ext4 free space punched (src/disk/ext4free.bend
+# decides where; the host reads and punches). The image opens as a writer
+# does (an exclusive lock: a running VM's disk is refused).
+
+def Spr.punch(+id: U32, rg: U.U64 & U.U64) -> IO(U.U64):
+  match rg:
+    case (+off, +len):
+      Bool.pick(IO(U.U64), U.U64.is_zero(len), IO.pure(U.U64, U.U64.zero()),
+        IO.bind(U32, U.U64, H.Host.disk_discard(id, off, len), e => IO.pure(U.U64, Bool.pick(U.U64, U32.is_zero(e), len, U.U64.zero()))))
+
+# Group g's free runs punched; the bytes freed so far.
+def Spr.runs(rs: +List<Ex.Run>, +id: U32, +f: Ex.Fs, +acc: U.U64) -> IO(U.U64):
+  match rs:
+    case Nil{}:
+      IO.pure(U.U64, acc)
+    case Con{r, rest}:
+      do IO<U.U64>:
+        +n : U.U64 <- Spr.punch(id, Ex.Fs.range(f, r))
+        Spr.runs(rest, id, f, U.U64.add(acc, n))
+
+def Spr.group(m: Maybe<&2, U32>, +id: U32, +f: Ex.Fs, +g: U32) -> IO(U.U64):
+  match m:
+    case None{}:
+      IO.pure(U.U64, U.U64.zero())
+    case Some{+b}:
+      do IO<U.U64>:
+        +bs : +List<U32> <- H.Host.disk_read(id, Ex.Fs.block_at(f, b), Ex.Fs.bsize(f))
+        Spr.runs(Ex.Fs.free_runs(f, g, bs), id, f, U.U64.zero())
+
+def Spr.groups(fuel: Nat, +id: U32, +f: Ex.Fs, +ds: +List<U32>, +g: U32, +acc: U.U64) -> IO(U.U64):
+  match fuel:
+    case 0n:
+      IO.pure(U.U64, acc)
+    case 1n+k:
+      Bool.pick(IO(U.U64), U32.is_le(Ex.Fs.groups(f), g), IO.pure(U.U64, acc),
+        IO.bind(U.U64, U.U64, Spr.group(Ex.Fs.bitmap(f, ds, g), id, f, g), n => Spr.groups(k, id, f, ds, (g + 1 : U32), U.U64.add(acc, n))))
+
+# One file system at base: (found, bytes freed); "skipped" when it is ext4
+# but not cleanly unmounted (or has errors, needs recovery, or META_BG).
+def Spr.fs.go(+id: U32, +f: Ex.Fs) -> IO(U.U64):
+  do IO<U.U64>:
+    +ds : +List<U32> <- H.Host.disk_read(id, Ex.Fs.descs_at(f), Ex.Fs.descs_len(f))
+    Spr.groups(1048576n, id, f, ds, 0, U.U64.zero())
+
+def Spr.mib(+n: U.U64) -> String:
+  U32.show(U.U64.lo(U.U64.shr(20n, n))) ++ " MiB"
+
+def Spr.at(+base: U.U64) -> String:
+  Bool.pick(String, U.U64.is_zero(base), "the disk", "the partition at " ++ Spr.mib(base))
+
+def Spr.fs(+id: U32, +base: U.U64) -> IO(String):
+  do IO<String>:
+    +sb : +List<U32> <- H.Host.disk_read(id, U.U64.add_u32(base, 1024), 1024)
+    +f : Ex.Fs = Ex.Ext.fs(base, sb)
+    Bool.pick(IO(String), Bool.not(Ex.Ext.is_ext(sb)), IO.pure(String, ""),
+      Bool.pick(IO(String), Bool.not(Ex.Fs.ok(f)), IO.pure(String, "  ext4 on " ++ Spr.at(base) ++ ": skipped (not cleanly unmounted, errors, a journal to replay, META_BG, or past 2^32 blocks)\n"),
+        IO.bind(U.U64, String, Spr.fs.go(id, f), n => IO.pure(String, "  ext4 on " ++ Spr.at(base) ++ ": " ++ Spr.mib(n) ++ " free, given back\n"))))
+
+def Spr.bases(bs: +List<U.U64>, +id: U32) -> IO(String):
+  match bs:
+    case Nil{}:
+      IO.pure(String, "")
+    case Con{b, rest}:
+      do IO<String>:
+        +a : String <- Spr.fs(id, b)
+        +more : String <- Spr.bases(rest, id)
+        return a ++ more
+
+def Spr.gpt.entries(+id: U32, t: Ex.GptTab) -> IO(+List<U.U64>):
+  match t:
+    case Ex.GptTab{+at, +n, +size}:
+      do IO<+List<U.U64>>:
+        +es : +List<U32> <- H.Host.disk_read(id, at, (n * size : U32))
+        return Ex.Part.gpt_entries(es, n, size)
+
+# The partitions: an MBR's, or a GPT's (its header at sector 1).
+def Spr.gpt(+id: U32, gpt: Bool) -> IO(+List<U.U64>):
+  match gpt:
+    case False{}:
+      IO.pure(+List<U.U64>, [])
+    case True{}:
+      do IO<+List<U.U64>>:
+        +hdr : +List<U32> <- H.Host.disk_read(id, U.U64.from_u32(512), 512)
+        Spr.gpt.entries(id, Ex.Part.gpt_table(hdr))
+
+def Spr.image.go(+id: U32, +path: String) -> IO(String):
+  do IO<String>:
+    +before : U32 <- H.Hvf.size_kib(path)
+    +s0 : +List<U32> <- H.Host.disk_read(id, U.U64.zero(), 512)
+    +gp : +List<U.U64> <- Spr.gpt(id, Ex.Part.gpt(s0))
+    +found : String <- Spr.bases(Con{U.U64.zero(), List.append(&2, U.U64, Ex.Part.mbr(s0), gp)}, id)
+    +after : U32 <- H.Hvf.size_kib(path)
+    return path ++ ": " ++ Bool.pick(String, String.is_empty(found), "no ext4 file system found\n",
+      U32.show((before / 1024 : U32)) ++ " -> " ++ U32.show((after / 1024 : U32)) ++ " MiB on the host's disk\n" ++ found)
+
+def Spr.image(+path: String) -> IO(String):
+  do IO<String>:
+    +id : U32 <- H.Hvf.disk_open_with(path, Ac.Access.flags(Ac.Writer{}))
+    Bool.pick(IO(String), U32.is_eq(id, 4294967295), IO.pure(String, path ++ ": cannot open it for writing (in use by a running VM?)\n"), Spr.image.go(id, path))
+
+def Spr.images(ps: List<&2, String>) -> IO(String):
+  match ps:
+    case Nil{}:
+      IO.pure(String, "")
+    case Con{p, rest}:
+      do IO<String>:
+        +a : String <- Spr.image(p)
+        +more : String <- Spr.images(rest)
+        return a ++ more
+
+# The images named, or the writable --disk images of the VM folder.
+def Spr.paths(ds: List<Ds.DiskAt>) -> List<&2, String>:
+  match ds:
+    case Nil{}:
+      []
+    case Con{d, rest}:
+      match d:
+        case Ds.DiskAt{i, p}:
+          Con{p, Spr.paths(rest)}
+
+def Vmm.sparsify(+vm: String, +paths: List<&2, String>) -> IO(String):
+  Bool.pick(IO(String), Bool.not(List.is_empty(&2, String, paths)), Spr.images(paths),
+    IO.bind(String, String, Api.read(vm ++ "/vm.conf"), text =>
+      Spr.images(Spr.paths(Ds.Dsnap.writable(Cm.Sub.opt(Cm.Conf.flags(vm, text), "--disk", ""))))))
+
+def cli.sparsified.go(+t: String) -> IO(Unit):
+  IO.print(String.trim(Bool.pick(String, String.is_empty(t), "nothing to sparsify (no images named, and no writable --disk in the VM folder)", t)))
+
+def cli.sparsified(t: String) -> IO(Unit):
+  cli.sparsified.go(t)
+
 @unsafe def cli(run: List<String> -> List<String> -> IO(Unit), +prog: List<String>, s: Cm.Sub) -> IO(Unit):
   match s:
     case Cm.SubNone{}:
@@ -684,6 +817,8 @@ def vmdir.wait_stop(fuel: Nat, +vm: String) -> IO(Unit):
       IO.bind(Result<&1, &1, Err, List<&2, String>>, Unit, Vmm.prune(vm, keep), cli.names)
     case Cm.SubCtl{vm, line}:
       cli.ctl(vm, line)
+    case Cm.SubSparsify{vm, paths}:
+      IO.bind(String, Unit, Vmm.sparsify(vm, paths), cli.sparsified)
     case Cm.SubRaw{sock, line}:
       IO.bind(Result<&1, &1, Err, String>, Unit, Vmm.ctl(sock, line), r => cli.text(r, ""))
 

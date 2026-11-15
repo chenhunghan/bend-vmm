@@ -22,9 +22,12 @@ type Cmd is Data:
   CStatusJson{}
   # balloon MiB: the balloon's target (--balloon free-page-reporting).
   CBalloon{mib: U32}
+  # balloon auto: the automatic balloon takes over again (the default;
+  # balloon MiB sets a target by hand and stops it).
+  CBalloonAuto{}
 
 def Ctl.usage() -> String:
-  "unknown command (pause, resume, snapshot PATH, screendump PATH, type TEXT, pointer X Y, powerdown, net, status [json], balloon MiB, quit)"
+  "unknown command (pause, resume, snapshot PATH, screendump PATH, type TEXT, pointer X Y, powerdown, net, status [json], balloon MiB|auto, quit)"
 
 def Ctl.pointer_usage() -> String:
   "usage: pointer X Y (0..32767)"
@@ -68,7 +71,7 @@ def Ctl.balloon_reply(+target: U32, +actual: U32) -> String:
   "balloon " ++ U32.show(Ctl.pages_mib(target)) ++ " MiB (in it now: " ++ U32.show(Ctl.pages_mib(actual)) ++ " MiB)"
 
 def Ctl.no_balloon() -> String:
-  "error: no balloon (start the VM with --balloon free-page-reporting)"
+  "error: no balloon (the VM was started with --balloon off)"
 
 # status json with a balloon: the state, then the balloon's target and
 # what is in it, in MiB (without one, Ctl.status_json).
@@ -94,7 +97,7 @@ def Ctl.verb(+verb: String, +arg: String) -> Cmd:
   Bool.pick(Cmd, String.eq(verb, "screendump"), Ctl.needs(arg, CScreendump{arg}, "usage: screendump PATH"),
   Bool.pick(Cmd, String.eq(verb, "type"), Ctl.needs(arg, CType{arg}, "usage: type TEXT"),
   Bool.pick(Cmd, String.eq(verb, "pointer"), Ctl.pointer(String.split(arg, ' ')),
-  Bool.pick(Cmd, String.eq(verb, "balloon"), Ctl.balloon(U32.read(arg)),
+  Bool.pick(Cmd, String.eq(verb, "balloon"), Bool.pick(Cmd, String.eq(arg, "auto"), CBalloonAuto{}, Ctl.balloon(U32.read(arg))),
   CUnknown{})))))))))))
 
 # One command line: its first word is the verb, the rest (one space between

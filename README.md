@@ -126,7 +126,7 @@ in 0.2 s and Alpine its login prompt in about 5 s.
 Management: on the console, `Ctrl-A p` pauses or resumes, `Ctrl-A s` writes
 `./bend-vmm.snap`, `Ctrl-A x` quits, `Ctrl-A h` lists the keys. Over
 `--control`: `echo pause | nc -U SOCK` (also `resume`, `status`,
-`snapshot PATH`, `status json` (`{"state":"running"}`), `balloon MiB`, `net` (the NAT's connections and flow state),
+`snapshot PATH`, `status json` (`{"state":"running"}`), `balloon MiB|auto`, `net` (the NAT's connections and flow state),
 `powerdown` (presses the guest's power button), `quit`;
 with `--display`, `screendump PATH` writes the
 screen as a PPM, `type TEXT` types on the virtio keyboard (`\n` is Return),
@@ -147,6 +147,22 @@ one reference, and a compressed one a reference to each host cluster its
 bytes span (the last one out frees it). A version 2 image over a backing
 file keeps its clusters (it has no zero flag). New
 writes to a qcow2 image take freed clusters again before growing the file.
+
+Write zeroes: a writable raw image also offers virtio-blk WRITE_ZEROES, so
+the guest's zeroing (ext4's zero-out, `fallocate` on the device) never
+writes zeros it can free instead: with UNMAP the whole 4 KiB blocks become
+holes (the space goes back to the host), without it the range is zeroed
+and stays allocated (Linux `FALLOC_FL_ZERO_RANGE`). A qcow2 image keeps
+DISCARD alone.
+
+Space the guest freed but never trimmed: `bend-vmm sparsify [IMG...]
+[--vm DIR]` gives back the free space of a stopped VM's ext4 file systems
+(on the whole disk, or in MBR or GPT partitions). It opens each image as a
+writer would, so a running VM's disk is refused; reads the superblock,
+group descriptors and block bitmaps (src/disk/ext4free.bend decides where
+to punch); and punches every free 4 KiB block. A file system not cleanly
+unmounted (or with errors, a journal to replay or META_BG) is skipped. Raw
+images only for now; other file systems are left alone.
 
 Disk snapshots: a snapshot also keeps each writable `--disk` image as it was,
 next to it (`PATH.GEN.disk0`, ...: a copy-on-write clone on APFS, btrfs or
@@ -210,6 +226,21 @@ balloon. `status json` then reads
 The device offers VIRTIO_BALLOON_F_DEFLATE_ON_OOM, so a guest short of
 memory takes pages back from the balloon instead of failing.
 
+By default the balloon is also automatic (`--balloon auto`;
+`--balloon free-page-reporting` keeps reporting alone): the device offers
+its stats queue (VIRTIO_BALLOON_F_STATS_VQ), the VMM reads the guest's free
+memory every 2 s (from 30 s after it starts), and moves the target so the guest keeps a floor free
+(256 MiB, or a tenth of its RAM) and the balloon holds at most half of it.
+That brings back memory free page reporting misses: Linux reports a zone
+again only after enough pages were freed there, so memory freed and taken
+again can sit free for hours (a Kubernetes control plane with 900 MB free
+kept all 2 GiB of its RAM on the host). A burst past what is left
+free takes pages back from the balloon as it goes (a 1.4 GiB write into
+a 2 GiB guest: 1.3 GB/s, against 4.1 GB/s with no balloon; nothing is
+killed). `balloon MiB` sets a target by hand and stops the automatic
+balloon; `balloon auto` starts it again. The policy is
+src/virtio/balauto.bend.
+
 ## VM folders and snapshots
 
 A VM can live in a folder: its options in `vm.conf`, its disks beside them,
@@ -231,6 +262,7 @@ bend-vmm restore before-upgrade       # saves the current state first, stops the
                                       # runs from the snapshot (memory and disks)
 bend-vmm restore before-restore-2026-11-11-081530   # ... which undoes it
 bend-vmm snapshot-rm NAME; bend-vmm prune --keep 5
+bend-vmm sparsify                     # (stopped) its disks' unused ext4 space back
 bend-vmm status | pause | resume | stop | powerdown
 ```
 

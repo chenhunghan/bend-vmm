@@ -11,7 +11,10 @@ guest wrote (the VMM sees the guest's data in released pages). The same once
 more after a snapshot and a restore (RAM mapped from the snapshot file).
 Then inflate and deflate from the control socket: 1 GiB of page cache,
 `balloon 1024` (status json reports it in the balloon; the VMM shrinks),
-`balloon 0` (the guest can use that memory again).
+`balloon 0` (the guest can use that memory again). Then the automatic
+balloon (the default, src/virtio/balauto.bend): an idle guest's free memory
+goes into it, a 1.2 GiB burst still fits with nothing killed, it fills again
+after; `balloon 100` stops it, `balloon auto` starts it again.
 """
 import hashlib, os, re, socket, subprocess, sys, time
 
@@ -52,6 +55,13 @@ class Vm:
         self.p.stdin.write(("%s; echo END$((%d+1))X\n" % (cmd, self.n)).encode()); self.p.stdin.flush()
         return self.wait("END%dX" % (self.n + 1), secs)
     def rss(self):
+        # (Linux: /proc; a minimal ps may not take -o)
+        try:
+            m = re.search(r"^VmRSS:\s+(\d+) kB", open("/proc/%d/status" % self.p.pid).read(), re.M)
+            if m:
+                return int(m.group(1)) // 1024
+        except OSError:
+            pass
         r = subprocess.run(["ps", "-o", "rss=", "-p", str(self.p.pid)], capture_output=True, text=True).stdout.strip()
         return int(r or 0) // 1024
     def end(self):
@@ -151,4 +161,38 @@ vm.p.kill(); vm.p.wait()
 vm = Vm(["--restore", snap])
 ok = vm.wait("restored", 60); vm.run("echo RE-$(ls /sys/bus/virtio/drivers/virtio_balloon/ | grep -c virtio)"); vm.end()
 check("a snapshot without the balloon restores without it", r == "saved" and ok and b"RE-0" in vm.out, (r, ok))
+# the automatic balloon (the default)
+def target_mib():
+    m = re.search(r'"target_mib":(\d+)', ctl("status json"))
+    return int(m.group(1)) if m else -1
+
+def wait_target(pred, secs):
+    t = -1
+    for _ in range(int(secs * 2 * slow)):
+        time.sleep(0.5)
+        t = target_mib()
+        if pred(t):
+            break
+    return t
+
+vm = Vm(["--mem", "2048", "--cpus", "2", "--kernel", "out/guest/Image", "--initrd", "out/guest/guest.cpio",
+         "--control", sock, "--cmdline", "console=ttyAMA0 quiet"])
+check("boot with the automatic balloon", vm.wait("busybox shell", 60))
+# (its first poll comes 30 s after the start: Auto.start_ms)
+t = wait_target(lambda t: t >= 512, 60)
+check("auto: an idle guest's free memory goes into the balloon (target %d MiB)" % t, t >= 512, t)
+vm.run("mkdir -p /t; mount -t tmpfs -o size=1900m none /t; dd if=/dev/zero of=/t/x bs=1048576 count=1200 2>/dev/null; echo BURST-$(wc -c < /t/x)", 300)
+o = vm.out.decode(errors="replace")
+check("auto: a 1.2 GiB burst fits, nothing killed", "BURST-1258291200" in o and "Killed" not in o and "Out of memory" not in o, o[-300:])
+vm.run("rm /t/x")
+t = wait_target(lambda t: t >= 512, 30)
+check("auto: after it, the balloon fills again (target %d MiB)" % t, t >= 512, t)
+ctl("balloon 100")
+time.sleep(6 * slow)
+t = target_mib()
+check("balloon 100 stops it (target %d MiB)" % t, t == 100, t)
+r = ctl("balloon auto")
+t = wait_target(lambda t: t >= 512, 30)
+check("balloon auto starts it again (target %d MiB)" % t, r == "balloon auto" and t >= 512, (r, t))
+vm.end()
 sys.exit(1 if fails else 0)

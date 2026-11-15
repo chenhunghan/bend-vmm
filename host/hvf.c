@@ -4039,6 +4039,73 @@ Term hvf_snap_commit_run(Env e, Term* f, IoWork* w) {
   return (Term)(u32)err;
 }
 
+// Hvf.tick_wait(ms) -> U32: parks until ms milliseconds from now, on a pipe
+// a host thread writes at that deadline, then 0. A timer the event loop
+// always sees: a parked IO.sleep alone was not woken while nothing else
+// happened (an idle guest), and the automatic balloon (host/main.bend,
+// balloon_poll) must run then most of all. One deadline at a time (the
+// latest asked for).
+static int             hvf_tick_pipe[2] = {-1, -1};
+static pthread_mutex_t hvf_tick_lock    = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  hvf_tick_bell    = PTHREAD_COND_INITIALIZER;
+static struct timespec hvf_tick_due; // realtime; tv_sec 0: none
+
+static void* hvf_tick_thread(void* arg) {
+  (void)arg;
+  pthread_mutex_lock(&hvf_tick_lock);
+  for (;;) {
+    while (hvf_tick_due.tv_sec == 0) {
+      pthread_cond_wait(&hvf_tick_bell, &hvf_tick_lock);
+    }
+    struct timespec due = hvf_tick_due;
+    if (pthread_cond_timedwait(&hvf_tick_bell, &hvf_tick_lock, &due) == ETIMEDOUT && hvf_tick_due.tv_sec == due.tv_sec &&
+        hvf_tick_due.tv_nsec == due.tv_nsec) {
+      hvf_tick_due.tv_sec = 0;
+      char b = 1;
+      (void)!write(hvf_tick_pipe[1], &b, 1);
+    }
+  }
+  return NULL;
+}
+
+static void hvf_tick_drain(void) {
+  char b[64];
+  while (read(hvf_tick_pipe[0], b, sizeof b) > 0) {
+  }
+}
+
+static Term hvf_tick_more(Env e, IoWork* w) {
+  hvf_tick_drain();
+  return (Term)0;
+}
+
+Term hvf_tick_wait_run(Env e, Term* f, IoWork* w) {
+  if (hvf_tick_pipe[0] < 0) {
+    pthread_t t;
+    if (pipe(hvf_tick_pipe) != 0) {
+      return (Term)HVF_ERR;
+    }
+    for (int i = 0; i < 2; i++) {
+      fcntl(hvf_tick_pipe[i], F_SETFL, fcntl(hvf_tick_pipe[i], F_GETFL) | O_NONBLOCK);
+      fcntl(hvf_tick_pipe[i], F_SETFD, FD_CLOEXEC);
+    }
+    if (pthread_create(&t, NULL, hvf_tick_thread, NULL) != 0) {
+      return (Term)HVF_ERR;
+    }
+    pthread_detach(t);
+  }
+  hvf_tick_drain();
+  struct timeval now;
+  gettimeofday(&now, NULL);
+  uint64_t ns = (uint64_t)now.tv_usec * 1000 + (uint64_t)(u32)f[0] * 1000000ull;
+  pthread_mutex_lock(&hvf_tick_lock);
+  hvf_tick_due.tv_sec  = now.tv_sec + (time_t)(ns / 1000000000ull);
+  hvf_tick_due.tv_nsec = (long)(ns % 1000000000ull);
+  pthread_cond_signal(&hvf_tick_bell);
+  pthread_mutex_unlock(&hvf_tick_lock);
+  return io_wait_on(w, hvf_tick_pipe[0], POLLIN, 0, hvf_tick_more);
+}
+
 // Hvf.rename(from, to) -> U32: 0, or an errno. A rename replaces a symlink
 // at to rather than following it, and a file mapped (a restored snapshot's
 // RAM) keeps its old contents.
@@ -5753,6 +5820,40 @@ Term hvf_disk_zero_run(Env e, Term* f, IoWork* w) {
   return (Term)0;
 }
 
+// Hvf.disk_zero_keep(disk, off_hi, off_lo, len) -> U32: the range reads as
+// zeros afterwards and stays allocated (WRITE_ZEROES without UNMAP): the
+// file system's zero range (Linux FALLOC_FL_ZERO_RANGE), else zeros
+// written. 0, or 0xFFFFFFFF (marked for Hvf.disk_status).
+Term hvf_disk_zero_keep_run(Env e, Term* f, IoWork* w) {
+  int   fd  = hvf_disk(f[0]);
+  off_t off = (off_t)hvf_u64(f[1], f[2]);
+  u64   len = (u32)f[3];
+  if (fd < 0) {
+    return hvf_disk_mark(f[0], (Term)HVF_ERR);
+  }
+#ifndef __APPLE__
+#ifndef FALLOC_FL_ZERO_RANGE
+#define FALLOC_FL_ZERO_RANGE 0x10
+#endif
+  if (fallocate(fd, FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE, off, (off_t)len) == 0) {
+    return (Term)0;
+  }
+#endif
+  static const char z[65536];
+  for (u64 at = 0; at < len;) {
+    size_t  n = len - at < sizeof z ? (size_t)(len - at) : sizeof z;
+    ssize_t k = pwrite(fd, z, n, off + (off_t)at);
+    if (k < 0 && errno == EINTR) {
+      continue;
+    }
+    if (k <= 0) {
+      return hvf_disk_mark(f[0], (Term)HVF_ERR);
+    }
+    at += (u64)k;
+  }
+  return (Term)0;
+}
+
 // Hvf.ram_release(iovs) -> U32: lets go of the host memory behind pieces of
 // guest RAM (virtio-balloon free page reporting; src/virtio/balloon.bend
 // hands whole 64 KiB blocks; one not host-page aligned is refused). The
@@ -6052,6 +6153,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #ifdef CID(Hvf.snap_rebase)
   io_eff(CID(Hvf.snap_rebase), hvf_snap_rebase_run);
 #endif
+#ifdef CID(Hvf.tick_wait)
+  io_eff(CID(Hvf.tick_wait), hvf_tick_wait_run);
+#endif
 #ifdef CID(Hvf.rename)
   io_eff(CID(Hvf.rename), hvf_rename_run);
 #endif
@@ -6168,6 +6272,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.disk_zero)
   io_eff(CID(Hvf.disk_zero), hvf_disk_zero_run);
+#endif
+#ifdef CID(Hvf.disk_zero_keep)
+  io_eff(CID(Hvf.disk_zero_keep), hvf_disk_zero_keep_run);
 #endif
 #ifdef CID(Hvf.disk_discard)
   io_eff(CID(Hvf.disk_discard), hvf_disk_discard_run);

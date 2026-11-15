@@ -96,3 +96,6 @@ def L.control.balloon_pages():
 
 def L.control.status_json_balloon():
   {==}
+
+def L.control.balloon_auto():
+  {==}

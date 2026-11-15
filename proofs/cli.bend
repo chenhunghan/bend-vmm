@@ -160,3 +160,6 @@ def L.cli.balloon_default():
 
 def L.cli.balloon_values():
   {==}
+
+def L.cli.balloon_auto():
+  {==}

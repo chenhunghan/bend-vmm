@@ -63,3 +63,19 @@ law blk.offered_discard_ro:
 # 32, discard_sector_alignment 8.
 law blk.config_discard:
   {List.drop(&2, U32, K.Blk.config_dis(U.U64{0, 16}), 36n) == [0, 0, 64, 0, 32, 0, 0, 0, 8, 0, 0, 0] : +List<U32>}
+
+# Proposed: WRITE_ZEROES (type 13) is request kind 6; a writable raw disk
+# offers it (bit 14) beside DISCARD, a read-only one neither; its config
+# ends with max_write_zeroes_sectors, max_write_zeroes_seg and
+# write_zeroes_may_unmap.
+law blk.kind_write_zeroes:
+  {K.Blk.kind(13) == 6n : Nat}
+
+law blk.offered_write_zeroes:
+  {K.Blk.offered_wz(False{}) == U.U64{1, 25094} : U.U64}
+
+law blk.offered_write_zeroes_ro:
+  {K.Blk.offered_wz(True{}) == U.U64{1, 550} : U.U64}
+
+law blk.config_write_zeroes:
+  {List.drop(&2, U32, K.Blk.config_wz(U.U64{0, 16}), 48n) == [0, 0, 64, 0, 32, 0, 0, 0, 1, 0, 0, 0] : +List<U32>}

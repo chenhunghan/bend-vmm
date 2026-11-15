@@ -39,3 +39,9 @@ def L.cmds.for_restore():
 
 def L.cmds.conf_disk_options():
   {==}
+
+def L.cmds.sparsify():
+  {==}
+
+def L.cmds.sparsify_folder():
+  {==}

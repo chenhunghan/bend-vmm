@@ -17,6 +17,11 @@
 //   bench peek ADDR N  N 32-bit reads of physical ADDR (decimal) through
 //                    /dev/mem: an unmapped one traps to the VMM each time
 //                    (no tool in between: the NAT's own rate)
+//   bench punch DEV OFF LEN  fallocate(PUNCH_HOLE | KEEP_SIZE) on the block
+//                    device: virtio-blk WRITE_ZEROES with UNMAP; prints
+//                    FALLOC-0 or FALLOC-<errno>
+//   bench zero DEV OFF LEN   fallocate(ZERO_RANGE | KEEP_SIZE): WRITE_ZEROES
+//                    without UNMAP
 //   bench on CPU PROG ARGS...  runs PROG on vCPU CPU only (where the devices'
 //                    interrupts land, so no IPI wakes it: steadier numbers)
 // Prints `BENCH <name> <value> <unit>` lines.
@@ -46,6 +51,7 @@ static i64 sys(i64 n, i64 a, i64 b, i64 c, i64 d, i64 e, i64 f) {
 #define SYS_mmap 222
 #define SYS_clock_gettime 113
 #define SYS_ioctl 29
+#define SYS_fallocate 47
 #define SYS_sched_setaffinity 122
 #define SYS_execve 221
 #define SYS_read 63
@@ -133,6 +139,17 @@ static int disk(const char* dev) {
   put("BENCH disk-4k-latency "); putd(ns / n / 100); put(" us"); flush();
   sys(SYS_close, fd, 0, 0, 0, 0, 0);
   return 0;
+}
+
+// fallocate on a block device: mode 3 (PUNCH_HOLE | KEEP_SIZE) or 17
+// (ZERO_RANGE | KEEP_SIZE); the kernel sends virtio-blk WRITE_ZEROES.
+static int falloc(const char* dev, u64 mode, u64 off, u64 len) {
+  i64 fd = sys(SYS_openat, AT_FDCWD, (i64)dev, O_RDWR, 0, 0, 0);
+  if (fd < 0) { put("FALLOC-open"); flush(); return 1; }
+  i64 r = sys(SYS_fallocate, fd, (i64)mode, (i64)off, (i64)len, 0, 0);
+  put("FALLOC-"); putu(r < 0 ? (u64)-r : 0); flush();
+  sys(SYS_close, fd, 0, 0, 0, 0, 0);
+  return r < 0;
 }
 
 static int peek(u64 addr, u64 n) {
@@ -286,6 +303,8 @@ void _start_c(u64* sp) {
   }
   if (argc >= 3 && eq(argv[1], "disk")) rc = disk(argv[2]);
   else if (argc >= 2 && eq(argv[1], "mmio")) rc = mmio();
+  else if (argc >= 5 && eq(argv[1], "punch")) rc = falloc(argv[2], 3, num(argv[3]), num(argv[4]));
+  else if (argc >= 5 && eq(argv[1], "zero")) rc = falloc(argv[2], 17, num(argv[3]), num(argv[4]));
   else if (argc >= 5 && eq(argv[1], "send")) rc = net(1, argv[2], argv[3], num(argv[4]));
   else if (argc >= 4 && eq(argv[1], "recv")) rc = net(0, argv[2], argv[3], 0);
   else if (argc >= 4 && eq(argv[1], "peek")) rc = peek(num(argv[2]), num(argv[3]));

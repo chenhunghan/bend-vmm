@@ -176,3 +176,8 @@ law cli.balloon_default:
 
 law cli.balloon_values:
   {C.Cli.balloon_ok("off") && C.Cli.balloon_ok("free-page-reporting") && Bool.not(C.Cli.balloon_ok("on")) == True{} : Bool}
+
+# Proposed: the automatic balloon is the default and --balloon auto;
+# free-page-reporting keeps reporting alone; auto is a value --balloon takes.
+law cli.balloon_auto:
+  {C.Cli.balloon_auto("") && C.Cli.balloon_auto("auto") && Bool.not(C.Cli.balloon_auto("free-page-reporting")) && C.Cli.balloon_ok("auto") == True{} : Bool}
