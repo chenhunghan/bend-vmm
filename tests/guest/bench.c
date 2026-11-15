@@ -22,6 +22,8 @@
 //                    FALLOC-0 or FALLOC-<errno>
 //   bench zero DEV OFF LEN   fallocate(ZERO_RANGE | KEEP_SIZE): WRITE_ZEROES
 //                    without UNMAP
+//   bench tick HZ SECONDS  sleeps 1/HZ s in a loop (nanosleep, no fork):
+//                    a guest that only wakes on a timer
 //   bench on CPU PROG ARGS...  runs PROG on vCPU CPU only (where the devices'
 //                    interrupts land, so no IPI wakes it: steadier numbers)
 // Prints `BENCH <name> <value> <unit>` lines.
@@ -52,6 +54,7 @@ static i64 sys(i64 n, i64 a, i64 b, i64 c, i64 d, i64 e, i64 f) {
 #define SYS_clock_gettime 113
 #define SYS_ioctl 29
 #define SYS_fallocate 47
+#define SYS_nanosleep 101
 #define SYS_sched_setaffinity 122
 #define SYS_execve 221
 #define SYS_read 63
@@ -138,6 +141,13 @@ static int disk(const char* dev) {
   put("BENCH disk-4k-read "); putu(n * 1000000000ul / ns); put(" IOPS"); flush();
   put("BENCH disk-4k-latency "); putd(ns / n / 100); put(" us"); flush();
   sys(SYS_close, fd, 0, 0, 0, 0, 0);
+  return 0;
+}
+
+static int tick(u64 hz, u64 secs) {
+  struct { i64 s, ns; } t = {0, (i64)(1000000000ul / (hz ? hz : 1))};
+  if (hz == 1) { t.s = 1; t.ns = 0; }
+  for (u64 i = 0; i < hz * secs; i++) sys(SYS_nanosleep, (i64)&t, 0, 0, 0, 0, 0);
   return 0;
 }
 
@@ -303,6 +313,7 @@ void _start_c(u64* sp) {
   }
   if (argc >= 3 && eq(argv[1], "disk")) rc = disk(argv[2]);
   else if (argc >= 2 && eq(argv[1], "mmio")) rc = mmio();
+  else if (argc >= 4 && eq(argv[1], "tick")) rc = tick(num(argv[2]), num(argv[3]));
   else if (argc >= 5 && eq(argv[1], "punch")) rc = falloc(argv[2], 3, num(argv[3]), num(argv[4]));
   else if (argc >= 5 && eq(argv[1], "zero")) rc = falloc(argv[2], 17, num(argv[3]), num(argv[4]));
   else if (argc >= 5 && eq(argv[1], "send")) rc = net(1, argv[2], argv[3], num(argv[4]));

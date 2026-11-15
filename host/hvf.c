@@ -5856,7 +5856,7 @@ Term hvf_disk_zero_keep_run(Env e, Term* f, IoWork* w) {
 
 // Hvf.ram_release(iovs) -> U32: lets go of the host memory behind pieces of
 // guest RAM (virtio-balloon free page reporting; src/virtio/balloon.bend
-// hands whole 64 KiB blocks; one not host-page aligned is refused). The
+// hands whole 16 KiB blocks; the whole host pages inside each go). The
 // guest does not touch a range while it reports it. On macOS the range is
 // unmapped from the guest, replaced by fresh anonymous pages and mapped
 // again: its memory leaves the process at once and the guest reads zeros
@@ -5898,20 +5898,17 @@ Term hvf_ram_release_run(Env e, Term* f, IoWork* w) {
   char*           b = io_cbuf(e, f[0], &nb, CID(Con));
   int             n = hvf_iovs(b, nb, hva, len, HVF_MAX_IOVS);
   free(b);
-  // Bend hands whole 64 KiB blocks (Balloon.inside); a piece that is not
-  // host-page aligned is refused, never rounded here
+  // Bend hands whole 16 KiB blocks (Balloon.align): whole pages on a 4 or
+  // 16 KiB host. The whole host pages inside each piece are released (a 64
+  // KiB-page host: none of a 16 KiB block)
   uintptr_t pg = (uintptr_t)getpagesize();
   for (int i = 0; i < n; i++) {
-    if (((uintptr_t)hva[i] | (uintptr_t)len[i]) & (pg - 1)) {
-      return (Term)HVF_ERR;
-    }
-  }
-  for (int i = 0; i < n; i++) {
+    uintptr_t a = ((uintptr_t)hva[i] + pg - 1) & ~(pg - 1), e = ((uintptr_t)hva[i] + len[i]) & ~(pg - 1);
     if (hvf_trace & 16) {
       fprintf(stderr, "[trace] balloon release %p +%llu\n", (void*)hva[i], (unsigned long long)len[i]);
     }
-    if (len[i]) {
-      hvf_ram_drop(hva[i], len[i]);
+    if (a < e) {
+      hvf_ram_drop((uint8_t*)a, (uint64_t)(e - a));
     }
   }
   return (Term)(n < 0 ? HVF_ERR : 0);

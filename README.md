@@ -212,7 +212,14 @@ about 1.1 GiB to about 180 MiB resident. On macOS the reported range is
 unmapped from the guest, replaced by fresh pages and mapped again (the
 memory leaves the process at once; the guest reads zeros there next); on
 Linux it is `madvise(MADV_DONTNEED)` (zeros, or the snapshot's contents for
-RAM mapped from a snapshot). Only whole 64 KiB blocks are released. The
+RAM mapped from a snapshot). Only whole 16 KiB blocks are released (a
+macOS page; on a 64 KiB-page Linux host, the whole pages inside). A guest
+with 4 KiB pages frees memory in 4 KiB pieces, so on fragmented memory
+much of it cannot come back to a 16 KiB-page Mac: in a test, about 400 MB
+of free guest memory stayed with the host. `page_reporting.page_reporting_order=2`
+on the guest's command line reports 16 KiB blocks (the default is 2 or 4
+MiB), and a guest kernel with 16 KiB pages (CONFIG_ARM64_16K_PAGES)
+releases in whole host pages. The
 device goes last, so other devices keep their slots; a snapshot restores
 with or without it as it was taken. A guest's page cache counts as used:
 `echo 1 > /proc/sys/vm/drop_caches` in the guest frees it for reporting.
@@ -220,7 +227,7 @@ with or without it as it was taken. A guest's page cache counts as used:
 The host can also take memory back on demand: `balloon MiB` on the control
 socket sets how much the guest should give to the balloon (`balloon 0`
 gives it all back); the guest frees that much (dropping cache first) and
-the VMM releases each 64 KiB block once all of its pages are in the
+the VMM releases each 16 KiB block once all of its pages are in the
 balloon. `status json` then reads
 `{"state":"running","balloon":{"target_mib":1024,"actual_mib":1024}}`.
 The device offers VIRTIO_BALLOON_F_DEFLATE_ON_OOM, so a guest short of

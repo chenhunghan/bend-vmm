@@ -196,8 +196,9 @@ def Enc.state(s: D.DevState) -> +List<U32>:
     case D.LanDev{Ln.Lan{mac, ip, p, +rx}}:
       List.append(&2, U32, 6 <> X.Enc.bytes(mac), List.append(&2, U32, [ip, p, Enc.len(Ln.LanRx, rx)], Enc.lanrx(rx)))
     case D.BalDev{Bl.Bal{t, a, +ps}, Bl.AutoSt{h, asked, manual, Au.Stats{f, tot, av}}}:
-      # 8: 7's balloon, then the automatic balloon's state
-      List.append(&2, U32, [8, t, a, Enc.len(Bl.Part, ps)], List.append(&2, U32, Enc.parts(ps), [h, Bool.to_u32(asked), Bool.to_u32(manual), f, tot, av]))
+      # 9: the balloon (16 KiB blocks), then the automatic balloon's state
+      # (7 and 8, older: 64 KiB blocks, Bl.Balloon.parts16)
+      List.append(&2, U32, [9, t, a, Enc.len(Bl.Part, ps)], List.append(&2, U32, Enc.parts(ps), [h, Bool.to_u32(asked), Bool.to_u32(manual), f, tot, av]))
 
 def Enc.dev(d: D.Dev) -> +List<U32>:
   match d:
@@ -628,21 +629,21 @@ def Dec.state.bal() -> X.Dec<D.DevState>:
     a : U32 <- X.Dec.u32()
     n : Nat <- Dec.count()
     ps : +List<Bl.Part> <- Dec.parts(n)
-    return D.BalDev{Bl.Bal{t, a, ps}, Bl.Balloon.auto_new()}
+    return D.BalDev{Bl.Bal{t, a, Bl.Balloon.parts16(ps)}, Bl.Balloon.auto_new()}
 
-def Dec.state.bal2() -> X.Dec<D.DevState>:
+def Dec.state.bal2(+wide: Bool) -> X.Dec<D.DevState>:
   do X.Dec<D.DevState>:
     t : U32 <- X.Dec.u32()
     a : U32 <- X.Dec.u32()
     n : Nat <- Dec.count()
-    ps : +List<Bl.Part> <- Dec.parts(n)
+    +ps : +List<Bl.Part> <- Dec.parts(n)
     h : U32 <- X.Dec.u32()
     asked : Bool <- X.Dec.bool()
     manual : Bool <- X.Dec.bool()
     f : U32 <- X.Dec.u32()
     tot : U32 <- X.Dec.u32()
     av : U32 <- X.Dec.u32()
-    return D.BalDev{Bl.Bal{t, a, ps}, Bl.AutoSt{h, asked, manual, Au.Stats{f, tot, av}}}
+    return D.BalDev{Bl.Bal{t, a, Bool.pick(+List<Bl.Part>, wide, Bl.Balloon.parts16(ps), ps)}, Bl.AutoSt{h, asked, manual, Au.Stats{f, tot, av}}}
 
 def Dec.state.top(lan: Bool, +t: U32) -> X.Dec<D.DevState>:
   match lan:
@@ -661,14 +662,14 @@ def Dec.state.top2(bal: Bool, +t: U32) -> X.Dec<D.DevState>:
 def Dec.state.top3(auto: Bool, +t: U32) -> X.Dec<D.DevState>:
   match auto:
     case True{}:
-      Dec.state.bal2()
+      Dec.state.bal2(U32.is_eq(t, 8))
     case False{}:
       Dec.state.top2(U32.is_eq(t, 7), t)
 
 def Dec.state() -> X.Dec<D.DevState>:
   do X.Dec<D.DevState>:
     +t : U32 <- X.Dec.u32()
-    Dec.state.top3(U32.is_eq(t, 8), t)
+    Dec.state.top3(U32.is_eq(t, 8) || U32.is_eq(t, 9), t)
 
 def Dec.dev() -> X.Dec<D.Dev>:
   do X.Dec<D.Dev>:

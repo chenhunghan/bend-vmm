@@ -53,8 +53,9 @@ def used(r: Maybe<&1, S.Sim & (Q.Vq & Bool)>) -> Bool:
     case Some{(s, (q, u))}:
       u
 
-# The inflate queue: one readable buffer of 15 page numbers (256..270; not a
-# whole block, so nothing released): counted in the state, the buffer used.
+# The inflate queue: one readable buffer of 15 page numbers (256, 258, ...,
+# 284: every other page, no whole 16 KiB block, so nothing released):
+# counted in the state, the buffer used.
 def le32s(xs: +List<U32>) -> +List<U32>:
   match xs:
     case Nil{}:
@@ -67,7 +68,7 @@ def pfns(n: Nat, +i: U32) -> +List<U32>:
     case 0n:
       []
     case 1n+k:
-      Con{i, pfns(k, (i + 1 : U32))}
+      Con{i, pfns(k, (i + 2 : U32))}
 
 def infl_sim(+inflate: Bool) -> S.Sim:
   +s = S.Sim.new(u64(4096), 8192n)

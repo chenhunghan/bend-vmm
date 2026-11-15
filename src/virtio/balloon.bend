@@ -18,7 +18,10 @@ import ./balauto.bend as A
 # (Op.ram_release: what the guest touches there again reads as zeros or as
 # its old contents, never anything else), then returns the buffer, used
 # length 0. Only the whole Balloon.align() blocks inside a range are
-# released, so a host page is never cut (macOS: 16 KiB pages). Buffers on
+# released: 16 KiB, a host page on macOS and a whole number of them on a
+# 4 KiB host (a 64 KiB-page host releases the whole pages inside, none of a
+# 16 KiB block). Coarser blocks left most of a fragmented guest's memory
+# charged to the host (64 KiB: 841 MiB in the balloon, ~550 MiB of it kept). Buffers on
 # the inflate and deflate queues are returned untouched (num_pages is 0, so
 # a driver posts none).
 
@@ -34,16 +37,15 @@ def Balloon.report_queue() -> U32:
 def Balloon.config() -> +List<U32>:
   B.Bytes.zeros(8n)
 
-# The release granule: 64 KiB covers the host page sizes in use (4, 16 and
-# 64 KiB).
+# The release granule: 16 KiB, macOS's host page.
 def Balloon.align() -> U32:
-  65536
+  16384
 
 # The whole granules inside [addr, addr+len): none (len 0) when there are
 # none.
 def Balloon.inside(+addr: U.U64, +len: U32) -> V.Iov:
-  +a = U.U64.align_up(16n, addr)
-  +e = U.U64.and(U.U64.add_u32(addr, len), U.U64.not(U.U64{0, 65535}))
+  +a = U.U64.align_up(14n, addr)
+  +e = U.U64.and(U.U64.add_u32(addr, len), U.U64.not(U.U64{0, 16383}))
   V.Iov{a, Bool.pick(U32, U.U64.is_lt(a, e), U.U64.lo(U.U64.sub(e, a)), 0)}
 
 def Balloon.len(+i: V.Iov) -> U32:
@@ -107,9 +109,9 @@ def Balloon.process(-R: Type, +sel: U32, q: Q.Vq) -> V.Op<R, Q.Vq & Bool>:
 # the guest gives pages to the balloon on the inflate queue and takes them
 # back on the deflate queue, each buffer an array of u32 page frame numbers
 # (4 KiB pages, at most Balloon.max_pfns() of them read per buffer). The
-# device counts them (actual) and lets go of a 64 KiB block's memory once
-# all its 16 pages are in the balloon: it keeps, per block that is partly
-# in, a 16-bit mask of the pages that are. A deflated page leaves its mask;
+# device counts them (actual) and lets go of a 16 KiB block's memory once
+# all its 4 pages are in the balloon: it keeps, per block that is partly
+# in, a 4-bit mask of the pages that are. A deflated page leaves its mask;
 # one of a block already released is not tracked again (its memory reads
 # zeros when the guest touches it), so the device never releases a block
 # with a page the guest still has.
@@ -171,7 +173,7 @@ def Balloon.take(ps: +List<Part>, +block: U32, +bit: U32) -> Took:
         case Part{+b, +m}:
           +m2 = (m .|. bit : U32)
           Bool.pick(Took, U32.is_eq(b, block),
-            Bool.pick(Took, U32.is_eq(m2, 65535), Took{rest, block}, Took{Con{Part{b, m2}, rest}, Balloon.none()}),
+            Bool.pick(Took, U32.is_eq(m2, 15), Took{rest, block}, Took{Con{Part{b, m2}, rest}, Balloon.none()}),
             Balloon.take.add(Part{b, m}, Balloon.take(rest, block, bit)))
 
 def Balloon.give(ps: +List<Part>, +block: U32, +bit: U32) -> +List<Part>:
@@ -181,17 +183,34 @@ def Balloon.give(ps: +List<Part>, +block: U32, +bit: U32) -> +List<Part>:
     case Con{p, +rest}:
       match p:
         case Part{+b, +m}:
-          +m2 = (m .&. U32.xor(65535, bit) : U32)
+          +m2 = (m .&. U32.xor(15, bit) : U32)
           Bool.pick(+List<Part>, U32.is_eq(b, block),
             Bool.pick(+List<Part>, U32.is_eq(m2, 0), rest, Con{Part{b, m2}, rest}),
             Con{Part{b, m}, Balloon.give(rest, block, bit)})
 
 def Balloon.bit(+pfn: U32) -> U32:
-  (1 << U32.to_nat((pfn .&. 15 : U32)) : U32)
+  (1 << U32.to_nat((pfn .&. 3 : U32)) : U32)
+
+# A snapshot taken with 64 KiB blocks (state tags 7 and 8): each mask of 16
+# pages as the masks of its four 16 KiB blocks (none for an empty quarter).
+# A quarter all in the balloon was not released then: it keeps a whole mask
+# and stays until deflated.
+def Balloon.parts16.q(+b: U32, +m: U32, +q: U32, +rest: +List<Part>) -> +List<Part>:
+  +nib = ((m >> U32.to_nat((q * 4 : U32))) .&. 15 : U32)
+  Bool.pick(+List<Part>, U32.is_zero(nib), rest, Con{Part{((b * 4 : U32) + q : U32), nib}, rest})
+
+def Balloon.parts16(ps: +List<Part>) -> +List<Part>:
+  match ps:
+    case Nil{}:
+      []
+    case Con{p, rest}:
+      match p:
+        case Part{+b, +m}:
+          Balloon.parts16.q(b, m, 0, Balloon.parts16.q(b, m, 1, Balloon.parts16.q(b, m, 2, Balloon.parts16.q(b, m, 3, Balloon.parts16(rest)))))
 
 # The released blocks of an inflate, as guest ranges.
 def Balloon.block_iov(+block: U32) -> V.Iov:
-  V.Iov{U.U64.shl(16n, U.U64{0, block}), 65536}
+  V.Iov{U.U64.shl(14n, U.U64{0, block}), 16384}
 
 type Inflated is Data:
   Inflated{bal: Bal, free: +List<V.Iov>}
@@ -209,7 +228,7 @@ def Balloon.inflate(pfns: +List<U32>, +i: Inflated) -> Inflated:
     case Con{+pfn, rest}:
       match i:
         case Inflated{Bal{+t, +a, +ps}, +free}:
-          Balloon.inflate(rest, Balloon.inflate.one(Balloon.take(ps, (pfn >> 4n : U32), Balloon.bit(pfn)), t, a, free))
+          Balloon.inflate(rest, Balloon.inflate.one(Balloon.take(ps, (pfn >> 2n : U32), Balloon.bit(pfn)), t, a, free))
 
 # Pages out of the balloon.
 def Balloon.deflate(pfns: +List<U32>, +b: Bal) -> Bal:
@@ -219,7 +238,7 @@ def Balloon.deflate(pfns: +List<U32>, +b: Bal) -> Bal:
     case Con{+pfn, rest}:
       match b:
         case Bal{+t, +a, +ps}:
-          Balloon.deflate(rest, Bal{t, Bool.pick(U32, U32.is_eq(a, 0), 0, (a - 1 : U32)), Balloon.give(ps, (pfn >> 4n : U32), Balloon.bit(pfn))})
+          Balloon.deflate(rest, Bal{t, Bool.pick(U32, U32.is_eq(a, 0), 0, (a - 1 : U32)), Balloon.give(ps, (pfn >> 2n : U32), Balloon.bit(pfn))})
 
 # The u32 page numbers of a buffer's bytes (little-endian).
 def Balloon.pfns(fuel: Nat, bs: +List<U32>) -> +List<U32>:
