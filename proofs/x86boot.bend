@@ -43,3 +43,9 @@ def L.x86boot.regs_rip():
 def L.x86boot.cpuid_rules():
   {==}
 
+def L.x86boot.default_console():
+  {==}
+
+def L.x86boot.own_cmdline():
+  {==}
+

@@ -2302,7 +2302,7 @@ def x86.boot.placed(lay: Maybe<&2, Xb.BzLayout>, +info: Xb.BzInfo, +head: +List<
             die_if(U32.is_eq(klen, err()), "cannot load the kernel")
             +got : U32 <- place_initrd(U32.is_ne(rdlen, 0), initrd, U.U64{0, rd})
             die_if(U32.is_ne(got, rdlen), "loading the initrd")
-            _ : U32 <- H.Host.write(U.U64{0, X.X86.cmdline()}, Xb.Bz.cmdline(info, cmdline))
+            _ : U32 <- H.Host.write(U.U64{0, X.X86.cmdline()}, Xb.Bz.cmdline(info, Xb.Bz.cmdline_for(cmdline)))
             _ : U32 <- H.Host.write(U.U64{0, X.X86.acpi()}, Xa.Acpi.tables(X.X86.acpi(), cpus, nslots))
             _ : U32 <- H.Host.write(U.U64{0, X.X86.zero_page()}, Xb.Bz.zero_page(info, head, ram_bytes(mem), Xb.BzLayout{load, k, rd, rdlen}, X.X86.acpi()))
             _ : U32 <- H.Host.write(U.U64{0, X.X86.gdt()}, Xb.Boot.gdt())
