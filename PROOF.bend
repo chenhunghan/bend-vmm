@@ -67,3 +67,8 @@ import ./proofs/cmds.bend as Proofs_cmds
 import ./proofs/balloon.bend as Proofs_balloon
 import ./proofs/balauto.bend as Proofs_balauto
 import ./proofs/ext4free.bend as Proofs_ext4free
+import ./proofs/x86layout.bend as Proofs_x86layout
+import ./proofs/x86exit.bend as Proofs_x86exit
+import ./proofs/x86pio.bend as Proofs_x86pio
+import ./proofs/x86acpi.bend as Proofs_x86acpi
+import ./proofs/x86boot.bend as Proofs_x86boot
