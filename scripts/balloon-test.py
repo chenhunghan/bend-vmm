@@ -25,6 +25,14 @@ twice until Hvf.ram_settle maps them again).
 import hashlib, os, re, socket, subprocess, sys, time
 
 vmm, d = sys.argv[1], sys.argv[2]
+# the guest (BALLOON_KERNEL, BALLOON_INITRD, BALLOON_CONSOLE: the arm64
+# guest by default); BALLOON_SNAPSHOTS=0 skips the snapshot steps and
+# BALLOON_FRAG=0 the fragmented guest (its bench program is arm64's)
+K = os.environ.get("BALLOON_KERNEL", K)
+I = os.environ.get("BALLOON_INITRD", I)
+C = os.environ.get("BALLOON_CONSOLE", "console=ttyAMA0") + " quiet"
+snaps = os.environ.get("BALLOON_SNAPSHOTS", "1") != "0"
+frag = os.environ.get("BALLOON_FRAG", "1") != "0"
 slow = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
 disk, sock, snap = os.path.join(d, "d.img"), os.path.join(d, "vm.sock"), os.path.join(d, "vm.snap")
 fails = []
@@ -103,20 +111,21 @@ def round_(vm, tag):
     check("%s: the host sees what the guest wrote into released memory" % tag, g is not None and g.group(1) == host, (g and g.group(1), host))
 
 open(disk, "wb").truncate(64 << 20)
-vm = Vm(["--mem", "2048", "--cpus", "2", "--kernel", "out/guest/Image", "--initrd", "out/guest/guest.cpio", "--disk", disk,
-         "--control", sock, "--balloon", "free-page-reporting", "--cmdline", "console=ttyAMA0 quiet"])
+vm = Vm(["--mem", "2048", "--cpus", "2", "--kernel", K, "--initrd", I, "--disk", disk,
+         "--control", sock, "--balloon", "free-page-reporting", "--cmdline", C])
 check("boot", vm.wait("busybox shell", 60))
 vm.run("echo BAL-$(ls /sys/bus/virtio/drivers/virtio_balloon/ | grep -c virtio)")
 check("the guest binds the balloon", b"BAL-1" in vm.out)
 round_(vm, "boot")
-s = socket.socket(socket.AF_UNIX); s.connect(sock); s.sendall(("snapshot %s\n" % snap).encode())
-r = s.makefile().readline().strip(); s.close()
-check("snapshot with the balloon", r == "saved", r)
-vm.p.kill(); vm.p.wait()
-vm = Vm(["--restore", snap, "--disk", disk])
-check("restore with the balloon", vm.wait("restored", 60))
-vm.run("true")
-round_(vm, "restored")
+if snaps:
+    s = socket.socket(socket.AF_UNIX); s.connect(sock); s.sendall(("snapshot %s\n" % snap).encode())
+    r = s.makefile().readline().strip(); s.close()
+    check("snapshot with the balloon", r == "saved", r)
+    vm.p.kill(); vm.p.wait()
+    vm = Vm(["--restore", snap, "--disk", disk])
+    check("restore with the balloon", vm.wait("restored", 60))
+    vm.run("true")
+    round_(vm, "restored")
 vm.end()
 
 def ctl(cmd):
@@ -129,8 +138,8 @@ def ctl(cmd):
 open(disk, "wb").truncate(1100 << 20)
 with open(disk, "r+b") as f:
     f.write(os.urandom(1024 << 20))
-vm = Vm(["--mem", "2048", "--cpus", "2", "--kernel", "out/guest/Image", "--initrd", "out/guest/guest.cpio", "--disk", disk,
-         "--control", sock, "--balloon", "free-page-reporting", "--cmdline", "console=ttyAMA0 quiet"])
+vm = Vm(["--mem", "2048", "--cpus", "2", "--kernel", K, "--initrd", I, "--disk", disk,
+         "--control", sock, "--balloon", "free-page-reporting", "--cmdline", C])
 check("boot again", vm.wait("busybox shell", 60))
 vm.run("dd if=/dev/vda of=/dev/null bs=1048576 count=1024 2>/dev/null")
 full = vm.rss()
@@ -162,19 +171,22 @@ vm.end()
 
 # the balloon is the default; --balloon off leaves it out, and a snapshot
 # taken without it restores without it
-vm = Vm(["--mem", "512", "--kernel", "out/guest/Image", "--initrd", "out/guest/guest.cpio", "--cmdline", "console=ttyAMA0 quiet"])
+vm = Vm(["--mem", "512", "--kernel", K, "--initrd", I, "--cmdline", C])
 vm.wait("busybox shell", 60); vm.run("echo DEF-$(ls /sys/bus/virtio/drivers/virtio_balloon/ | grep -c virtio)"); vm.end()
 check("the balloon is on by default", b"DEF-1" in vm.out)
-vm = Vm(["--mem", "512", "--kernel", "out/guest/Image", "--initrd", "out/guest/guest.cpio", "--control", sock, "--balloon", "off", "--cmdline", "console=ttyAMA0 quiet"])
+vm = Vm(["--mem", "512", "--kernel", K, "--initrd", I, "--control", sock, "--balloon", "off", "--cmdline", C])
 vm.wait("busybox shell", 60); vm.run("echo OFF-$(ls /sys/bus/virtio/drivers/virtio_balloon/ | grep -c virtio)")
 check("--balloon off leaves it out", b"OFF-0" in vm.out)
 r = ctl("balloon 100")
 check("balloon MiB without one says so", r.startswith("error: no balloon"), r)
-r = ctl("snapshot " + snap)
-vm.p.kill(); vm.p.wait()
-vm = Vm(["--restore", snap])
-ok = vm.wait("restored", 60); vm.run("echo RE-$(ls /sys/bus/virtio/drivers/virtio_balloon/ | grep -c virtio)"); vm.end()
-check("a snapshot without the balloon restores without it", r == "saved" and ok and b"RE-0" in vm.out, (r, ok))
+if snaps:
+    r = ctl("snapshot " + snap)
+    vm.p.kill(); vm.p.wait()
+    vm = Vm(["--restore", snap])
+    ok = vm.wait("restored", 60); vm.run("echo RE-$(ls /sys/bus/virtio/drivers/virtio_balloon/ | grep -c virtio)"); vm.end()
+    check("a snapshot without the balloon restores without it", r == "saved" and ok and b"RE-0" in vm.out, (r, ok))
+else:
+    vm.end()
 # the automatic balloon (the default)
 def target_mib():
     m = re.search(r'"target_mib":(\d+)', ctl("status json"))
@@ -189,8 +201,8 @@ def wait_target(pred, secs):
             break
     return t
 
-vm = Vm(["--mem", "2048", "--cpus", "2", "--kernel", "out/guest/Image", "--initrd", "out/guest/guest.cpio",
-         "--control", sock, "--cmdline", "console=ttyAMA0 quiet"])
+vm = Vm(["--mem", "2048", "--cpus", "2", "--kernel", K, "--initrd", I,
+         "--control", sock, "--cmdline", C])
 check("boot with the automatic balloon", vm.wait("busybox shell", 60))
 # (its first poll comes 30 s after the start: Auto.start_ms)
 t = wait_target(lambda t: t >= 512, 60)
@@ -221,8 +233,8 @@ if sys.platform == "darwin":
     with open(disk, "wb") as f:
         for _ in range(384):
             f.write(os.urandom(1 << 20))
-    vm = Vm(["--mem", "1024", "--kernel", "out/guest/Image", "--initrd", "out/guest/guest.cpio", "--disk", disk,
-             "--control", sock, "--balloon", "off", "--cmdline", "console=ttyAMA0 quiet"])
+    vm = Vm(["--mem", "1024", "--kernel", K, "--initrd", I, "--disk", disk,
+             "--control", sock, "--balloon", "off", "--cmdline", C])
     check("boot a guest to read its disk", vm.wait("busybox shell", 60))
     vm.run("dd if=/dev/vda of=/dev/null bs=1048576 2>/dev/null")
     time.sleep(5 * slow)
@@ -233,20 +245,21 @@ if sys.platform == "darwin":
     check("pages the VMM wrote are charged once (footprint over guest RAM: %d MiB)" % over, 0 <= over < 40, (fp and fp.group(0), st))
     vm.end()
 
-vm = Vm(["--mem", "1024", "--cpus", "2", "--kernel", "out/guest/Image", "--initrd", "out/guest/guest.cpio",
-         "--control", sock, "--cmdline", "console=ttyAMA0 quiet"])
-check("boot a guest to fragment", vm.wait("busybox shell", 60))
-vm.p.stdin.write(b"bench frag 600 20 &\n"); vm.p.stdin.flush()
-check("bench frag", vm.wait("FRAG-READY", 60))
-ctl("balloon 200")
-st = ""
-for _ in range(int(20 * slow)):
-    time.sleep(0.5)
-    st = ctl("status json")
-    if '"actual_mib":200' in st:
-        break
-check("a fragmented guest fills the balloon within 10 s", '"actual_mib":200' in st, st)
-k = kept_mib()
-check("kept_mib: the balloon's pages the host could not release (%d MiB)" % k, k >= 100, st)
-vm.end()
+if frag:
+    vm = Vm(["--mem", "1024", "--cpus", "2", "--kernel", K, "--initrd", I,
+             "--control", sock, "--cmdline", C])
+    check("boot a guest to fragment", vm.wait("busybox shell", 60))
+    vm.p.stdin.write(b"bench frag 600 20 &\n"); vm.p.stdin.flush()
+    check("bench frag", vm.wait("FRAG-READY", 60))
+    ctl("balloon 200")
+    st = ""
+    for _ in range(int(20 * slow)):
+        time.sleep(0.5)
+        st = ctl("status json")
+        if '"actual_mib":200' in st:
+            break
+    check("a fragmented guest fills the balloon within 10 s", '"actual_mib":200' in st, st)
+    k = kept_mib()
+    check("kept_mib: the balloon's pages the host could not release (%d MiB)" % k, k >= 100, st)
+    vm.end()
 sys.exit(1 if fails else 0)

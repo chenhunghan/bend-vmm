@@ -1,6 +1,6 @@
 name: x86
-# x86_64 guests on KVM: builds the VMM on an x86_64 runner (they have
-# /dev/kvm) and runs x86_64 guests (scripts/ci/x86-check.sh).
+# x86_64 guests on KVM: the host check (scripts/check-host.sh) on an x86_64
+# runner, which has /dev/kvm: Alpine's x86_64 kernel with the guest suite.
 on:
   push:
     branches: [main, x86]
@@ -8,7 +8,7 @@ on:
 jobs:
   x86-kvm:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 90
     env:
       BEND_VERSION: 2.0.40
       BEND_SHA_LINUX_X64: c9ff8d67bd903fb6ad9a26b43d8a62c01021de82a44d55ce4a3dcd4732113d6b
@@ -27,11 +27,9 @@ jobs:
           echo "$HOME/.bend/bin" >> "$GITHUB_PATH"
       - name: Toolchain and /dev/kvm
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q clang lld zlib1g-dev libx11-dev squashfs-tools netcat-openbsd
+          sudo apt-get update -q && sudo apt-get install -y -q clang lld zlib1g-dev libx11-dev squashfs-tools netcat-openbsd qemu-utils e2fsprogs
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
-      - name: Build
-        run: time scripts/build.sh
-      - name: x86_64 guests
-        run: BEND_VMM_TRACE=${{ vars.X86_TRACE || '0' }} scripts/ci/x86-check.sh
+      - name: Host check
+        run: SKIP_NATIVE=1 scripts/check-host.sh
