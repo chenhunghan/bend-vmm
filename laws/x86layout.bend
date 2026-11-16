@@ -63,3 +63,8 @@ law x86layout.cpu_plan_order:
 
 law x86layout.vm_plan:
   {X.X86.vm_plan() == [20, 21, 22, 23, 24, 25] : List<&2, U32>}
+
+# both PICs masked, their vectors clear of the exceptions (0..31 are not
+# theirs: the master's from 8 is the PC's convention, masked here)
+law x86layout.pics_masked:
+  {X.X86.pic_words() == [8, 255, 112, 255] : List<&2, U32>}

@@ -55,3 +55,6 @@ def L.x86layout.cpu_plan_order():
 def L.x86layout.vm_plan():
   {==}
 
+def L.x86layout.pics_masked():
+  {==}
+
