@@ -148,14 +148,16 @@ def X86.kvm_words() -> +List<U32>:
 # What an x86_64 snapshot keeps (Hvf.snap_plans), in the order a restore
 # applies it. Per vCPU: the registers (1), the FPU and vector state (3,
 # XSAVE), XCR0 (4), the segment and control registers (2: after the
-# registers, before the MSRs that depend on EFER), the MSRs KVM lists (5),
-# the run state (7: an AP waiting for its SIPI stays waiting), the local
-# APIC (6: after the APIC base in 2), pending events (8), the debug
+# registers, before the MSRs that depend on EFER), the local APIC (6: after
+# the APIC base in 2, before the MSRs: KVM drops a TSC deadline written
+# while the APIC timer is not in TSC-deadline mode, and the restored timer
+# would never fire), the MSRs KVM lists (5), the run state (7: an AP
+# waiting for its SIPI stays waiting), pending events (8), the debug
 # registers (9). For the VM: the PICs (20, 21), the IOAPIC (22), the PIT
 # (23), KVM's clock (24: kvmclock goes on from where it was), the port
 # machine (25, src/x86/pio.bend's Pio.saved).
 def X86.cpu_plan() -> +List<U32>:
-  [1, 3, 4, 2, 5, 7, 6, 8, 9]
+  [1, 3, 4, 2, 6, 5, 7, 8, 9]
 
 def X86.vm_plan() -> +List<U32>:
   [20, 21, 22, 23, 24, 25]
