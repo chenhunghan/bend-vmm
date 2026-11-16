@@ -341,7 +341,8 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   grow=$(( (peak - base) / 1024 ))
   [ "$(cat "$t/slow" 2>/dev/null)" = 16777216 ] && [ "$base" -gt 0 ] && [ "$grow" -lt 24 ] \
     && grn "ok: a slow host reader gets every byte; the VMM grew by $grow MiB (held back, not buffered)" \
-    || { red "failed: slow host reader (got $(cat "$t/slow" 2>/dev/null), grew $grow MiB)"; grep -a "SLOW\|nc:" <<<"$out" | tail -3; fail=1; }
+    || { red "failed: slow host reader (got $(cat "$t/slow" 2>/dev/null), grew $grow MiB)"; grep -a "SLOW\|nc:" <<<"$out" | tail -3
+         echo "  (base $base peak $peak KiB; pgrep: $(pgrep -fc 'out/bend-vmm' 2>&1); /proc/self/status: $(head -1 /proc/self/status 2>&1))"; fail=1; }
   [ "$(cat "$t/drop" 2>/dev/null)" = "dropped 1048576" ] && grep -aq "DROP-EXIT-" <<<"$out" && grep -aq "DROP-DONE" <<<"$out" \
     && grn "ok: a connection reset midway ends the guest's sender; the next connection works" \
     || { red "failed: connection reset ($(cat "$t/drop" 2>/dev/null))"; grep -a "DROP\|nc:" <<<"$out" | tail -3; fail=1; }
@@ -503,6 +504,7 @@ print(pg * sum(1 for x in v if x & 1) if ok else -1)' "$1"; }
   [ "$(grep -c "^$want  /dev/vd" <<<"$out")" = 2 ] && grep -aq "^NC-$host-DONE" <<<"$out" && grn "ok: :nocache disks read and write as any (one also :ro)" || { red "failed: :nocache disks"; grep -a "vd\|NC-" <<<"$out" | tail -3; fail=1; }
   if [ $lin = 1 ]; then
     if grep -aq 'no O_DIRECT here' <<<"$out"; then echo "skipped: this file system has no O_DIRECT ($(df --output=fstype "$t" | tail -1))"
+    elif [ "$(stat -f -c %T "$t")" = tmpfs ]; then echo "skipped: on tmpfs a file's page cache is the file (the emulated CI host's /tmp)"
     else
       cached=$(resident "$t/b.img" 2>/dev/null)
       [ "${cached:-999999999}" -le 65536 ] && grn "ok: :nocache on Linux: the 8 MiB the guest read left $cached bytes in the host page cache" || { red "failed: :nocache on Linux left $cached bytes of b.img in the page cache"; fail=1; }
@@ -622,8 +624,11 @@ if [ -f host/main.bend ] && [ -n "$e2" ]; then
   for img in whole p; do "${e2}e2fsck" -fn "$t/$img.img" >/dev/null 2>&1 || ok=0
     "${e2}debugfs" -R "dump keep $t/$img.keep" "$t/$img.img" >/dev/null 2>&1
     [ "$(python3 -c 'import hashlib,sys; print(hashlib.md5(open(sys.argv[1],"rb").read()).hexdigest())' "$t/$img.keep" 2>/dev/null)" = "$want" ] || ok=0; done
-  python3 -c 'import fcntl,time,sys; f=open(sys.argv[1],"r+b"); fcntl.flock(f, fcntl.LOCK_EX); time.sleep(5)' "$t/whole.img" & lk=$!; slp 1
-  busy=$(./out/bend-vmm sparsify "$t/whole.img" 2>&1); wait $lk
+  # (the lock held until the refusal is seen: a slow host's slp outlasts any
+  # fixed time)
+  python3 -c 'import fcntl,time,sys; f=open(sys.argv[1],"r+b"); fcntl.flock(f, fcntl.LOCK_EX); open(sys.argv[2],"w").close(); time.sleep(600)' "$t/whole.img" "$t/locked" & lk=$!
+  for _ in $(seq $((20 * SLOW))); do [ -f "$t/locked" ] && break; sleep 0.5; done
+  busy=$(./out/bend-vmm sparsify "$t/whole.img" 2>&1); kill $lk 2>/dev/null; wait $lk 2>/dev/null
   if [ $ok = 1 ] && [ "$a1" -le $((b1 - 30000)) ] && [ "$a2" -le $((b2 - 30000)) ] && grep -q "skipped" <<<"$o" && grep -q "cannot open" <<<"$busy"; then
     grn "ok: sparsify ($b1 -> $a1 KiB on the whole disk, $b2 -> $a2 KiB in a partition; e2fsck clean, the kept file intact; a dirty one skipped, one in use refused)"
   else red "failed: sparsify ($b1 -> $a1, $b2 -> $a2 KiB, checks $ok)"; echo "$o" | tail -6; echo "$busy"; fail=1; fi
