@@ -38,6 +38,11 @@ import ./fs.bend as Fs
 import ./version.bend as Ver
 import ../src/disk/store.bend as St
 import ../src/disk/qcow2.bend as Qc
+import ../src/x86/layout.bend as X
+import ../src/x86/boot.bend as Xb
+import ../src/x86/acpi.bend as Xa
+import ../src/x86/pio.bend as Xp
+import ../src/x86/xexit.bend as Xx
 
 # bend-vmm: boots an arm64 Linux kernel, UEFI firmware or a bare-metal
 # payload, or restores a snapshot, on Hypervisor.framework (macOS) or KVM
@@ -776,7 +781,7 @@ def dsnap.after(ok: Bool, +dst: String, +old: String, +gen: String) -> IO(U32):
 # resumes if it was running. Each writable disk is kept with it
 # (src/vmm/disksnap.bend): copied first, its GEN in the saved command line,
 # the copies placed before the snapshot. Answers 0 or an errno.
-@unsafe def snapshot(+mc: Chan(M.Machine), +path: String) -> IO(U32):
+@unsafe def snapshot.do(+mc: Chan(M.Machine), +path: String) -> IO(U32):
   do IO<U32>:
     +was : U32 <- pause_vm()
     +m : M.Machine <- take(mc)
@@ -808,6 +813,19 @@ def dsnap.after(ok: Bool, +dst: String, +old: String, +gen: String) -> IO(U32):
     put(mc, m)
     resume_if(U32.is_zero(was))
     return rc
+
+# x86_64 guests have no snapshots yet: EOPNOTSUPP (95).
+@unsafe def snapshot.arch(x86: Bool, +mc: Chan(M.Machine), +path: String) -> IO(U32):
+  match x86:
+    case True{}:
+      IO.pure(U32, 95)
+    case False{}:
+      snapshot.do(mc, path)
+
+@unsafe def snapshot(+mc: Chan(M.Machine), +path: String) -> IO(U32):
+  do IO<U32>:
+    +arch : U32 <- H.Hvf.arch()
+    snapshot.arch(U32.is_eq(arch, 1), mc, path)
 
 def reply_rc(+rc: U32, ok: String) -> String:
   Bool.pick(String, U32.is_zero(rc), ok, "error " ++ U32.show(rc))
@@ -2104,7 +2122,244 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     _ : U32 <- restore.flash_mode(got)
     restore.machine(got, o, kinds)
 
-@unsafe def boot_fresh(+o: Op.Opts) -> IO(Unit):
+# x86_64 guests (KVM on a Linux x86_64 host)
+# ==========================================
+#
+# src/x86 decides: the memory map (layout.bend), the bzImage's placement,
+# the zero page, the page tables and the boot registers (boot.bend), the
+# ACPI tables (acpi.bend), the port IO devices (pio.bend) and the exits
+# (xexit.bend). The machine (src/vmm/machine.bend) runs the virtio devices
+# as on arm64, its MMIO addresses moved by X86.to_bus; the port machine
+# lives in a channel of its own, like the machine's.
+
+def x86.take.got(got: Maybe<&1, Xp.Pio>) -> IO(Xp.Pio):
+  match got:
+    case None{}:
+      IO.die(Xp.Pio, 1, "bend-vmm: port channel closed")
+    case Some{p}:
+      IO.pure(Xp.Pio, p)
+
+def x86.take(pc: Chan(Xp.Pio)) -> IO(Xp.Pio):
+  do IO<Xp.Pio>:
+    got : Maybe<&1, Xp.Pio> <- Chan.recv(Xp.Pio, pc)
+    x86.take.got(got)
+
+def x86.put(pc: Chan(Xp.Pio), p: Xp.Pio) -> IO(Unit):
+  do IO<Unit>:
+    _ : Result<&1, &1, Xp.Pio, Unit> <- Chan.send(Xp.Pio, pc, p)
+    return Unit{}
+
+# One x86 vCPU: run, hand the exit to the machine or the port machine.
+@unsafe def x86.loop(+cpu: U32, +mc: Chan(M.Machine), +pc: Chan(Xp.Pio), +done: Chan(U32)) -> IO(Unit):
+  do IO<Unit>:
+    ws : +List<U32> <- H.Hvf.vcpu(cpu, H.Op.run(), 0, 0, 0, 0)
+    x86.loop.exit(cpu, mc, pc, done, Xx.XExit.decode(ws))
+
+@unsafe def x86.loop.ctl(+cpu: U32, +mc: Chan(M.Machine), +pc: Chan(Xp.Pio), +done: Chan(U32), ctl: M.Control) -> IO(Unit):
+  match ctl:
+    case M.Stop{code}:
+      do IO<Unit>:
+        _ : Result<&1, &1, U32, Unit> <- Chan.send(U32, done, code)
+        return Unit{}
+    case M.CpuStop{}:
+      IO.pure(Unit, Unit{})
+    case _:
+      x86.loop(cpu, mc, pc, done)
+
+@unsafe def x86.loop.mem(+cpu: U32, +mc: Chan(M.Machine), +pc: Chan(Xp.Pio), +done: Chan(U32), step: M.Step) -> IO(Unit):
+  match step:
+    case M.Step{m, ctl}:
+      do IO<Unit>:
+        put(mc, m)
+        x86.loop.ctl(cpu, mc, pc, done, ctl)
+
+@unsafe def x86.loop.io(+cpu: U32, +mc: Chan(M.Machine), +pc: Chan(Xp.Pio), +done: Chan(U32), step: Xp.XStep) -> IO(Unit):
+  match step:
+    case Xp.XStep{p, ctl}:
+      do IO<Unit>:
+        x86.put(pc, p)
+        x86.loop.ctl(cpu, mc, pc, done, ctl)
+
+@unsafe def x86.loop.exit(+cpu: U32, +mc: Chan(M.Machine), +pc: Chan(Xp.Pio), +done: Chan(U32), e: Xx.XExit) -> IO(Unit):
+  match e:
+    case Xx.XMem{raw}:
+      do IO<Unit>:
+        m : M.Machine <- take(mc)
+        step : M.Step <- interp(cpu, mc, done, M.Step, M.Machine.on_exit(cpu, m, raw))
+        x86.loop.mem(cpu, mc, pc, done, step)
+    case Xx.XIo{w, port, size, v}:
+      do IO<Unit>:
+        p : Xp.Pio <- x86.take(pc)
+        step : Xp.XStep <- interp(cpu, mc, done, Xp.XStep, Xp.Pio.on_io(p, w, port, size, v))
+        x86.loop.io(cpu, mc, pc, done, step)
+    case Xx.XReset{}:
+      x86.loop.ctl(cpu, mc, pc, done, M.Stop{1})
+
+@unsafe def x86.spawn(+mc: Chan(M.Machine), +pc: Chan(Xp.Pio), +done: Chan(U32), n: Nat, +cpu: U32) -> IO(Unit):
+  match n:
+    case 0n:
+      IO.pure(Unit, Unit{})
+    case 1n+k:
+      do IO<Unit>:
+        IO.spawn(Unit, x86.loop(cpu, mc, pc, done))
+        x86.spawn(mc, pc, done, k, (cpu + 1 : U32))
+
+# Console input on x86: into the 16550's FIFO (as fast as the guest reads
+# it) and to the virtio consoles (the machine's input).
+@unsafe def x86.feed(+mc: Chan(M.Machine), +pc: Chan(Xp.Pio), +done: Chan(U32), bs: +List<U32>, +tries: U32) -> IO(Unit):
+  match bs:
+    case Nil{}:
+      IO.pure(Unit, Unit{})
+    case Con{b, t}:
+      +all = {b <> t : +List<U32>}
+      do IO<Unit>:
+        +p0 : Xp.Pio <- x86.take(pc)
+        +room : Nat = Bool.pick(Nat, U32.is_zero(tries), 4096n, Xp.Pio.room(p0))
+        +now : +List<U32> = List.take(&2, U32, all, room)
+        p1 : Xp.Pio <- interp(0, mc, done, Xp.Pio, Xp.Pio.input(p0, now))
+        x86.put(pc, p1)
+        m0 : M.Machine <- take(mc)
+        m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.input(m0, now))
+        put(mc, m1)
+        IO.sleep(Bool.pick(U32, List.is_empty(&2, U32, List.drop(&2, U32, all, room)), 0, 2))
+        x86.feed(mc, pc, done, List.drop(&2, U32, all, room), Bool.pick(U32, Nat.is_eq(room, 0n), (tries - 1 : U32), 250))
+
+@unsafe def x86.key(+mc: Chan(M.Machine), +pc: Chan(Xp.Pio), +done: Chan(U32), k: Es.Key) -> IO(Unit):
+  match k:
+    case Es.KBytes{bs}:
+      x86.feed(mc, pc, done, bs, 250)
+    case _:
+      input_key(mc, done, k)
+
+@unsafe def x86.keys(+mc: Chan(M.Machine), +pc: Chan(Xp.Pio), +done: Chan(U32), ks: +List<Es.Key>) -> IO(Unit):
+  match ks:
+    case Nil{}:
+      IO.pure(Unit, Unit{})
+    case Con{k, rest}:
+      do IO<Unit>:
+        x86.key(mc, pc, done, k)
+        x86.keys(mc, pc, done, rest)
+
+@unsafe def x86.input.fed(+mc: Chan(M.Machine), +pc: Chan(Xp.Pio), +done: Chan(U32), r: Es.Esc & +List<Es.Key>) -> IO(Unit):
+  match r:
+    case (e, ks):
+      do IO<Unit>:
+        x86.keys(mc, pc, done, ks)
+        x86.input(mc, pc, done, e)
+
+@unsafe def x86.input.go(eof: Bool, +mc: Chan(M.Machine), +pc: Chan(Xp.Pio), +done: Chan(U32), bs: +List<U32>, e: Es.Esc) -> IO(Unit):
+  match eof:
+    case True{}:
+      IO.pure(Unit, Unit{})
+    case False{}:
+      x86.input.fed(mc, pc, done, Es.Esc.feed(bs, e))
+
+@unsafe def x86.input(+mc: Chan(M.Machine), +pc: Chan(Xp.Pio), +done: Chan(U32), e: Es.Esc) -> IO(Unit):
+  do IO<Unit>:
+    +bs : +List<U32> <- H.Hvf.stdin_wait(64)
+    x86.input.go(List.is_empty(&2, U32, bs), mc, pc, done, bs, e)
+
+@unsafe def x86.input_start(+mc: Chan(M.Machine), +pc: Chan(Xp.Pio), +done: Chan(U32)) -> IO(Unit):
+  do IO<Unit>:
+    tty : U32 <- H.Hvf.stdin_tty()
+    x86.input(mc, pc, done, Es.Esc.new(U32.is_ne(tty, 0)))
+
+@unsafe def x86.run(+cpus: U32, +mc: Chan(M.Machine), +done: Chan(U32), +ctl: String, fwd: String) -> IO(Unit):
+  do IO<Unit>:
+    +pc : Chan(Xp.Pio) <- Chan.new(Xp.Pio, 1)
+    x86.put(pc, Xp.Pio.new())
+    resolver()
+    forwards(0, Cli.Fwd.specs(fwd), mc, done)
+    x86.spawn(mc, pc, done, U32.to_nat(cpus), 0)
+    IO.spawn(Unit, x86.input_start(mc, pc, done))
+    IO.spawn(Unit, signals(True{}, mc, done))
+    IO.spawn(Unit, vs_accept_loop(mc, done))
+    IO.spawn(Unit, lan_loop(mc, done))
+    IO.spawn(Unit, balloon_poll(mc, done))
+    control(String.is_empty(ctl), ctl, mc, done)
+    got : Maybe<&1, U32> <- Chan.recv(U32, done)
+    +code : U32 = Maybe.default(&1, U32, got, 2)
+    stopped(code)
+
+def x86.vcpus(n: Nat, +cpu: U32) -> IO(U32):
+  match n:
+    case 0n:
+      IO.pure(U32, 0)
+    case 1n+k:
+      do IO<U32>:
+        +rc : U32 <- H.Host.vcpu_create(cpu)
+        +rest : U32 <- x86.vcpus(k, (cpu + 1 : U32))
+        return Bool.pick(U32, U32.is_zero(rc), rest, rc)
+
+# Loads the bzImage, the initrd and the boot structures; starts every vCPU.
+def x86.boot.placed(lay: Maybe<&2, Xb.BzLayout>, +info: Xb.BzInfo, +head: +List<U32>, o: Op.Opts, +nslots: U32) -> IO(U32):
+  match lay o:
+    case None{} _:
+      IO.die(U32, 1, "bend-vmm: the kernel and initrd do not fit in RAM")
+    case Some{Xb.BzLayout{+load, +k, +rd, +rdlen}} Op.Opts{+kernel, +initrd, p, +cmdline, +mem, +cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
+          do IO<U32>:
+            +klen : U32 <- H.Host.load(kernel, load)
+            die_if(U32.is_eq(klen, err()), "cannot load the kernel")
+            +got : U32 <- place_initrd(U32.is_ne(rdlen, 0), initrd, U.U64{0, rd})
+            die_if(U32.is_ne(got, rdlen), "loading the initrd")
+            _ : U32 <- H.Host.write(U.U64{0, X.X86.cmdline()}, Xb.Bz.cmdline(info, cmdline))
+            _ : U32 <- H.Host.write(U.U64{0, X.X86.acpi()}, Xa.Acpi.tables(X.X86.acpi(), cpus, nslots))
+            _ : U32 <- H.Host.write(U.U64{0, X.X86.zero_page()}, Xb.Bz.zero_page(info, head, ram_bytes(mem), Xb.BzLayout{load, k, rd, rdlen}, X.X86.acpi()))
+            _ : U32 <- H.Host.write(U.U64{0, X.X86.gdt()}, Xb.Boot.gdt())
+            _ : U32 <- H.Host.write(U.U64{0, X.X86.pml4()}, Xb.Boot.pml4())
+            _ : U32 <- H.Host.write(U.U64{0, X.X86.pdpt()}, Xb.Boot.pdpt())
+            _ : U32 <- H.Host.write(U.U64{0, X.X86.pd()}, Xb.Boot.pd())
+            +vc : U32 <- x86.vcpus(U32.to_nat(cpus), 0)
+            die_if(U32.is_ne(vc, 0), "cannot create the vCPUs")
+            H.Hvf.x86_boot(0, Xb.Boot.regs(U.U64.lo(k)))
+
+def x86.boot.parsed(info: Maybe<&2, Xb.BzInfo>, +head: +List<U32>, +o: Op.Opts, +flen: U32, +ilen: U32, +nslots: U32) -> IO(U32):
+  match info:
+    case None{}:
+      IO.die(U32, 1, "bend-vmm: the kernel is not an x86_64 bzImage with a 64-bit entry (boot protocol 2.12 or later)")
+    case Some{+i}:
+      x86.boot.placed(Xb.Bz.layout(i, ram_bytes(Op.Opts.mem(o)), flen, ilen), i, head, o, nslots)
+
+def x86.initrd(o: Op.Opts) -> String:
+  match o:
+    case Op.Opts{k, initrd, p, c, m, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
+      initrd
+
+# What x86_64 does not have yet: UEFI, a bare-metal payload, a display.
+def x86.unsupported(o: Op.Opts) -> String:
+  match o:
+    case Op.Opts{kernel, i, payload, c, m, cpus, d, sh, rs, ct, vk, dp, fw, nv, fd, ln}:
+      Bool.pick(String, Bool.not(String.is_empty(fw)), "--firmware",
+      Bool.pick(String, Bool.not(String.is_empty(payload)), "--payload",
+      Bool.pick(String, Bool.not(String.is_empty(dp)), "--display",
+      Bool.pick(String, String.is_empty(kernel), "a VM without --kernel", ""))))
+
+@unsafe def x86.boot_fresh(+o: Op.Opts) -> IO(Unit):
+  do IO<Unit>:
+    +no : String = x86.unsupported(o)
+    die_if(Bool.not(String.is_empty(no)), no ++ " is not supported on x86_64 yet")
+    args : List<String> <- H.Hvf.args()
+    +prog : U32 <- H.Hvf.prog()
+    +bv : String = Cli.Cli.find(List.drop(&1, String, args, U32.to_nat(prog)), "--balloon")
+    +kinds : +List<D.DevKind> <- devices(o, Cli.Cli.balloon_on(bv), Cli.Cli.balloon_auto(bv))
+    +nslots : U32 = U32.from_nat(List.length(&2, D.DevKind, kinds))
+    die_if(U32.is_gt(nslots, X.X86.slots_with_lines()), "too many devices for x86_64 (at most " ++ U32.show(X.X86.slots_with_lines()) ++ ")")
+    +su : U32 <- H.Hvf.x86_setup(X.X86.gsi_table(), Xb.Boot.cpuid_rules())
+    die_if(U32.is_ne(su, 0), "cannot set up the x86_64 machine")
+    +rc : U32 <- H.Host.vm_init(Op.Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), U.U64.zero(), Op.Opts.cpus(o))
+    die_if(U32.is_ne(rc, 0), "cannot create the VM (step " ++ U32.show(rc) ++ ")")
+    +head : +List<U32> <- H.Host.head_n(Op.Opts.kernel(o), Xb.Bz.head_len())
+    +flen : U32 <- H.Hvf.file_size(Op.Opts.kernel(o))
+    +rlen : U32 <- H.Hvf.file_size(x86.initrd(o))
+    +ilen : U32 = Bool.pick(U32, U32.is_eq(rlen, err()), 0, rlen)
+    +br : U32 <- x86.boot.parsed(Xb.Bz.parse(head), head, o, flen, ilen, nslots)
+    die_if(U32.is_ne(br, 0), "cannot set the boot registers")
+    +mc : Chan(M.Machine) <- Chan.new(M.Machine, 1)
+    put(mc, M.Machine.new(U32.to_nat(Op.Opts.cpus(o)), kinds))
+    +done : Chan(U32) <- Chan.new(U32, 4)
+    x86.run(Op.Opts.cpus(o), mc, done, Op.Opts.control(o), Op.Opts.forward(o))
+
+@unsafe def boot_fresh.arm(+o: Op.Opts) -> IO(Unit):
   do IO<Unit>:
     +rc : U32 <- H.Host.vm_init(Op.Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), ram(), Op.Opts.cpus(o))
     die_if(U32.is_ne(rc, 0), "cannot create the VM (step " ++ U32.show(rc) ++ ")")
@@ -2116,12 +2371,27 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     entry : U.U64 & U.U64 <- boot(o, List.length(&2, D.DevKind, kinds))
     start(o, kinds, entry)
 
+@unsafe def boot_fresh.arch(x86: Bool, +o: Op.Opts) -> IO(Unit):
+  match x86:
+    case True{}:
+      x86.boot_fresh(o)
+    case False{}:
+      boot_fresh.arm(o)
+
+@unsafe def boot_fresh(+o: Op.Opts) -> IO(Unit):
+  do IO<Unit>:
+    +arch : U32 <- H.Hvf.arch()
+    boot_fresh.arch(U32.is_eq(arch, 1), o)
+
 @unsafe def main.mode(fresh: Bool, +o: Op.Opts) -> IO(Unit):
   match fresh:
     case True{}:
       boot_fresh(o)
     case False{}:
-      restore(Op.Opts.restore(o), o)
+      do IO<Unit>:
+        +arch : U32 <- H.Hvf.arch()
+        die_if(U32.is_eq(arch, 1), "--restore is not supported on x86_64 yet")
+        restore(Op.Opts.restore(o), o)
 
 def usage() -> String:
   String.join([

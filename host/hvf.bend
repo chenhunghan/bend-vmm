@@ -49,6 +49,19 @@ def Hvf.kick(cpu: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+# 0 arm64 guests (Hypervisor.framework, KVM on arm64), 1 x86_64 (KVM on x86_64).
+def Hvf.arch() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.x86_setup(gsis: +List<U32>, cpuid: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.x86_boot(cpu: U32, words: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.set_args(bytes: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
@@ -662,6 +675,21 @@ def Host.head(path: String) -> IO(+List<U32>):
   do IO<+List<U32>>:
     r : Result<&1, &1, U32 & String, File> <- File.open(path, "r")
     Host.head.opened(r)
+
+# A file's first n bytes ([] when it cannot be read).
+def Host.head_n.opened(r: Result<&1, &1, U32 & String, File>, n: U32) -> IO(+List<U32>):
+  match r:
+    case Fail{e}:
+      IO.pure(+List<U32>, [])
+    case Done{f}:
+      do IO<+List<U32>>:
+        got : File & Result<&1, &1, U32 & String, List<&2, U32>> <- File.read_bytes(f, n)
+        Host.head.read(got)
+
+def Host.head_n(path: String, n: U32) -> IO(+List<U32>):
+  do IO<+List<U32>>:
+    r : Result<&1, &1, U32 & String, File> <- File.open(path, "r")
+    Host.head_n.opened(r, n)
 
 # Copies a file into RAM at gpa, inflating it when it is gzip-compressed
 # (src/boot/image.bend decides from its first bytes): its size in RAM, or
