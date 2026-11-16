@@ -184,8 +184,13 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   if grep -q GUEST-TESTS-DONE <<<"$out" && ! grep -q "GUEST-TEST FAIL" <<<"$out"; then grn "ok: 8 cpus, 4 GiB (RAM past 4 GiB)"; else red "failed: 8 cpus, 4 GiB"; grep -a GUEST <<<"$out" | tail; fail=1; fi
   out=$(drive 60 "busybox shell" 'echo hi-$((40+2))\n' "hi-42" 'poweroff -f\n' -- ./out/bend-vmm --mem 1024 --kernel $GIMG --initrd $GI 2>&1)
   if grep -q "^hi-42" <<<"$out"; then grn "ok: console input"; else red "failed: console input"; tail -5 <<<"$out"; fail=1; fi
-  out=$(drive 90 "busybox shell" 'reboot -f\n' "busybox shell" 'poweroff -f\n' -- ./out/bend-vmm --mem 1024 --kernel $GZ --initrd $GI 2>&1)
-  if [ "$(grep -c 'GUEST: up' <<<"$out")" = 2 ] && grep -q "stopped (0)" <<<"$out"; then grn "ok: reboot (gzip kernel)"; else red "failed: reboot"; grep -a -v sysreg <<<"$out" | tail -15; fail=1; fi
+  # (x86_64: five times, as a reboot once went astray only now and then)
+  rb=1; [ $X86 = 1 ] && rb=5; rok=0
+  for _ in $(seq $rb); do
+    out=$(drive 90 "busybox shell" 'reboot -f\n' "busybox shell" 'poweroff -f\n' -- ./out/bend-vmm --mem 1024 --kernel $GZ --initrd $GI 2>&1)
+    if [ "$(grep -c 'GUEST: up' <<<"$out")" = 2 ] && grep -q "stopped (0)" <<<"$out"; then rok=$((rok + 1)); else grep -a -v sysreg <<<"$out" | tail -15; fi
+  done
+  if [ $rok = $rb ]; then grn "ok: reboot (gzip kernel; $rb of $rb)"; else red "failed: reboot ($rok of $rb)"; fail=1; fi
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
