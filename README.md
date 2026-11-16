@@ -116,7 +116,11 @@ default there), the clock the CMOS RTC; the machine is described by ACPI
 power-off and reset through the FADT), and KVM's in-kernel local APICs,
 IOAPIC and PIT handle interrupts and timers, so the guest needs
 `CONFIG_ACPI` and `CONFIG_VIRTIO_MMIO` (Alpine's `linux-virt` has both).
-Not there yet: snapshots, `--display`, `--firmware` and `--payload`.
+Snapshots work as on arm64 (pause, snapshot, restore, VM folders, disk
+snapshots, incremental snapshots); a snapshot holds KVM's x86 state
+(registers, FPU, MSRs, local APICs, IOAPIC and PICs, PIT, clock) as
+src/x86/layout.bend plans it, and restores on an x86_64 KVM host. Not there
+yet: `--display`, `--firmware` and `--payload`.
 `scripts/guest-assets-x86.sh` fetches Alpine's x86_64 kernel and builds the
 test userspace; CI runs `scripts/check-host.sh` on GitHub's x86_64 runners,
 which have KVM (the `x86` workflow). From a Mac,
