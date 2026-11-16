@@ -68,3 +68,28 @@ law balauto.band:
 
 law balauto.grow_leaves_slack:
   {A.Auto.target(A.Stats{106496, 524288, 106496}, 1000) == 25576 : U32}
+
+# Proposed: the clock. It counts up to Auto.start_ms() and stops there;
+# an automatic balloon polls from then on, never before, and never without
+# it; the clock stops only for a machine with neither the automatic balloon
+# nor RAM to settle.
+law balauto.later_counts:
+  {A.Auto.later(4000) == 6000 : U32}
+
+law balauto.later_stops:
+  {A.Auto.later(29000) == 30000 : U32}
+
+law balauto.polls_after_start:
+  {A.Auto.polls(True{}, 30000) == True{} : Bool}
+
+law balauto.polls_not_before:
+  {A.Auto.polls(True{}, 28000) == False{} : Bool}
+
+law balauto.polls_not_off:
+  {A.Auto.polls(False{}, 30000) == False{} : Bool}
+
+law balauto.ticks_settle:
+  {A.Auto.ticks(False{}, 0) == True{} : Bool}
+
+law balauto.ticks_stop:
+  {A.Auto.ticks(False{}, 4294967295) == False{} : Bool}

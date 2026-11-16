@@ -28,7 +28,9 @@
 #ifdef __APPLE__
 #include <Hypervisor/Hypervisor.h>
 #include <crt_externs.h>
+#include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <mach/mach_vm.h>
 #include <mach-o/dyld.h>
 #include <sys/clonefile.h>
 #else
@@ -143,6 +145,39 @@ static uint8_t* hvf_ptr(uint64_t gpa, uint64_t len) {
     return NULL;
   }
   return hvf_ram + (gpa - hvf_ram_base);
+}
+
+// Guest RAM the VMM's own threads write (macOS). A page the host writes
+// while the guest maps it is charged to the process twice (phys_footprint:
+// once for the guest's mapping, once for the VMM's), and stays so until the
+// VMM's mapping of it is replaced; the guest's own writes and the host's
+// reads are charged once. hvf_wrote marks the 16 KiB pages a write touched,
+// one bit each; Hvf.ram_settle maps every marked run again onto itself (the
+// same memory, a fresh mapping: the second charge goes). hvf_ram_lock keeps
+// it apart from what replaces RAM's memory (hvf_ram_drop, Hvf.snap_rebase):
+// a remap takes the old mapping and puts it back in two steps.
+#define HVF_HW_SHIFT 14
+static _Atomic uint64_t* hvf_hw;
+static pthread_mutex_t   hvf_ram_lock = PTHREAD_MUTEX_INITIALIZER;
+static void              hvf_wrote(const uint8_t* p, uint64_t n) {
+#ifdef __APPLE__
+  if (hvf_hw == NULL || n == 0 || p < hvf_ram || (uint64_t)(p - hvf_ram) >= hvf_ram_size) {
+    return;
+  }
+  uint64_t a = (uint64_t)(p - hvf_ram) >> HVF_HW_SHIFT;
+  uint64_t z = ((uint64_t)(p - hvf_ram) + n - 1) >> HVF_HW_SHIFT;
+  for (uint64_t i = a; i <= z;) {
+    uint64_t w = i / 64, b = i % 64, m = z - i + 1 < 64 - b ? z - i + 1 : 64 - b;
+    uint64_t bits = (m == 64 ? ~0ull : ((1ull << m) - 1)) << b;
+    if ((atomic_load_explicit(&hvf_hw[w], memory_order_relaxed) & bits) != bits) {
+      atomic_fetch_or_explicit(&hvf_hw[w], bits, memory_order_relaxed);
+    }
+    i += m;
+  }
+#else
+  (void)p;
+  (void)n;
+#endif
 }
 
 static uint64_t hvf_u64(Term hi, Term lo) {
@@ -1178,6 +1213,9 @@ Term hvf_init_run(Env e, Term* f, IoWork* w) {
   if (vmb_map(hvf_ram, hvf_ram_base, hvf_ram_size, VMB_R | VMB_W | VMB_X) != 0) {
     return (Term)5;
   }
+#ifdef __APPLE__
+  hvf_hw = calloc(((hvf_ram_size >> HVF_HW_SHIFT) + 63) / 64 + 1, sizeof *hvf_hw);
+#endif
   return (Term)0;
 }
 
@@ -1282,11 +1320,13 @@ Term hvf_load_run(Env e, Term* f, IoWork* w) {
     uint8_t* dst = hvf_ptr(gpa, 1);
     if (dst) {
       got = hvf_gunzip(file, (uint64_t)st.st_size, dst, hvf_ram_size - (gpa - hvf_ram_base));
+      hvf_wrote(dst, got > 0 ? (uint64_t)got : 0);
     }
   } else {
     uint8_t* dst = hvf_ptr(gpa, (uint64_t)st.st_size);
     if (dst) {
       memcpy(dst, file, (size_t)st.st_size);
+      hvf_wrote(dst, (uint64_t)st.st_size);
       got = st.st_size;
     }
   }
@@ -1394,6 +1434,7 @@ Term hvf_write_run(Env e, Term* f, IoWork* w) {
   uint8_t* dst = hvf_ptr(hvf_u64(f[0], f[1]), n);
   if (dst) {
     memcpy(dst, buf, n);
+    hvf_wrote(dst, n);
   }
   free(buf);
   return (Term)(dst ? 0 : HVF_ERR);
@@ -1998,6 +2039,9 @@ static int hvf_iovs(const char* b, u64 nb, uint8_t** hva, u64* len, int max) {
 // fd, else reads fd into them, stopping at the end of the file (fill: zeros
 // the rest). The count moved; -1 (errno set) when nothing could be.
 static int64_t hvf_iov_io(int fd, int out, off_t off, uint8_t** hva, u64* len, int n, int fill) {
+  for (int i = 0; i < n && !out; i++) {
+    hvf_wrote(hva[i], len[i]);
+  }
   int64_t done = 0, skip = 0;
   int     eof  = 0;
   // several pieces (a request of many segments) go in one call; what it
@@ -2075,6 +2119,9 @@ Term hvf_disk_copy_run(Env e, Term* f, IoWork* w) {
   free(b);
   ssize_t k   = -1;
   int     err = fd < 0 ? EBADF : EINVAL;
+  for (int i = 0; i < n && !out; i++) {
+    hvf_wrote(hva[i], len[i]);
+  }
   if (fd >= 0 && n >= 0) {
     struct iovec v[HVF_MAX_IOVS];
     u64          want = 0, cap = hvf_short_cap(), cap0 = cap, mis = (u64)off;
@@ -2125,6 +2172,7 @@ Term hvf_zero_ram_run(Env e, Term* f, IoWork* w) {
   free(b);
   for (int i = 0; i < n; i++) {
     memset(hva[i], 0, len[i]);
+    hvf_wrote(hva[i], len[i]);
   }
   return (Term)(n < 0 ? HVF_ERR : 0);
 }
@@ -2201,6 +2249,7 @@ Term hvf_inflate_ram_run(Env e, Term* f, IoWork* w) {
   u64 at = 0;
   for (int i = 0; i < n; at += len[i], i++) {
     memcpy(hva[i], c + skip + at, len[i]);
+    hvf_wrote(hva[i], len[i]);
   }
   free(c);
   return (Term)0;
@@ -2686,6 +2735,7 @@ Term hvf_net_copy_run(Env e, Term* f, IoWork* w) {
       memcpy(hva[i], k->rbuf + off + at, m);
     }
     memset(hva[i] + m, 0, len[i] - m);
+    hvf_wrote(hva[i], len[i]);
     at += (uint32_t)m;
   }
   if (hvf_trace & 2) {
@@ -4558,6 +4608,7 @@ Term hvf_lan_to_ram_run(Env e, Term* f, IoWork* w) {
   for (int i = 0; i < k && at < hvf_lan.held_len; i++) {
     u64 n = len[i] < hvf_lan.held_len - at ? len[i] : hvf_lan.held_len - at;
     memcpy(hva[i], hvf_lan.held + at, n);
+    hvf_wrote(hva[i], n);
     at += n;
   }
   return (Term)0;
@@ -5663,6 +5714,50 @@ Term hvf_size_kib_run(Env e, Term* f, IoWork* w) {
   return (Term)(u32)(k > 0xffffffffu ? 0xffffffffu : k);
 }
 
+// Hvf.ram_settle() -> U32: maps the guest RAM the host wrote since the last
+// call again onto itself (hvf_wrote: the second charge for it goes); the
+// KiB it covered, or 0xFFFFFFFF where nothing needs it (Linux: KVM's memory
+// is charged once).
+Term hvf_ram_settle_run(Env e, Term* f, IoWork* w) {
+#ifdef __APPLE__
+  if (hvf_hw == NULL) {
+    return (Term)HVF_ERR;
+  }
+  uint64_t pages = hvf_ram_size >> HVF_HW_SHIFT, words = (pages + 63) / 64, done = 0;
+  uint64_t run = 0, len = 0;
+  pthread_mutex_lock(&hvf_ram_lock);
+  for (uint64_t wi = 0; wi <= words; wi++) {
+    uint64_t bits = wi < words && atomic_load_explicit(&hvf_hw[wi], memory_order_relaxed)
+                        ? atomic_exchange_explicit(&hvf_hw[wi], 0, memory_order_relaxed)
+                        : 0;
+    for (uint64_t b = 0; b < 64; b++) {
+      uint64_t pg = wi * 64 + b;
+      int      on = (bits >> b) & 1 && pg < pages;
+      if (on) {
+        run = len ? run : pg;
+        len++;
+        continue;
+      }
+      if (len) {
+        mach_vm_address_t t = (mach_vm_address_t)(hvf_ram + (run << HVF_HW_SHIFT));
+        vm_prot_t         cur, max;
+        mach_vm_remap(mach_task_self(), &t, len << HVF_HW_SHIFT, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(), t,
+                      FALSE, &cur, &max, VM_INHERIT_NONE);
+        done += len;
+        len = 0;
+      }
+      if (!bits && !len) {
+        break;
+      }
+    }
+  }
+  pthread_mutex_unlock(&hvf_ram_lock);
+  return (Term)(u32)(done << (HVF_HW_SHIFT - 10));
+#else
+  return (Term)HVF_ERR;
+#endif
+}
+
 // Hvf.ram_kib(kind) -> U32: guest RAM the host holds, in KiB (mincore over
 // the RAM mapping): kind 0 resident, 1 compressed (macOS: paged out to the
 // compressor; Linux: 0). status json's "ram" (what the VMM's footprint
@@ -5743,7 +5838,9 @@ Term hvf_snap_rebase_run(Env e, Term* f, IoWork* w) {
   }
   munmap(t, hvf_ram_size);
 #ifdef __APPLE__
+  pthread_mutex_lock(&hvf_ram_lock);
   if (vmb_unmap(hvf_ram_base, hvf_ram_size) != 0) {
+    pthread_mutex_unlock(&hvf_ram_lock);
     close(fd);
     return (Term)(u32)EBUSY;
   }
@@ -5758,6 +5855,7 @@ Term hvf_snap_rebase_run(Env e, Term* f, IoWork* w) {
     fprintf(stderr, "bend-vmm: cannot map guest RAM back after a snapshot\n");
     abort();
   }
+  pthread_mutex_unlock(&hvf_ram_lock);
 #endif
   if (hvf_base_fd >= 0) {
     close(hvf_base_fd);
@@ -5889,7 +5987,13 @@ Term hvf_disk_zero_keep_run(Env e, Term* f, IoWork* w) {
 // file's contents for RAM mapped from a snapshot. 0, or 0xFFFFFFFF (a
 // piece outside RAM).
 #ifdef __APPLE__
+static void hvf_ram_drop_locked(uint8_t* a, uint64_t n);
 static void hvf_ram_drop(uint8_t* a, uint64_t n) {
+  pthread_mutex_lock(&hvf_ram_lock);
+  hvf_ram_drop_locked(a, n);
+  pthread_mutex_unlock(&hvf_ram_lock);
+}
+static void hvf_ram_drop_locked(uint8_t* a, uint64_t n) {
   uint64_t gpa = hvf_ram_base + (uint64_t)(a - hvf_ram);
   if (vmb_unmap(gpa, n) != 0) {
     if (hvf_trace & 16) {
@@ -6307,6 +6411,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.rmdir)
   io_eff(CID(Hvf.rmdir), hvf_rmdir_run);
+#endif
+#ifdef CID(Hvf.ram_settle)
+  io_eff(CID(Hvf.ram_settle), hvf_ram_settle_run);
 #endif
 #ifdef CID(Hvf.ram_kib)
   io_eff(CID(Hvf.ram_kib), hvf_ram_kib_run);

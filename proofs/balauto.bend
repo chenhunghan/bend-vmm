@@ -48,3 +48,24 @@ def L.balauto.band():
 
 def L.balauto.grow_leaves_slack():
   {==}
+
+def L.balauto.later_counts():
+  {==}
+
+def L.balauto.later_stops():
+  {==}
+
+def L.balauto.polls_after_start():
+  {==}
+
+def L.balauto.polls_not_before():
+  {==}
+
+def L.balauto.polls_not_off():
+  {==}
+
+def L.balauto.ticks_settle():
+  {==}
+
+def L.balauto.ticks_stop():
+  {==}

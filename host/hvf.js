@@ -99,6 +99,7 @@ io_eff(CID(Hvf.snap_commit), hvf_unavailable);
 io_eff(CID(Hvf.snap_rebase), hvf_unavailable);
 io_eff(CID(Hvf.tick_wait), hvf_unavailable);
 io_eff(CID(Hvf.ram_kib), () => 0);
+io_eff(CID(Hvf.ram_settle), () => 4294967295);
 io_eff(CID(Hvf.snap_drop), hvf_unavailable);
 io_eff(CID(Hvf.rename), hvf_unavailable);
 io_eff(CID(Hvf.net_limits), () => 0);

@@ -232,7 +232,13 @@ balloon. `status json` then reads
 `{"state":"running","balloon":{"target_mib":1024,"actual_mib":1024,"kept_mib":0}}`:
 `status json` also reports `"ram":{"resident_mib":…,"compressed_mib":…}`:
 what of guest RAM the host holds (resident, and in macOS's compressor);
-the VMM's footprint is that plus its own memory (about 50 MiB).
+the VMM's footprint is that plus its own memory (a few MiB). On macOS a
+page of guest RAM the VMM itself writes (a disk read, a received packet,
+a shared-folder read, the kernel it loads) is charged to it twice, once
+for the guest's mapping and once for its own, until its own mapping of
+that page is replaced: every 2 s the VMM maps what it wrote again onto
+itself (the same memory), so a guest's page cache is charged once. Between
+two of those a burst of disk reads can show more.
 `kept_mib` is what of the balloon the host could not release (pages of
 16 KiB blocks only partly in it). A 4 KiB-page guest whose free memory is
 fragmented gives the balloon its scattered single pages first, and those

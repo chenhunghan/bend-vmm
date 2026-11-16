@@ -17,7 +17,10 @@ goes into it, a 1.2 GiB burst still fits with nothing killed, it fills again
 after; `balloon 100` stops it, `balloon auto` starts it again. Last, a
 fragmented guest (bench frag: every other 4 KiB page free): `balloon 200`
 fills within 10 s even so, status json's kept_mib says most of it could not
-be released (16 KiB blocks only part in the balloon).
+be released (16 KiB blocks only part in the balloon). Before it (macOS),
+a guest reads 384 MiB of its disk into its cache: the VMM's footprint is
+within 40 MiB of the guest RAM it holds (pages the VMM writes are charged
+twice until Hvf.ram_settle maps them again).
 """
 import hashlib, os, re, socket, subprocess, sys, time
 
@@ -202,6 +205,25 @@ vm.end()
 def kept_mib():
     m = re.search(r'"kept_mib":(\d+)', ctl("status json"))
     return int(m.group(1)) if m else -1
+
+if sys.platform == "darwin":
+    # pages the VMM writes (a disk read) are charged to it twice until it
+    # maps them again (Hvf.ram_settle, every 2 s): its footprint comes back
+    # to the guest RAM it holds
+    with open(disk, "wb") as f:
+        for _ in range(384):
+            f.write(os.urandom(1 << 20))
+    vm = Vm(["--mem", "1024", "--kernel", "out/guest/Image", "--initrd", "out/guest/guest.cpio", "--disk", disk,
+             "--control", sock, "--balloon", "off", "--cmdline", "console=ttyAMA0 quiet"])
+    check("boot a guest to read its disk", vm.wait("busybox shell", 60))
+    vm.run("dd if=/dev/vda of=/dev/null bs=1048576 2>/dev/null")
+    time.sleep(5 * slow)
+    st = ctl("status json")
+    fp = re.search(r"phys_footprint: (\d+) MB", subprocess.run(["footprint", str(vm.p.pid)], capture_output=True, text=True).stdout)
+    ram = re.search(r'"resident_mib":(\d+),"compressed_mib":(\d+)', st)
+    over = int(fp.group(1)) - int(ram.group(1)) - int(ram.group(2)) if fp and ram else -1
+    check("pages the VMM wrote are charged once (footprint over guest RAM: %d MiB)" % over, 0 <= over < 40, (fp and fp.group(0), st))
+    vm.end()
 
 vm = Vm(["--mem", "1024", "--cpus", "2", "--kernel", "out/guest/Image", "--initrd", "out/guest/guest.cpio",
          "--control", sock, "--cmdline", "console=ttyAMA0 quiet"])
