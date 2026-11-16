@@ -134,6 +134,10 @@ def X86.ebda() -> U32:
 def X86.mib1() -> U32:
   1048576
 
+# The real-mode reset vector, F000:FFF0: 1048560 (0xF_FFF0), in the hole.
+def X86.reset_vector() -> U32:
+  1048560
+
 # KVM's own pieces of the machine, as the words Hvf.x86_setup takes: RAM's
 # low end and high base (hi, lo each: X86.low_max, X86.high_base), where
 # VMX's identity-map page (4278173696, 0xFEFF_C000) and its three TSS pages
