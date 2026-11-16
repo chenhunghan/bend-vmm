@@ -2344,7 +2344,7 @@ def x86.unsupported(o: Op.Opts) -> String:
     +kinds : +List<D.DevKind> <- devices(o, Cli.Cli.balloon_on(bv), Cli.Cli.balloon_auto(bv))
     +nslots : U32 = U32.from_nat(List.length(&2, D.DevKind, kinds))
     die_if(U32.is_gt(nslots, X.X86.slots_with_lines()), "too many devices for x86_64 (at most " ++ U32.show(X.X86.slots_with_lines()) ++ ")")
-    +su : U32 <- H.Hvf.x86_setup(X.X86.gsi_table(), Xb.Boot.cpuid_rules())
+    +su : U32 <- H.Hvf.x86_setup(X.X86.gsi_table(), Xb.Boot.cpuid_rules(), X.X86.kvm_words())
     die_if(U32.is_ne(su, 0), "cannot set up the x86_64 machine")
     +rc : U32 <- H.Host.vm_init(Op.Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), U.U64.zero(), Op.Opts.cpus(o))
     die_if(U32.is_ne(rc, 0), "cannot create the VM (step " ++ U32.show(rc) ++ ")")

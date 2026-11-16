@@ -43,3 +43,9 @@ def L.x86layout.gsi_rtc_none():
 def L.x86layout.lines():
   {==}
 
+def L.x86layout.kvm_words():
+  {==}
+
+def L.x86layout.vmx_pages():
+  {==}
+

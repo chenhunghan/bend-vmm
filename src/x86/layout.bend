@@ -133,3 +133,14 @@ def X86.ebda() -> U32:
 
 def X86.mib1() -> U32:
   1048576
+
+# KVM's own pieces of the machine, as the words Hvf.x86_setup takes: RAM's
+# low end and high base (hi, lo each: X86.low_max, X86.high_base), where
+# VMX's identity-map page (4278173696, 0xFEFF_C000) and its three TSS pages
+# (4278177792, 0xFEFF_D000) go (in the hole below 4 GiB, clear of the
+# IOAPIC and the local APICs), the local APIC's LINT0 delivery mode
+# (7 ExtINT: the PIC's line, as a PC's firmware leaves it) and LINT1's
+# (4 NMI), and the PIT's flags (1: KVM_PIT_SPEAKER_DUMMY, port 0x61 is
+# KVM's).
+def X86.kvm_words() -> +List<U32>:
+  [0, 3221225472, 1, 0, 4278173696, 4278177792, 7, 4, 1]
