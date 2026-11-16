@@ -596,6 +596,9 @@ static u64       kvm_ncpuid_rules;
 // flags.
 static uint64_t kvm_idmap, kvm_tss;
 static uint32_t kvm_lint0, kvm_lint1, kvm_pit_flags;
+// The PICs as firmware leaves them (X86.pic_words: the master's vector
+// base and mask, the slave's).
+static uint32_t kvm_pics[4];
 
 static uint64_t vmb_get(HvfCpu* c, uint64_t r) {
   struct kvm_regs regs;
@@ -713,6 +716,21 @@ static int vmb_create(uint64_t gicd, uint64_t gicr, uint32_t ncpus) {
   }
   if (ioctl(kvm_vm, KVM_CREATE_IRQCHIP, 0) != 0) {
     return 3;
+  }
+  // the PICs initialized and masked, as firmware leaves them
+  for (uint32_t chip = 0; chip < 2; chip++) {
+    struct kvm_irqchip ch;
+    memset(&ch, 0, sizeof ch);
+    ch.chip_id = chip;
+    if (ioctl(kvm_vm, KVM_GET_IRQCHIP, &ch) != 0) {
+      return 3;
+    }
+    ch.chip.pic.irq_base   = (uint8_t)kvm_pics[2 * chip];
+    ch.chip.pic.imr        = (uint8_t)kvm_pics[2 * chip + 1];
+    ch.chip.pic.init_state = 0;
+    if (ioctl(kvm_vm, KVM_SET_IRQCHIP, &ch) != 0) {
+      return 3;
+    }
   }
   struct kvm_pit_config pit;
   memset(&pit, 0, sizeof pit);
@@ -2155,25 +2173,33 @@ Term hvf_arch_run(Env e, Term* f, IoWork* w) {
 #endif
 }
 
-// Hvf.x86_setup(gsis, cpuid, words) -> U32: before Hvf.init on an x86_64
-// host, the machine's interrupt numbers as IOAPIC pins (X86.gsi_table: one
+// Hvf.x86_setup(gsis, cpuid, words, pics) -> U32: before Hvf.init on an
+// x86_64 host, the machine's interrupt numbers as IOAPIC pins (X86.gsi_table: one
 // byte per INTID, 255 none), the CPUID rules (Boot.cpuid_rules: five words
 // each) and the rest of the machine (X86.kvm_words: RAM's low end and high
 // base (hi, lo each), the identity map's and the TSS's addresses, LINT0's
-// and LINT1's delivery modes, the PIT's flags). 0, or 0xFFFFFFFF elsewhere
-// or for a malformed list.
+// and LINT1's delivery modes, the PIT's flags) and the PICs (X86.pic_words:
+// each one's vector base and mask). 0, or 0xFFFFFFFF elsewhere or for a
+// malformed list.
 Term hvf_x86_setup_run(Env e, Term* f, IoWork* w) {
 #if defined(__x86_64__) && !defined(__APPLE__)
   u64       ng, nr, nk;
   uint32_t* g = hvf_u32s(e, f[0], &ng);
   uint32_t* r = hvf_u32s(e, f[1], &nr);
   uint32_t* k = hvf_u32s(e, f[2], &nk);
-  if (ng > sizeof kvm_gsi || nr % 5 != 0 || nk != 9) {
+  u64       np;
+  uint32_t* pw = hvf_u32s(e, f[3], &np);
+  if (ng > sizeof kvm_gsi || nr % 5 != 0 || nk != 9 || np != 4) {
     free(g);
     free(r);
     free(k);
+    free(pw);
     return (Term)HVF_ERR;
   }
+  for (int i = 0; i < 4; i++) {
+    kvm_pics[i] = pw[i];
+  }
+  free(pw);
   hvf_x86_low_max = ((uint64_t)k[0] << 32) | k[1];
   hvf_x86_high    = ((uint64_t)k[2] << 32) | k[3];
   kvm_idmap       = k[4];

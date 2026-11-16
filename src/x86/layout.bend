@@ -161,3 +161,12 @@ def X86.cpu_plan() -> +List<U32>:
 
 def X86.vm_plan() -> +List<U32>:
   [20, 21, 22, 23, 24, 25]
+
+# The PICs as a PC's firmware leaves them (Hvf.x86_setup): the master's
+# vectors from 8 and the slave's from 112 (0x70), every line masked (255).
+# Linux under hardware-reduced ACPI never programs them; left as KVM makes
+# them (vectors from 0, unmasked), the PIT's ticks wait at the master, and
+# a reboot that puts the local APIC back in virtual-wire mode (LINT0 as
+# ExtINT) takes one as vector 0 mid-shutdown.
+def X86.pic_words() -> +List<U32>:
+  [8, 255, 112, 255]
