@@ -52,6 +52,7 @@ mount --rbind /dev /host/dev; mount -t proc proc /host/proc; mount -t sysfs sys 
 ip link set lo up; ip link set eth0 up
 ip addr add 10.0.2.15/24 dev eth0; ip route add default via 10.0.2.2
 echo "L1: \$(uname -r), kvm: \$(ls /dev/kvm)"
+echo "L1: /host/proc: \$(grep -c ' /host/proc proc ' /proc/mounts) proc mount(s); pid 1 there: \$(head -1 /host/proc/1/status 2>&1)"
 chroot /host /usr/bin/env -i HOME=/tmp PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   CHECK_SLOW=${CHECK_SLOW:-8} SKIP_NATIVE=1 SKIP_BUILD=1 \
   /bin/bash -c 'cp -a $repo /tmp/w && cd /tmp/w && scripts/check-host.sh'

@@ -69,6 +69,14 @@ class Vm:
         except OSError:
             pass
         r = subprocess.run(["ps", "-o", "rss=", "-p", str(self.p.pid)], capture_output=True, text=True).stdout.strip()
+        if not r and not getattr(self, "said", False):
+            # (once: why the VMM's memory cannot be read here)
+            self.said = True
+            try:
+                st = open("/proc/%d/status" % self.p.pid).read()
+                print("rss: /proc/%d/status has %d lines, VmRSS %s" % (self.p.pid, st.count("\n"), "VmRSS" in st))
+            except OSError as e:
+                print("rss: /proc/%d/status: %s; /proc/self: %s" % (self.p.pid, e, os.path.exists("/proc/self/status")))
         return int(r or 0) // 1024
     def end(self):
         try:
