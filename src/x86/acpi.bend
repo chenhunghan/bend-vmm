@@ -174,9 +174,29 @@ def Aml.virtios(k: Nat, +n: U32) -> +List<U32>:
     case 1n+p:
       List.append(&2, U32, Aml.virtio(n), Aml.virtios(p, (n + 1 : U32)))
 
-# The DSDT: \_S5 and Scope (\_SB_) { the first nslots virtio devices }.
+# IO(Decode16, port, port, 1, len), Interrupt(ResourceConsumer, Edge,
+# ActiveHigh, Exclusive) {gsi}, the end tag: an ISA device.
+def Aml.isa_crs(+port: U32, +len: U32, +gsi: U32) -> +List<U32>:
+  +io : +List<U32> = [71, 1, (port .&. 255 : U32), (port >> 8n : U32), (port .&. 255 : U32), (port >> 8n : U32), 1, len]
+  +irq = List.append(&2, U32, [137, 6, 0, 3, 1], B.Bytes.le32(gsi))
+  List.append(&2, U32, io, List.append(&2, U32, irq, [121, 0]))
+
+# Device (name) { _HID hid, _UID 0, _CRS }: the legacy devices, described
+# so that hardware-reduced ACPI (no legacy PIC: Linux maps no ISA
+# interrupt by itself) routes their lines.
+def Aml.isa(name: String, hid: String, +port: U32, +len: U32, +gsi: U32) -> +List<U32>:
+  +body = List.append(&2, U32, Acpi.str(name), List.append(&2, U32, Aml.name("_HID", Aml.string(hid)), List.append(&2, U32, Aml.name("_UID", Aml.byte(0)), Aml.name("_CRS", Aml.buffer(Aml.isa_crs(port, len, gsi))))))
+  Aml.wrap([91, 130], body)
+
+# COM1 (PNP0501: 1016, 8 ports, GSI 4) and the CMOS clock (PNP0B00: 112,
+# 2 ports, GSI 8).
+def Aml.legacy() -> +List<U32>:
+  List.append(&2, U32, Aml.isa("COM1", "PNP0501", 1016, 8, X.X86.uart_gsi()), Aml.isa("RTC_", "PNP0B00", 112, 2, 8))
+
+# The DSDT: \_S5 and Scope (\_SB_) { COM1, the clock, the first nslots
+# virtio devices }.
 def Acpi.dsdt(+nslots: U32) -> +List<U32>:
-  +sb = Aml.wrap([16], List.append(&2, U32, [92, 95, 83, 66, 95], Aml.virtios(U32.to_nat(nslots), 0)))
+  +sb = Aml.wrap([16], List.append(&2, U32, [92, 95, 83, 66, 95], List.append(&2, U32, Aml.legacy(), Aml.virtios(U32.to_nat(nslots), 0))))
   Acpi.table("DSDT", 2, List.append(&2, U32, Aml.s5(), sb))
 
 def Acpi.len(bs: +List<U32>) -> U32:
