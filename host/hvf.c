@@ -25,6 +25,7 @@
 #include <poll.h>
 #include <stdatomic.h>
 #include <signal.h>
+#include <sys/time.h>
 #ifdef __APPLE__
 #include <Hypervisor/Hypervisor.h>
 #include <crt_externs.h>
@@ -1323,6 +1324,28 @@ static void hvf_run(HvfCpu* c) {
       int smc = 0;
 #ifdef KVM_HYPERCALL_EXIT_SMC
       smc = (c->run->hypercall.flags & KVM_HYPERCALL_EXIT_SMC) != 0;
+#endif
+      c->out[c->nout++] = 2000 + KVM_EXIT_HYPERCALL;
+      c->out[c->nout++] = (uint32_t)smc;
+      for (int i = 0; i < 4; i++) {
+        hvf_put64(c, vmb_get(c, (uint64_t)i));
+      }
+      break;
+    }
+    case KVM_EXIT_SYSTEM_EVENT:
+      // SYSTEM_RESET or SYSTEM_OFF (src/arm64/kvmexit.bend)
+      c->out[c->nout++] = 2000 + KVM_EXIT_SYSTEM_EVENT;
+      c->out[c->nout++] = c->run->system_event.type;
+      break;
+    case KVM_EXIT_INTR:
+      c->out[c->nout++] = 2;
+      break;
+    default:
+      c->out[c->nout++] = 3 + c->run->exit_reason;
+      break;
+  }
+}
+
 #else
 
 // KVM's x86 exits as their facts, kind 2000 + KVM's exit reason
@@ -1394,27 +1417,6 @@ static void hvf_run(HvfCpu* c) {
       if (hvf_trace & 1) {
         fprintf(stderr, "[trace] kvm exit %u\n", c->run->exit_reason);
       }
-      c->out[c->nout++] = 3 + c->run->exit_reason;
-      break;
-  }
-}
-#endif
-      c->out[c->nout++] = 2000 + KVM_EXIT_HYPERCALL;
-      c->out[c->nout++] = (uint32_t)smc;
-      for (int i = 0; i < 4; i++) {
-        hvf_put64(c, vmb_get(c, (uint64_t)i));
-      }
-      break;
-    }
-    case KVM_EXIT_SYSTEM_EVENT:
-      // SYSTEM_RESET or SYSTEM_OFF (src/arm64/kvmexit.bend)
-      c->out[c->nout++] = 2000 + KVM_EXIT_SYSTEM_EVENT;
-      c->out[c->nout++] = c->run->system_event.type;
-      break;
-    case KVM_EXIT_INTR:
-      c->out[c->nout++] = 2;
-      break;
-    default:
       c->out[c->nout++] = 3 + c->run->exit_reason;
       break;
   }
