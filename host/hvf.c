@@ -1617,9 +1617,16 @@ static void hvf_run(HvfCpu* c) {
   c->run->immediate_exit = 0;
   if (r < 0) {
     if (hvf_trace & 1) {
-      struct kvm_regs regs;
+      // where the vCPU was (a kick: pause, a snapshot)
+      struct kvm_regs     regs;
+      struct kvm_sregs    sr;
+      struct kvm_mp_state mp = {0};
       ioctl(c->fd, KVM_GET_REGS, &regs);
-      fprintf(stderr, "[trace] kvm_run: %s, rip=%llx\n", strerror(err), (unsigned long long)regs.rip);
+      ioctl(c->fd, KVM_GET_SREGS, &sr);
+      ioctl(c->fd, KVM_GET_MP_STATE, &mp);
+      fprintf(stderr, "[trace] kvm_run: %s, rip=%llx cs=%x/%llx cr0=%llx rflags=%llx efer=%llx mp=%u\n", strerror(err),
+              (unsigned long long)regs.rip, sr.cs.selector, (unsigned long long)sr.cs.base, (unsigned long long)sr.cr0,
+              (unsigned long long)regs.rflags, (unsigned long long)sr.efer, mp.mp_state);
     }
     c->out[c->nout++] = err == EINTR || err == EAGAIN ? 2 : 1000 + (uint32_t)err;
     return;
