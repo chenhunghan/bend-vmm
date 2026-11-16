@@ -22,6 +22,11 @@ drive() { local t=$1; shift; python3 scripts/drive.py "$t" "$@"; }
 scripts/guest-assets-x86.sh >/dev/null || { red "guest assets failed"; exit 1; }
 k=out/x86/vmlinuz-virt; rd=out/x86/guest.cpio; con="console=ttyS0"
 
+echo "== 0. what the guest sees"
+out=$(drive 90 "busybox shell" 'cat /proc/interrupts; dmesg | grep -i -E "virtio|LNRO|irq|eth0|rng" | tail -40; ip link; echo DIAG-DONE\n' "DIAG-DONE" 'poweroff -f\n' -- \
+  $vmm --mem 512 --kernel $k --initrd $rd --cmdline "$con" 2>&1 | tr -d '\r')
+grep -a -v '^\[' <<<"$out" | tail -60
+
 echo "== 1. the guest suite"
 dd if=/dev/zero of=out/x86/disk.img bs=1048576 count=8 2>/dev/null
 printf 'BEND-DISK-SECTOR0' | dd of=out/x86/disk.img conv=notrunc 2>/dev/null
