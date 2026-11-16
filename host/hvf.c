@@ -140,17 +140,17 @@ static int      hvf_commit_cloned; // the snapshot being written began as the ba
 static uint64_t hvf_ram_base;
 static uint64_t hvf_ram_size;
 
-// An x86_64 guest sees RAM in two pieces around the 32-bit device hole
-// (src/x86/layout.bend): [0, min(size, 3 GiB)) and the rest from 4 GiB.
-#define HVF_X86_LOW_MAX 0xC0000000ull  // X86.low_max
-#define HVF_X86_HIGH    0x100000000ull // X86.high_base
+// An x86_64 guest sees RAM in two pieces around the 32-bit device hole:
+// [0, low_max) and the rest from high (X86.low_max, X86.high_base in
+// src/x86/layout.bend, by Hvf.x86_setup).
+static uint64_t hvf_x86_low_max, hvf_x86_high;
 
 // A host pointer for [gpa, gpa+len) inside RAM, or NULL.
 static uint8_t* hvf_ptr(uint64_t gpa, uint64_t len) {
 #if defined(__x86_64__) && !defined(__APPLE__)
-  uint64_t low = hvf_ram_size < HVF_X86_LOW_MAX ? hvf_ram_size : HVF_X86_LOW_MAX;
-  if (gpa >= HVF_X86_HIGH) {
-    uint64_t off = gpa - HVF_X86_HIGH;
+  uint64_t low = hvf_ram_size < hvf_x86_low_max ? hvf_ram_size : hvf_x86_low_max;
+  if (gpa >= hvf_x86_high) {
+    uint64_t off = gpa - hvf_x86_high;
     if (len > hvf_ram_size - low || off > hvf_ram_size - low - len) {
       return NULL;
     }
@@ -591,6 +591,11 @@ static uint8_t   kvm_gsi[256];
 static int       kvm_gsi_set;
 static uint32_t* kvm_cpuid_rules;
 static u64       kvm_ncpuid_rules;
+// The machine's other settings (X86.kvm_words): where VMX's identity map
+// and TSS go, the local APIC's LINT0 and LINT1 delivery modes, the PIT's
+// flags.
+static uint64_t kvm_idmap, kvm_tss;
+static uint32_t kvm_lint0, kvm_lint1, kvm_pit_flags;
 
 static uint64_t vmb_get(HvfCpu* c, uint64_t r) {
   struct kvm_regs regs;
@@ -673,8 +678,8 @@ static int kvm_cpuid(HvfCpu* c, uint32_t cpu) {
   return rc;
 }
 
-// LINT0 as ExtINT (the PIC's line before the guest sets up its IOAPIC) and
-// LINT1 as NMI, as a PC's firmware leaves them.
+// LINT0 and LINT1's delivery modes, as a PC's firmware leaves them
+// (X86.kvm_words: ExtINT and NMI).
 static int kvm_lint(HvfCpu* c) {
   struct kvm_lapic_state l;
   if (ioctl(c->fd, KVM_GET_LAPIC, &l) != 0) {
@@ -683,8 +688,8 @@ static int kvm_lint(HvfCpu* c) {
   uint32_t lvt0, lvt1;
   memcpy(&lvt0, l.regs + 0x350, 4);
   memcpy(&lvt1, l.regs + 0x360, 4);
-  lvt0 = (lvt0 & ~0x700u) | (7u << 8);
-  lvt1 = (lvt1 & ~0x700u) | (4u << 8);
+  lvt0 = (lvt0 & ~0x700u) | ((kvm_lint0 & 7u) << 8);
+  lvt1 = (lvt1 & ~0x700u) | ((kvm_lint1 & 7u) << 8);
   memcpy(l.regs + 0x350, &lvt0, 4);
   memcpy(l.regs + 0x360, &lvt1, 4);
   return ioctl(c->fd, KVM_SET_LAPIC, &l);
@@ -701,8 +706,9 @@ static int vmb_create(uint64_t gicd, uint64_t gicr, uint32_t ncpus) {
   }
   kvm_run_size = (size_t)ioctl(kvm_fd, KVM_GET_VCPU_MMAP_SIZE, 0);
   // the TSS and identity map VMX needs, in the hole below 4 GiB
-  uint64_t idmap = 0xfeffc000ull;
-  if (ioctl(kvm_vm, KVM_SET_IDENTITY_MAP_ADDR, &idmap) != 0 || ioctl(kvm_vm, KVM_SET_TSS_ADDR, 0xfeffd000ul) != 0) {
+  uint64_t idmap = kvm_idmap;
+  if (!kvm_gsi_set || ioctl(kvm_vm, KVM_SET_IDENTITY_MAP_ADDR, &idmap) != 0
+      || ioctl(kvm_vm, KVM_SET_TSS_ADDR, (unsigned long)kvm_tss) != 0) {
     return 3;
   }
   if (ioctl(kvm_vm, KVM_CREATE_IRQCHIP, 0) != 0) {
@@ -710,7 +716,7 @@ static int vmb_create(uint64_t gicd, uint64_t gicr, uint32_t ncpus) {
   }
   struct kvm_pit_config pit;
   memset(&pit, 0, sizeof pit);
-  pit.flags = KVM_PIT_SPEAKER_DUMMY;
+  pit.flags = kvm_pit_flags;
   if (ioctl(kvm_vm, KVM_CREATE_PIT2, &pit) != 0) {
     return 3;
   }
@@ -751,11 +757,11 @@ static int vmb_map(void* host, uint64_t gpa, uint64_t size, int prot) {
   if (gpa != 0) {
     return -1;
   }
-  uint64_t low = size < HVF_X86_LOW_MAX ? size : HVF_X86_LOW_MAX;
+  uint64_t low = size < hvf_x86_low_max ? size : hvf_x86_low_max;
   if (kvm_region(1, 0, low, host, prot) != 0) {
     return -1;
   }
-  return size > low ? kvm_region(4, HVF_X86_HIGH, size - low, (uint8_t*)host + low, prot) : 0;
+  return size > low ? kvm_region(4, hvf_x86_high, size - low, (uint8_t*)host + low, prot) : 0;
 }
 
 static int vmb_unmap(uint64_t gpa, uint64_t size) {
@@ -763,7 +769,7 @@ static int vmb_unmap(uint64_t gpa, uint64_t size) {
     return -1;
   }
   int rc = kvm_region(1, 0, 0, NULL, VMB_W);
-  return size > HVF_X86_LOW_MAX ? rc | kvm_region(4, HVF_X86_HIGH, 0, NULL, VMB_W) : rc;
+  return size > hvf_x86_low_max ? rc | kvm_region(4, hvf_x86_high, 0, NULL, VMB_W) : rc;
 }
 
 static int vmb_vcpu_create(HvfCpu* c, int cpu) {
@@ -1894,20 +1900,33 @@ Term hvf_arch_run(Env e, Term* f, IoWork* w) {
 #endif
 }
 
-// Hvf.x86_setup(gsis, cpuid) -> U32: before Hvf.init on an x86_64 host,
-// the machine's interrupt numbers as IOAPIC pins (X86.gsi_table: one byte
-// per INTID, 255 none) and the CPUID rules (Boot.cpuid_rules: five words
-// each). 0, or 0xFFFFFFFF elsewhere or for a malformed list.
+// Hvf.x86_setup(gsis, cpuid, words) -> U32: before Hvf.init on an x86_64
+// host, the machine's interrupt numbers as IOAPIC pins (X86.gsi_table: one
+// byte per INTID, 255 none), the CPUID rules (Boot.cpuid_rules: five words
+// each) and the rest of the machine (X86.kvm_words: RAM's low end and high
+// base (hi, lo each), the identity map's and the TSS's addresses, LINT0's
+// and LINT1's delivery modes, the PIT's flags). 0, or 0xFFFFFFFF elsewhere
+// or for a malformed list.
 Term hvf_x86_setup_run(Env e, Term* f, IoWork* w) {
 #if defined(__x86_64__) && !defined(__APPLE__)
-  u64       ng, nr;
+  u64       ng, nr, nk;
   uint32_t* g = hvf_u32s(e, f[0], &ng);
   uint32_t* r = hvf_u32s(e, f[1], &nr);
-  if (ng > sizeof kvm_gsi || nr % 5 != 0) {
+  uint32_t* k = hvf_u32s(e, f[2], &nk);
+  if (ng > sizeof kvm_gsi || nr % 5 != 0 || nk != 9) {
     free(g);
     free(r);
+    free(k);
     return (Term)HVF_ERR;
   }
+  hvf_x86_low_max = ((uint64_t)k[0] << 32) | k[1];
+  hvf_x86_high    = ((uint64_t)k[2] << 32) | k[3];
+  kvm_idmap       = k[4];
+  kvm_tss         = k[5];
+  kvm_lint0       = k[6];
+  kvm_lint1       = k[7];
+  kvm_pit_flags   = k[8];
+  free(k);
   memset(kvm_gsi, 255, sizeof kvm_gsi);
   for (u64 i = 0; i < ng; i++) {
     kvm_gsi[i] = g[i] < 24 ? (uint8_t)g[i] : 255;

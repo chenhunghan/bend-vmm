@@ -54,7 +54,7 @@ def Hvf.arch() -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.x86_setup(gsis: +List<U32>, cpuid: +List<U32>) -> IO(U32):
+def Hvf.x86_setup(gsis: +List<U32>, cpuid: +List<U32>, words: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 

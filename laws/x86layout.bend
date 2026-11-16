@@ -49,3 +49,10 @@ law x86layout.gsi_rtc_none:
 
 law x86layout.lines:
   {X.X86.slots_with_lines() == 17 : U32}
+
+law x86layout.kvm_words:
+  {List.length(&2, U32, X.X86.kvm_words()) == 9n : Nat}
+
+# the identity map and the TSS sit in the hole, past the local APICs
+law x86layout.vmx_pages:
+  {Bool.and(U32.is_gt(4278173696, X.X86.lapic_base()), U32.is_lt(4278177792, 4294967295)) == True{} : Bool}
