@@ -15,7 +15,7 @@ gcc -static -O2 -o out/x86/init tests/guest/x86init.c
 python3 scripts/initramfs.py out/x86/init out/x86/initrd.cpio
 log=out/x86/boot.log
 set +e
-timeout 300 out/main --kernel out/x86/vmlinuz-virt --initrd out/x86/initrd.cpio \
+BEND_VMM_TRACE=${BEND_VMM_TRACE:-0} timeout 300 out/main --kernel out/x86/vmlinuz-virt --initrd out/x86/initrd.cpio \
   --cmdline "console=ttyS0 earlyprintk=serial,ttyS0" --mem 512 --cpus 2 "$@" </dev/null >"$log" 2>&1
 rc=$?
 set -e
