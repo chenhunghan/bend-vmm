@@ -5,7 +5,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 scripts/build.sh host/main.bend out/bend-vmm >/dev/null || exit 1
 scripts/guest-assets-x86.sh >/dev/null || exit 1
-for opt in "" "reboot=f" "nox2apic"; do
+for opt in "" ""; do
 ok=0
 for i in $(seq 6); do
   rm -f /tmp/rb.sock

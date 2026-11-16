@@ -244,3 +244,12 @@ def Boot.regs(+kernel: U32) -> +List<U32>:
 #   leaf 11 (0xB) and 31 (0x1F) EDX: the x2APIC ID
 def Boot.cpuid_rules() -> +List<U32>:
   [1, 2, 0, 2147483648, 32, 1, 1, 4278190080, 0, 24, 11, 3, 4294967295, 0, 0, 31, 3, 4294967295, 0, 0]
+
+# The reset vector's code (at X86.reset_vector(), F000:FFF0 in real mode):
+# where a PC's firmware starts on a reset, and where Linux's restart jumps
+# back to (machine_real_restart, after it goes back to real mode). Here no
+# firmware runs, so the code asks for a reset through the FADT's reset
+# register: mov dx, 1538 (0x602); mov al, 1; out dx, al; hlt; jmp back to
+# the hlt.
+def Boot.reset_stub() -> +List<U32>:
+  [186, 2, 6, 176, 1, 238, 244, 235, 253]

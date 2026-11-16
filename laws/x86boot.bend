@@ -67,3 +67,7 @@ law x86boot.default_console:
 
 law x86boot.own_cmdline:
   {Bz.Bz.cmdline_for("console=ttyS0 quiet") == "console=ttyS0 quiet" : String}
+
+# the stub writes the FADT's reset value to its reset port
+law x86boot.reset_stub:
+  {Bz.Boot.reset_stub() == [186, 2, 6, 176, 1, 238, 244, 235, 253] : List<&2, U32>}

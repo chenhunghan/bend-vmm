@@ -49,3 +49,6 @@ def L.x86boot.default_console():
 def L.x86boot.own_cmdline():
   {==}
 
+def L.x86boot.reset_stub():
+  {==}
+
