@@ -48,14 +48,16 @@ mkdir -p /host/run/systemd/resolve
 echo "nameserver 10.0.2.3" > /host/run/systemd/resolve/stub-resolv.conf
 cp /host/run/systemd/resolve/stub-resolv.conf /host/run/resolv.conf
 mount --bind /host/run/resolv.conf /host/etc/resolv.conf 2>/dev/null
-mount --rbind /dev /host/dev; mount -t proc proc /host/proc; mount -t sysfs sys /host/sys
+mount --rbind /dev /host/dev || echo 'L1: cannot bind /dev'
+mount -t proc proc /host/proc || echo 'L1: cannot mount /host/proc'
+mount -t sysfs sys /host/sys || echo 'L1: cannot mount /host/sys'
 ip link set lo up; ip link set eth0 up
 ip addr add 10.0.2.15/24 dev eth0; ip route add default via 10.0.2.2
 echo "L1: \$(uname -r), kvm: \$(ls /dev/kvm)"
 echo "L1: /host/proc: \$(grep -c ' /host/proc proc ' /proc/mounts) proc mount(s); pid 1 there: \$(head -1 /host/proc/1/status 2>&1)"
 chroot /host /usr/bin/env -i HOME=/tmp PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   CHECK_SLOW=${CHECK_SLOW:-8} SKIP_NATIVE=1 SKIP_BUILD=1 \
-  /bin/bash -c 'cp -a $repo /tmp/w && cd /tmp/w && scripts/check-host.sh'
+  /bin/bash -c 'grep -q " /proc proc " /proc/mounts 2>/dev/null || mount -t proc proc /proc || echo "chroot: cannot mount /proc"; cp -a $repo /tmp/w && cd /tmp/w && scripts/check-host.sh'
 echo "L1-EXIT \$?"
 poweroff -f
 EOF
