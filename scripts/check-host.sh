@@ -139,13 +139,13 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   if arm; then
     python3 -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); c,_=s.accept(); c.sendall(bytes(4194304)); c.close()" "${vs}_7001" & src=$!
     python3 -c "
-  import socket,sys
-  s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); c,_=s.accept(); n=0
-  while True:
-    b=c.recv(1<<20)
-    if not b: break
-    n+=len(b)
-  open(sys.argv[2],'w').write(str(n))" "${vs}_7000" "$(dirname "$vs")/got" & sink=$!
+import socket,sys
+s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); c,_=s.accept(); n=0
+while True:
+  b=c.recv(1<<20)
+  if not b: break
+  n+=len(b)
+open(sys.argv[2],'w').write(str(n))" "${vs}_7000" "$(dirname "$vs")/got" & sink=$!
     sleep 1
     out=$(drive 120 "busybox shell" '/bin/bench vrecv 7001; /bin/bench vsend 7000 4194304; echo VS-DONE\n' "VS-DONE" 'poweroff -f\n' -- \
       ./out/bend-vmm --mem 512 --cpus 2 --kernel $GIMG --initrd $GI --vsock "$vs" --cmdline "$GCON quiet" 2>&1 | tr -d '\r')
