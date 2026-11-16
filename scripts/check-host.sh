@@ -292,7 +292,7 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   t=$(mktemp -d)
   snaps=0; arm && snaps=1
   out=$(BALLOON_KERNEL=$GIMG BALLOON_INITRD=$GI BALLOON_CONSOLE=$GCON BALLOON_SNAPSHOTS=$snaps BALLOON_FRAG=$snaps python3 scripts/balloon-test.py ./out/bend-vmm "$t" "$SLOW" 2>&1)
-  if [ $? = 0 ]; then grn "ok: balloon: $(grep -o 'boot: freeing 1 GiB.*MiB)' <<<"$out" | sed 's/boot: //'); again after a restore; the host sees the guest's data; $(grep -o 'inflating gives.*MiB)' <<<"$out"), balloon 0 gives it back"; else red "failed: balloon"; grep -v '^ok:' <<<"$out" | tail -6; fail=1; fi
+  if [ $? = 0 ]; then grn "ok: balloon: $(grep -o 'boot: freeing 1 GiB.*MiB)' <<<"$out" | sed 's/boot: //'); $(arm && echo 'again after a restore; ')the host sees the guest's data; $(grep -o 'inflating gives.*MiB)' <<<"$out"), balloon 0 gives it back"; else red "failed: balloon"; grep -v '^ok:' <<<"$out" | tail -6; fail=1; fi
   rm -rf "$t"
 fi
 

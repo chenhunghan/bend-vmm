@@ -1,8 +1,9 @@
 # bend-vmm
 
-A virtual machine monitor for arm64, written in
+A virtual machine monitor for arm64 and x86_64, written in
 [Bend](https://bend-lang.com). It boots arm64 Linux on Hypervisor.framework
-(macOS on Apple Silicon) and on KVM (Linux on arm64).
+(macOS on Apple Silicon) and on KVM (Linux on arm64), and x86_64 Linux on
+KVM (Linux on x86_64).
 
 All of the VMM's logic is pure Bend under `src/`: trap decoding, PSCI, the
 device tree, the PL011 UART, the PL031 RTC, the UEFI flash, virtio (blk,
@@ -102,7 +103,23 @@ Options:
 
 Linux (KVM): the same binary builds on Linux arm64 (clang, `libx11-dev` for
 `--display`) with `scripts/build.sh`, and runs with `/dev/kvm`; snapshots
-included (a snapshot restores on the hypervisor that took it). From a Mac,
+included (a snapshot restores on the hypervisor that took it).
+
+x86_64 (KVM on Linux x86_64): the same sources build on an x86_64 Linux
+host and boot x86_64 Linux guests: a bzImage (`--kernel`, the 64-bit boot
+protocol: 2.12 or later) with the same devices, options and control
+commands (the virtio devices, the NAT, `--lan`, `--forward`, 9p and its
+quota, vsock, the balloon, `--console-log`, disks with `:ro`, `:nocache`,
+qcow2 and discard). The serial console is COM1 (`console=ttyS0`, the
+default there), the clock the CMOS RTC; the machine is described by ACPI
+(hardware-reduced: the virtio-mmio devices, COM1 and the clock in the DSDT;
+power-off and reset through the FADT), and KVM's in-kernel local APICs,
+IOAPIC and PIT handle interrupts and timers, so the guest needs
+`CONFIG_ACPI` and `CONFIG_VIRTIO_MMIO` (Alpine's `linux-virt` has both).
+Not there yet: snapshots, `--display`, `--firmware` and `--payload`.
+`scripts/guest-assets-x86.sh` fetches Alpine's x86_64 kernel and builds the
+test userspace; CI runs `scripts/check-host.sh` on GitHub's x86_64 runners,
+which have KVM (the `x86` workflow). From a Mac,
 `scripts/lima/linux-host.sh [command]` makes
 a Lima VM to try it: on M3 and later it nests KVM through
 Virtualization.framework; on M1/M2, which cannot nest, QEMU emulates the
@@ -461,9 +478,10 @@ elsewhere. What holds today:
 | Tests on the simulator (500+) | `scripts/check.sh` | anywhere, CI |
 | Same tests compiled native, on all threads | `scripts/check-native.sh` | macOS / Linux with clang |
 | Proofs re-checked by the Lean-proven kernel | `VERDICT=1 scripts/check.sh` | CI (`verdict` job) |
-| Real guests on the host's hypervisor | `scripts/check-host.sh` | macOS (Hypervisor.framework), Linux arm64 (KVM) |
+| Real guests on the host's hypervisor | `scripts/check-host.sh` | macOS (Hypervisor.framework), Linux arm64 and x86_64 (KVM) |
 | The same on a Linux KVM host from a Mac | `scripts/lima/linux-host.sh 'CHECK_SLOW=5 SKIP_NATIVE=1 scripts/check-host.sh'` | a Lima VM |
 | The same on an emulated KVM host (QEMU with EL2) | `scripts/ci/emulated-kvm.sh` | CI (`host-linux` job) |
+| The same with x86_64 guests on real KVM | `scripts/check-host.sh` | CI (`x86` workflow, GitHub's x86_64 runners) |
 | A real distribution: Ubuntu 24.04's cloud image | `scripts/ubuntu-check.sh` | macOS / Linux, on demand (600 MiB download) |
 
 `scripts/check-host.sh` boots a bare-metal payload, then Linux (1 and 4 CPUs),
