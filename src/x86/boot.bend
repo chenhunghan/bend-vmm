@@ -163,6 +163,15 @@ def Bz.zero_page(info: BzInfo, +head: +List<U32>, +size: U.U64, +lay: BzLayout, 
       +z5 = Bz.put(z4, 488n, [U32.from_nat(List.length(&2, E820, es))])
       Bz.put(z5, 720n, Bz.e820_bytes(es))
 
+# The command line an x86_64 guest gets: its own, or console=ttyS0 (COM1)
+# where it was left at the VMM's default, which names arm64's PL011
+# (src/vmm/opts.bend).
+def Bz.arm_default() -> String:
+  "console=ttyAMA0 earlycon=pl011,0x9000000"
+
+def Bz.cmdline_for(+s: String) -> String:
+  Bool.pick(String, String.eq(s, Bz.arm_default()), "console=ttyS0", s)
+
 # The command line as the kernel reads it: NUL-terminated, cut to the
 # header's cmdline_size (a protocol 2.06+ field: every 64-bit kernel has it).
 def Bz.cmdline(info: BzInfo, s: String) -> +List<U32>:

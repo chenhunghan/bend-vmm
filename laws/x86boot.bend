@@ -61,3 +61,9 @@ law x86boot.regs_rip:
 
 law x86boot.cpuid_rules:
   {List.length(&2, U32, Bz.Boot.cpuid_rules()) == 20n : Nat}
+
+law x86boot.default_console:
+  {Bz.Bz.cmdline_for("console=ttyAMA0 earlycon=pl011,0x9000000") == "console=ttyS0" : String}
+
+law x86boot.own_cmdline:
+  {Bz.Bz.cmdline_for("console=ttyS0 quiet") == "console=ttyS0 quiet" : String}

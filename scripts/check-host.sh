@@ -613,7 +613,8 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && command -v qemu-img >
   rm -rf "$t"
 fi
 
-if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+# (the guest's bench program is arm64's)
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && arm; then
   echo "== 8g. write zeroes: with UNMAP the host frees the blocks; without, they stay allocated"
   # the guest's fallocate on /dev/vda (tests/guest/bench.c punch, zero):
   # virtio-blk WRITE_ZEROES (src/virtio/blk.bend). Both ranges read zeros

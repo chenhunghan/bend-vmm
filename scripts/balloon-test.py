@@ -28,8 +28,8 @@ vmm, d = sys.argv[1], sys.argv[2]
 # the guest (BALLOON_KERNEL, BALLOON_INITRD, BALLOON_CONSOLE: the arm64
 # guest by default); BALLOON_SNAPSHOTS=0 skips the snapshot steps and
 # BALLOON_FRAG=0 the fragmented guest (its bench program is arm64's)
-K = os.environ.get("BALLOON_KERNEL", K)
-I = os.environ.get("BALLOON_INITRD", I)
+K = os.environ.get("BALLOON_KERNEL", "out/guest/Image")
+I = os.environ.get("BALLOON_INITRD", "out/guest/guest.cpio")
 C = os.environ.get("BALLOON_CONSOLE", "console=ttyAMA0") + " quiet"
 snaps = os.environ.get("BALLOON_SNAPSHOTS", "1") != "0"
 frag = os.environ.get("BALLOON_FRAG", "1") != "0"
