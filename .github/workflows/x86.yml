@@ -34,4 +34,4 @@ jobs:
       - name: Build
         run: time scripts/build.sh
       - name: Boot
-        run: scripts/ci/x86-boot.sh
+        run: BEND_VMM_TRACE=${{ vars.X86_TRACE || '2' }} scripts/ci/x86-boot.sh
