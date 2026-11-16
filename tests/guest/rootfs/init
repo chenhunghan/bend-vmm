@@ -11,7 +11,7 @@ mkdir -p /etc /mnt
 # Drivers the kernel builds as modules (shipped by scripts/guest-assets.sh;
 # Alpine's x86_64 kernel also has the virtio drivers as modules:
 # scripts/guest-assets-x86.sh).
-for m in failover net_failover virtio_net virtio_blk virtio_console virtio_balloon virtio-rng rtc-pl031 netfs 9pnet 9pnet_virtio 9p vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport virtio_input; do
+for m in failover net_failover virtio_net virtio_blk virtio_console virtio_balloon virtio-rng rtc-pl031 fscache netfs 9pnet 9pnet_virtio 9p vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport virtio_input; do
   # the benchmarks read the RTC's registers through /dev/mem: no driver there
   [ $m = rtc-pl031 ] && grep -q bendbench /proc/cmdline && continue
   [ -f /lib/modules/$m.ko ] && insmod /lib/modules/$m.ko 2>/dev/null

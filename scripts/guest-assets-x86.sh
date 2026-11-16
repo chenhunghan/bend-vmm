@@ -20,10 +20,10 @@ fi
 # The drivers, in load order (tests/guest/rootfs/init loads what it finds).
 mods="net/core/failover drivers/net/net_failover drivers/net/virtio_net drivers/block/virtio_blk
   drivers/char/virtio_console drivers/char/hw_random/virtio-rng drivers/virtio/virtio_balloon
-  drivers/virtio/virtio_input fs/netfs/netfs net/9p/9pnet net/9p/9pnet_virtio fs/9p/9p
+  drivers/virtio/virtio_input fs/fscache/fscache fs/netfs/netfs net/9p/9pnet net/9p/9pnet_virtio fs/9p/9p
   net/vmw_vsock/vsock net/vmw_vsock/vmw_vsock_virtio_transport_common
   net/vmw_vsock/vmw_vsock_virtio_transport"
-if [ ! -f out/x86/modules/virtio_net.ko ]; then
+if [ ! -f out/x86/modules/fscache.ko ]; then
   curl -fsSL --retry 5 -o out/x86/modloop "$net/modloop-virt"
   rm -rf out/x86/ml && unsquashfs -q -d out/x86/ml out/x86/modloop >/dev/null
   mkdir -p out/x86/modules
