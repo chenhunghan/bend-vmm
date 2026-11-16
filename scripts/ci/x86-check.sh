@@ -24,7 +24,7 @@ k=out/x86/vmlinuz-virt; rd=out/x86/guest.cpio; con="console=ttyS0"
 
 echo "== 0. what the guest sees"
 out=$(drive 90 "busybox shell" 'ip addr add 10.0.2.15/24 dev eth0; ping -c 2 -W 2 10.0.2.2; for f in tx_packets rx_packets rx_dropped rx_errors; do echo $f $(cat /sys/class/net/eth0/statistics/$f); done; ls /sys/bus/virtio/drivers; cat /proc/interrupts; dmesg | grep -i -E "virtio|LNRO|eth0|rng|hwrng" | tail -20; echo DIAG-DONE\n' "DIAG-DONE" 'poweroff -f\n' -- \
-  env BEND_VMM_TRACE=2 $vmm --mem 512 --kernel $k --initrd $rd --cmdline "$con" 2>&1 | tr -d '\r')
+  $vmm --mem 512 --kernel $k --initrd $rd --cmdline "$con" 2>&1 | tr -d '\r')
 grep -a -v '^\[ ' <<<"$out" | grep -a -v 'irq 33 ' | tail -80
 
 echo "== 1. the guest suite"
