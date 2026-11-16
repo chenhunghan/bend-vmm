@@ -1811,12 +1811,24 @@ def shutdown_ms() -> U32:
     +sig : U32 <- H.Hvf.signal_wait()
     signals.on(U32.is_eq(sig, err()), first, sig, mc, done)
 
-# The automatic balloon's clock (src/virtio/balauto.bend): every
-# Auto.period_ms(), its driver is asked for fresh statistics
-# (M.Machine.balloon_poll), which move the balloon's target. Ends at once on
-# a machine without the automatic balloon.
-@unsafe def balloon_poll.on(on: Bool, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
-  match on:
+# The clock (src/virtio/balauto.bend): every Auto.period_ms() the host
+# settles the guest RAM it wrote (H.Hvf.ram_settle), and once
+# Auto.start_ms() passed, an automatic balloon's driver is asked for fresh
+# statistics (M.Machine.balloon_poll), which move the balloon's target.
+# Auto.ticks says when it ends: at once on a machine without the automatic
+# balloon where nothing needs settling.
+@unsafe def balloon_poll.tick(polls: Bool, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+  match polls:
+    case False{}:
+      IO.pure(Unit, Unit{})
+    case True{}:
+      do IO<Unit>:
+        +m0 : M.Machine <- take(mc)
+        +m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.balloon_poll(m0))
+        put(mc, m1)
+
+@unsafe def balloon_poll.on(go: Bool, +auto: Bool, +elapsed: U32, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
+  match go:
     case False{}:
       IO.pure(Unit, Unit{})
     case True{}:
@@ -1824,18 +1836,17 @@ def shutdown_ms() -> U32:
         # (a pipe the host's ticker writes: IO.sleep alone does not wake the
         # event loop while nothing else happens, an idle guest)
         _ : U32 <- H.Hvf.tick_wait(Au.Auto.period_ms())
-        +m0 : M.Machine <- take(mc)
-        +m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.balloon_poll(m0))
-        put(mc, m1)
-        balloon_poll.on(True{}, mc, done)
+        +settled : U32 <- H.Hvf.ram_settle()
+        +now : U32 = Au.Auto.later(elapsed)
+        balloon_poll.tick(Au.Auto.polls(auto, now), mc, done)
+        balloon_poll.on(Au.Auto.ticks(auto, settled), auto, now, mc, done)
 
 @unsafe def balloon_poll(+mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
   do IO<Unit>:
     +m0 : M.Machine <- take(mc)
     +on : Bool = M.Machine.auto_balloon(m0)
     put(mc, m0)
-    _ : U32 <- Bool.pick(IO(U32), on, H.Hvf.tick_wait(Au.Auto.start_ms()), IO.pure(U32, 0))
-    balloon_poll.on(on, mc, done)
+    balloon_poll.on(True{}, on, 0, mc, done)
 
 # Runs a machine: the vCPU loops of the given CPUs, console input and the
 # control socket; ends when a vCPU stops the VM.

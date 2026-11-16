@@ -118,3 +118,21 @@ def Auto.target(+st: Stats, +target: U32) -> U32:
       Bool.pick(U32, U32.is_zero(total), target,
       Bool.pick(U32, U32.is_lt(((floor + Auto.slack() : U32) + Auto.band() : U32), free), Auto.grow(free, floor, target, Auto.most(total)),
       Bool.pick(U32, U32.is_lt(free, floor), Auto.shrink(free, floor, target), target)))
+
+# The clock (host/main.bend: balloon_poll) ticks every Auto.period_ms()
+# from the start. Each tick the host settles the guest RAM it wrote
+# (macOS: Hvf.ram_settle, a page the VMM writes is charged twice until its
+# mapping is replaced); once Auto.start_ms() passed, an automatic balloon
+# also polls. The time since the start, counted up to Auto.start_ms():
+def Auto.later(+elapsed: U32) -> U32:
+  U32.min((elapsed + Auto.period_ms() : U32), Auto.start_ms())
+
+# Whether this tick polls the balloon.
+def Auto.polls(auto: Bool, +elapsed: U32) -> Bool:
+  Bool.and(auto, U32.is_ge(elapsed, Auto.start_ms()))
+
+# Whether the clock goes on after a tick: while the balloon is automatic or
+# the host settles RAM (Hvf.ram_settle answers Auto.none() where nothing
+# needs settling: then a machine without the automatic balloon stops it).
+def Auto.ticks(auto: Bool, +settled: U32) -> Bool:
+  Bool.or(auto, U32.is_ne(settled, Auto.none()))
