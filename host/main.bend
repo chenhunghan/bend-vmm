@@ -781,7 +781,7 @@ def dsnap.after(ok: Bool, +dst: String, +old: String, +gen: String) -> IO(U32):
 # resumes if it was running. Each writable disk is kept with it
 # (src/vmm/disksnap.bend): copied first, its GEN in the saved command line,
 # the copies placed before the snapshot. Answers 0 or an errno.
-@unsafe def snapshot.do(+mc: Chan(M.Machine), +path: String) -> IO(U32):
+@unsafe def snapshot(+mc: Chan(M.Machine), +path: String) -> IO(U32):
   do IO<U32>:
     +was : U32 <- pause_vm()
     +m : M.Machine <- take(mc)
@@ -813,19 +813,6 @@ def dsnap.after(ok: Bool, +dst: String, +old: String, +gen: String) -> IO(U32):
     put(mc, m)
     resume_if(U32.is_zero(was))
     return rc
-
-# x86_64 guests have no snapshots yet: EOPNOTSUPP (95).
-@unsafe def snapshot.arch(x86: Bool, +mc: Chan(M.Machine), +path: String) -> IO(U32):
-  match x86:
-    case True{}:
-      IO.pure(U32, 95)
-    case False{}:
-      snapshot.do(mc, path)
-
-@unsafe def snapshot(+mc: Chan(M.Machine), +path: String) -> IO(U32):
-  do IO<U32>:
-    +arch : U32 <- H.Hvf.arch()
-    snapshot.arch(U32.is_eq(arch, 1), mc, path)
 
 def reply_rc(+rc: U32, ok: String) -> String:
   Bool.pick(String, U32.is_zero(rc), ok, "error " ++ U32.show(rc))
@@ -2173,10 +2160,23 @@ def x86.put(pc: Chan(Xp.Pio), p: Xp.Pio) -> IO(Unit):
         put(mc, m)
         x86.loop.ctl(cpu, mc, pc, done, ctl)
 
-@unsafe def x86.loop.io(+cpu: U32, +mc: Chan(M.Machine), +pc: Chan(Xp.Pio), +done: Chan(U32), step: Xp.XStep) -> IO(Unit):
-  match step:
-    case Xp.XStep{p, ctl}:
+# The port machine's state, for the next snapshot: handed to the host when
+# it changed (a write to the UART's settings, console input; not each byte
+# sent).
+def x86.keep(same: Bool, +p: Xp.Pio) -> IO(Unit):
+  match same:
+    case True{}:
+      IO.pure(Unit, Unit{})
+    case False{}:
       do IO<Unit>:
+        _ : U32 <- H.Hvf.x86_pio_put(Xp.Pio.saved(p))
+        return Unit{}
+
+@unsafe def x86.loop.io(+cpu: U32, +mc: Chan(M.Machine), +pc: Chan(Xp.Pio), +done: Chan(U32), step: Xp.XStep, +before: +List<U32>) -> IO(Unit):
+  match step:
+    case Xp.XStep{+p, ctl}:
+      do IO<Unit>:
+        x86.keep(Xp.Pio.same(before, Xp.Pio.saved(p)), p)
         x86.put(pc, p)
         x86.loop.ctl(cpu, mc, pc, done, ctl)
 
@@ -2189,9 +2189,10 @@ def x86.put(pc: Chan(Xp.Pio), p: Xp.Pio) -> IO(Unit):
         x86.loop.mem(cpu, mc, pc, done, step)
     case Xx.XIo{w, port, size, v}:
       do IO<Unit>:
-        p : Xp.Pio <- x86.take(pc)
+        +p : Xp.Pio <- x86.take(pc)
+        +before : +List<U32> = Xp.Pio.saved(p)
         step : Xp.XStep <- interp(cpu, mc, done, Xp.XStep, Xp.Pio.on_io(p, w, port, size, v))
-        x86.loop.io(cpu, mc, pc, done, step)
+        x86.loop.io(cpu, mc, pc, done, step, before)
     case Xx.XReset{}:
       x86.loop.ctl(cpu, mc, pc, done, M.Stop{1})
 
@@ -2216,7 +2217,8 @@ def x86.put(pc: Chan(Xp.Pio), p: Xp.Pio) -> IO(Unit):
         +p0 : Xp.Pio <- x86.take(pc)
         +room : Nat = Bool.pick(Nat, U32.is_zero(tries), 4096n, Xp.Pio.room(p0))
         +now : +List<U32> = List.take(&2, U32, all, room)
-        p1 : Xp.Pio <- interp(0, mc, done, Xp.Pio, Xp.Pio.input(p0, now))
+        +p1 : Xp.Pio <- interp(0, mc, done, Xp.Pio, Xp.Pio.input(p0, now))
+        x86.keep(False{}, p1)
         x86.put(pc, p1)
         m0 : M.Machine <- take(mc)
         m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.input(m0, now))
@@ -2264,10 +2266,13 @@ def x86.put(pc: Chan(Xp.Pio), p: Xp.Pio) -> IO(Unit):
     tty : U32 <- H.Hvf.stdin_tty()
     x86.input(mc, pc, done, Es.Esc.new(U32.is_ne(tty, 0)))
 
-@unsafe def x86.run(+cpus: U32, +mc: Chan(M.Machine), +done: Chan(U32), +ctl: String, fwd: String) -> IO(Unit):
+@unsafe def x86.run(+cpus: U32, +mc: Chan(M.Machine), +done: Chan(U32), +ctl: String, fwd: String, p0: Xp.Pio) -> IO(Unit):
   do IO<Unit>:
     +pc : Chan(Xp.Pio) <- Chan.new(Xp.Pio, 1)
-    x86.put(pc, Xp.Pio.new())
+    # (the line as the state says: a restored UART may have an interrupt
+    # pending)
+    p1 : Xp.Pio <- interp(0, mc, done, Xp.Pio, Xp.Pio.input(p0, []))
+    x86.put(pc, p1)
     resolver()
     forwards(0, Cli.Fwd.specs(fwd), mc, done)
     x86.spawn(mc, pc, done, U32.to_nat(cpus), 0)
@@ -2348,6 +2353,7 @@ def x86.unsupported(o: Op.Opts) -> String:
     die_if(U32.is_ne(su, 0), "cannot set up the x86_64 machine")
     +rc : U32 <- H.Host.vm_init(Op.Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), U.U64.zero(), Op.Opts.cpus(o))
     die_if(U32.is_ne(rc, 0), "cannot create the VM (step " ++ U32.show(rc) ++ ")")
+    _ : U32 <- H.Hvf.snap_plans(X.X86.vm_plan(), X.X86.cpu_plan())
     +head : +List<U32> <- H.Host.head_n(Op.Opts.kernel(o), Xb.Bz.head_len())
     +flen : U32 <- H.Hvf.file_size(Op.Opts.kernel(o))
     +rlen : U32 <- H.Hvf.file_size(x86.initrd(o))
@@ -2357,7 +2363,7 @@ def x86.unsupported(o: Op.Opts) -> String:
     +mc : Chan(M.Machine) <- Chan.new(M.Machine, 1)
     put(mc, M.Machine.new(U32.to_nat(Op.Opts.cpus(o)), kinds))
     +done : Chan(U32) <- Chan.new(U32, 4)
-    x86.run(Op.Opts.cpus(o), mc, done, Op.Opts.control(o), Op.Opts.forward(o))
+    x86.run(Op.Opts.cpus(o), mc, done, Op.Opts.control(o), Op.Opts.forward(o), Xp.Pio.new())
 
 @unsafe def boot_fresh.arm(+o: Op.Opts) -> IO(Unit):
   do IO<Unit>:
@@ -2383,6 +2389,61 @@ def x86.unsupported(o: Op.Opts) -> String:
     +arch : U32 <- H.Hvf.arch()
     boot_fresh.arch(U32.is_eq(arch, 1), o)
 
+# An x86_64 restore: the VM made as at boot (X86's setup, RAM at 0), RAM
+# mapped from the snapshot, every saved vCPU created (each takes its
+# registers as it is), then the VM's state (the interrupt controllers, the
+# PIT, the clock, the port machine), and the vCPUs run.
+@unsafe def x86.restore.machine(got: Maybe<&2, M.Machine>, +o: Op.Opts) -> IO(Unit):
+  match got:
+    case None{}:
+      IO.die(Unit, 1, "bend-vmm: the snapshot's machine state does not decode")
+    case Some{m}:
+      do IO<Unit>:
+        +vc : U32 <- x86.vcpus(U32.to_nat(Op.Opts.cpus(o)), 0)
+        die_if(U32.is_ne(vc, 0), "cannot create the vCPUs")
+        gic : U32 <- H.Hvf.snap_gic()
+        die_if(U32.is_ne(gic, 0), "cannot restore the VM's state")
+        ws : +List<U32> <- H.Hvf.x86_pio_get()
+        +mc : Chan(M.Machine) <- Chan.new(M.Machine, 1)
+        put(mc, forget_net(m))
+        +done : Chan(U32) <- Chan.new(U32, 4)
+        log_err("bend-vmm: restored")
+        x86.run(Op.Opts.cpus(o), mc, done, Op.Opts.control(o), Op.Opts.forward(o), Xp.Pio.restored(ws))
+
+@unsafe def x86.restore(+path: String, +now: Op.Opts) -> IO(Unit):
+  do IO<Unit>:
+    +st : +List<U32> <- H.Hvf.snap_open(path)
+    die_if(U32.is_ne(H.Host.first(st), 0), "cannot read the snapshot (" ++ U32.show(H.Host.first(st)) ++ ")")
+    hb : +List<U32> <- H.Hvf.snap_peek(0, 0, 40)
+    +l : Sf.Layout <- snap.start(Sf.Snapf.head(Sf.Snapf.version(Sf.Snapf.word(st, 1n)), hb), Sf.Snapf.u64_at(st, 2n))
+    saved : List<String> <- H.Hvf.snap_args()
+    +prog : U32 <- H.Hvf.prog()
+    +o0 : Op.Opts = Op.Restore.opts(List.drop(&1, String, saved, Nat.sub(U32.to_nat(prog), 1n)), now)
+    +o : Op.Opts = Op.Opts.with_size(o0, Sf.Snapf.mem_mib(l), Sf.Snapf.cpus(l, Op.Opts.cpus(o0)))
+    die_if(Bool.not(Sf.Snapf.agrees(l, U.U64.zero())), "the snapshot's header does not describe a machine this host makes")
+    +why : String = Op.Restore.differs(o, now)
+    die_if(Bool.not(String.is_empty(why)), why)
+    tagged : List<String> <- H.Hvf.snap_args()
+    +back : U32 <- dsnap.run(Ds.Dsnap.restore(path, Ds.Dsnap.gen_of(tagged), Ds.Dsnap.writable(Op.Opts.disk(o))), 0)
+    die_if(U32.is_ne(back, 0), "cannot set the disks back from the snapshot's copies (" ++ U32.show(back) ++ "): are " ++ path ++ ".*.disk* there?")
+    +su : U32 <- H.Hvf.x86_setup(X.X86.gsi_table(), Xb.Boot.cpuid_rules(), X.X86.kvm_words())
+    die_if(U32.is_ne(su, 0), "cannot set up the x86_64 machine")
+    +vm : U32 <- H.Host.vm_init(Op.Opts.mem(o), L.Layout.gicd_base(), L.Layout.gicr_base(), U.U64.zero(), Op.Opts.cpus(o))
+    die_if(U32.is_ne(vm, 0), "cannot create the VM (step " ++ U32.show(vm) ++ ")")
+    _ : U32 <- H.Hvf.snap_plans(X.X86.vm_plan(), X.X86.cpu_plan())
+    ws : +List<U32> <- H.Hvf.snap_machine()
+    +got : Maybe<&2, M.Machine> = Snap.Snap.decode(ws)
+    +kinds : +List<D.DevKind> <- devices(o, has_balloon(machine_kinds(got)), has_auto_balloon(machine_kinds(got)))
+    die_if(Bool.not(words_eq(kinds_words(machine_kinds(got)), kinds_words(kinds))), "the snapshot's devices differ from the ones opened now (a disk changed size or format?)")
+    x86.restore.machine(got, o)
+
+@unsafe def restore.arch(x86: Bool, +o: Op.Opts) -> IO(Unit):
+  match x86:
+    case True{}:
+      x86.restore(Op.Opts.restore(o), o)
+    case False{}:
+      restore(Op.Opts.restore(o), o)
+
 @unsafe def main.mode(fresh: Bool, +o: Op.Opts) -> IO(Unit):
   match fresh:
     case True{}:
@@ -2390,8 +2451,7 @@ def x86.unsupported(o: Op.Opts) -> String:
     case False{}:
       do IO<Unit>:
         +arch : U32 <- H.Hvf.arch()
-        die_if(U32.is_eq(arch, 1), "--restore is not supported on x86_64 yet")
-        restore(Op.Opts.restore(o), o)
+        restore.arch(U32.is_eq(arch, 1), o)
 
 def usage() -> String:
   String.join([

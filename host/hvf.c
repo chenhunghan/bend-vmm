@@ -1084,31 +1084,260 @@ static int vmb_gic_restore(const uint8_t* blob, size_t size) {
 
 #else
 
-// x86_64 snapshots are not made yet (src/x86: the machine refuses them).
+// An x86_64 snapshot: KVM's state structures as entries {u32 kind, u32
+// length, bytes}, in the order of Bend's plans (Hvf.snap_plans: X86.cpu_plan
+// for each vCPU, X86.vm_plan for the VM), which is the order a restore
+// applies them. Kinds (src/x86/layout.bend says which and in what order):
+//   1 regs, 2 sregs, 3 xsave, 4 xcrs, 5 MSRs (KVM_GET_MSR_INDEX_LIST's,
+//   those KVM reads), 6 the local APIC, 7 the run state (mp_state),
+//   8 pending events, 9 debug registers;
+//   20 21 the PICs, 22 the IOAPIC, 23 the PIT, 24 KVM's clock, 25 the
+//   port machine's words (Hvf.x86_pio_put).
+typedef struct {
+  uint8_t* b;
+  size_t   n, cap;
+} KvmBlob;
+
+static void kvm_blob_put(KvmBlob* x, uint32_t kind, const void* p, uint32_t len) {
+  if (x->n + 8 + len > x->cap) {
+    x->cap = (x->n + 8 + len) * 2;
+    x->b   = io_mem(realloc(x->b, x->cap));
+  }
+  memcpy(x->b + x->n, &kind, 4);
+  memcpy(x->b + x->n + 4, &len, 4);
+  memcpy(x->b + x->n + 8, p, len);
+  x->n += 8 + len;
+}
+
+static struct kvm_msr_list* kvm_msr_index;
+
+static struct kvm_msr_list* kvm_msrs_known(void) {
+  if (!kvm_msr_index) {
+    struct kvm_msr_list probe = {0};
+    ioctl(kvm_fd, KVM_GET_MSR_INDEX_LIST, &probe); // E2BIG, with the count
+    kvm_msr_index    = io_mem(malloc(sizeof *kvm_msr_index + probe.nmsrs * sizeof(uint32_t)));
+    kvm_msr_index->nmsrs = probe.nmsrs;
+    if (ioctl(kvm_fd, KVM_GET_MSR_INDEX_LIST, kvm_msr_index) != 0) {
+      kvm_msr_index->nmsrs = 0;
+    }
+  }
+  return kvm_msr_index;
+}
+
+// KVM_GET_MSRS and KVM_SET_MSRS stop at the first MSR they refuse: the rest
+// go on from the one after it. Answers how many of the n entries took.
+static uint32_t kvm_msrs_io(HvfCpu* c, unsigned long req, struct kvm_msr_entry* e, uint32_t n, struct kvm_msr_entry* ok) {
+  struct kvm_msrs* m = io_mem(malloc(sizeof *m + n * sizeof *e));
+  uint32_t         k = 0;
+  for (uint32_t at = 0; at < n;) {
+    m->nmsrs = n - at;
+    m->pad   = 0;
+    memcpy(m->entries, e + at, (n - at) * sizeof *e);
+    int r = ioctl(c->fd, req, m);
+    if (r < 0) {
+      break;
+    }
+    memcpy(ok + k, m->entries, (size_t)r * sizeof *e);
+    k += (uint32_t)r;
+    at += (uint32_t)r + 1; // past the refused one
+  }
+  free(m);
+  return k;
+}
+
 static void hvf_save_regs(HvfCpu* c) {
   free(c->saved);
   c->saved  = NULL;
   c->nsaved = 0;
+  if (c->in_mmio || c->in_io) {
+    // finish the trapped access first (KVM writes the IN's or the load's
+    // answer back): the snapshot holds the finished exit
+    c->run->immediate_exit = 1;
+    ioctl(c->fd, KVM_RUN, 0);
+    c->run->immediate_exit = 0;
+    c->in_mmio = c->in_io = 0;
+  }
+  KvmBlob x = {0};
+  for (u64 i = 0; i < hvf_nreg_plan; i++) {
+    uint32_t kind = hvf_reg_plan[i];
+    union {
+      struct kvm_regs        regs;
+      struct kvm_sregs       sregs;
+      struct kvm_xsave       xsave;
+      struct kvm_xcrs        xcrs;
+      struct kvm_lapic_state lapic;
+      struct kvm_mp_state    mp;
+      struct kvm_vcpu_events ev;
+      struct kvm_debugregs   dbg;
+    } u;
+    memset(&u, 0, sizeof u);
+    int r = -1;
+    switch (kind) {
+      case 1: r = ioctl(c->fd, KVM_GET_REGS, &u.regs); if (!r) kvm_blob_put(&x, kind, &u.regs, sizeof u.regs); break;
+      case 2: r = ioctl(c->fd, KVM_GET_SREGS, &u.sregs); if (!r) kvm_blob_put(&x, kind, &u.sregs, sizeof u.sregs); break;
+      case 3: r = ioctl(c->fd, KVM_GET_XSAVE, &u.xsave); if (!r) kvm_blob_put(&x, kind, &u.xsave, sizeof u.xsave); break;
+      case 4: r = ioctl(c->fd, KVM_GET_XCRS, &u.xcrs); if (!r) kvm_blob_put(&x, kind, &u.xcrs, sizeof u.xcrs); break;
+      case 6: r = ioctl(c->fd, KVM_GET_LAPIC, &u.lapic); if (!r) kvm_blob_put(&x, kind, &u.lapic, sizeof u.lapic); break;
+      case 7: r = ioctl(c->fd, KVM_GET_MP_STATE, &u.mp); if (!r) kvm_blob_put(&x, kind, &u.mp, sizeof u.mp); break;
+      case 8: r = ioctl(c->fd, KVM_GET_VCPU_EVENTS, &u.ev); if (!r) kvm_blob_put(&x, kind, &u.ev, sizeof u.ev); break;
+      case 9: r = ioctl(c->fd, KVM_GET_DEBUGREGS, &u.dbg); if (!r) kvm_blob_put(&x, kind, &u.dbg, sizeof u.dbg); break;
+      case 5: {
+        struct kvm_msr_list*  l  = kvm_msrs_known();
+        uint32_t              n  = l->nmsrs;
+        struct kvm_msr_entry* e  = io_mem(calloc(n ? n : 1, sizeof *e));
+        struct kvm_msr_entry* ok = io_mem(calloc(n ? n : 1, sizeof *e));
+        for (uint32_t k = 0; k < n; k++) {
+          e[k].index = l->indices[k];
+        }
+        uint32_t got = kvm_msrs_io(c, KVM_GET_MSRS, e, n, ok);
+        kvm_blob_put(&x, kind, ok, got * (uint32_t)sizeof *ok);
+        free(e);
+        free(ok);
+        r = 0;
+        break;
+      }
+    }
+    if (r != 0 && (hvf_trace & 1)) {
+      fprintf(stderr, "[trace] snapshot: vCPU state %u: %s\n", kind, strerror(errno));
+    }
+  }
+  c->saved  = x.b;
+  c->nsaved = x.n;
 }
 
+// Sets every saved entry, in the blob's order (the plan's).
 static void hvf_load_regs(HvfCpu* c, const uint8_t* blob, size_t size) {
-  (void)c;
-  (void)blob;
-  (void)size;
+  for (size_t at = 0; at + 8 <= size;) {
+    uint32_t kind, len;
+    memcpy(&kind, blob + at, 4);
+    memcpy(&len, blob + at + 4, 4);
+    if (len > size - at - 8) {
+      break;
+    }
+    const uint8_t* p = blob + at + 8;
+    at += 8 + len;
+    union {
+      struct kvm_regs        regs;
+      struct kvm_sregs       sregs;
+      struct kvm_xsave       xsave;
+      struct kvm_xcrs        xcrs;
+      struct kvm_lapic_state lapic;
+      struct kvm_mp_state    mp;
+      struct kvm_vcpu_events ev;
+      struct kvm_debugregs   dbg;
+    } u;
+    int r = 0;
+#define KVM_SET_ONE(K, F, REQ)                            \
+  case K:                                                 \
+    if (len == sizeof u.F) {                              \
+      memcpy(&u.F, p, len);                               \
+      r = ioctl(c->fd, REQ, &u.F);                        \
+    }                                                     \
+    break;
+    switch (kind) {
+      KVM_SET_ONE(1, regs, KVM_SET_REGS)
+      KVM_SET_ONE(2, sregs, KVM_SET_SREGS)
+      KVM_SET_ONE(3, xsave, KVM_SET_XSAVE)
+      KVM_SET_ONE(4, xcrs, KVM_SET_XCRS)
+      KVM_SET_ONE(6, lapic, KVM_SET_LAPIC)
+      KVM_SET_ONE(7, mp, KVM_SET_MP_STATE)
+      KVM_SET_ONE(8, ev, KVM_SET_VCPU_EVENTS)
+      KVM_SET_ONE(9, dbg, KVM_SET_DEBUGREGS)
+      case 5: {
+        uint32_t              n  = len / (uint32_t)sizeof(struct kvm_msr_entry);
+        struct kvm_msr_entry* e  = io_mem(malloc((n ? n : 1) * sizeof *e));
+        struct kvm_msr_entry* ok = io_mem(malloc((n ? n : 1) * sizeof *e));
+        memcpy(e, p, (size_t)n * sizeof *e);
+        uint32_t set = kvm_msrs_io(c, KVM_SET_MSRS, e, n, ok);
+        if (set != n && (hvf_trace & 1)) {
+          fprintf(stderr, "[trace] restore: %u of %u MSRs set\n", set, n);
+        }
+        free(e);
+        free(ok);
+        break;
+      }
+    }
+#undef KVM_SET_ONE
+    if (r != 0) {
+      fprintf(stderr, "bend-vmm: restore: vCPU state %u: %s\n", kind, strerror(errno));
+    }
+  }
 }
+
+// The port machine's words (Hvf.x86_pio_put), saved with the VM.
+static uint32_t* kvm_pio;
+static u64       kvm_npio;
 
 static void vmb_gic_save(uint8_t** out, size_t* nout) {
-  *out  = NULL;
-  *nout = 0;
+  KvmBlob x = {0};
+  for (u64 i = 0; i < hvf_ngic_plan; i++) {
+    uint32_t kind = hvf_gic_plan[i];
+    if (kind >= 20 && kind <= 22) {
+      struct kvm_irqchip ch;
+      memset(&ch, 0, sizeof ch);
+      ch.chip_id = kind - 20;
+      if (ioctl(kvm_vm, KVM_GET_IRQCHIP, &ch) == 0) {
+        kvm_blob_put(&x, kind, &ch, sizeof ch);
+      }
+    } else if (kind == 23) {
+      struct kvm_pit_state2 pit;
+      if (ioctl(kvm_vm, KVM_GET_PIT2, &pit) == 0) {
+        kvm_blob_put(&x, kind, &pit, sizeof pit);
+      }
+    } else if (kind == 24) {
+      struct kvm_clock_data clk;
+      memset(&clk, 0, sizeof clk);
+      if (ioctl(kvm_vm, KVM_GET_CLOCK, &clk) == 0) {
+        kvm_blob_put(&x, kind, &clk, sizeof clk);
+      }
+    } else if (kind == 25) {
+      kvm_blob_put(&x, kind, kvm_pio ? (const void*)kvm_pio : (const void*)"", (uint32_t)(kvm_npio * 4));
+    }
+  }
+  *out  = x.b;
+  *nout = x.n;
 }
 
 static int vmb_gic_restore(const uint8_t* blob, size_t size) {
-  (void)blob;
-  (void)size;
-  return -1;
+  int bad = 0;
+  for (size_t at = 0; at + 8 <= size;) {
+    uint32_t kind, len;
+    memcpy(&kind, blob + at, 4);
+    memcpy(&len, blob + at + 4, 4);
+    if (len > size - at - 8) {
+      return -1;
+    }
+    const uint8_t* p = blob + at + 8;
+    at += 8 + len;
+    int r = 0;
+    if (kind >= 20 && kind <= 22 && len == sizeof(struct kvm_irqchip)) {
+      struct kvm_irqchip ch;
+      memcpy(&ch, p, len);
+      r = ioctl(kvm_vm, KVM_SET_IRQCHIP, &ch);
+    } else if (kind == 23 && len == sizeof(struct kvm_pit_state2)) {
+      struct kvm_pit_state2 pit;
+      memcpy(&pit, p, len);
+      r = ioctl(kvm_vm, KVM_SET_PIT2, &pit);
+    } else if (kind == 24 && len == sizeof(struct kvm_clock_data)) {
+      struct kvm_clock_data clk;
+      memcpy(&clk, p, len);
+      clk.flags = 0; // the saved count, as it was (not adjusted by real time)
+      r = ioctl(kvm_vm, KVM_SET_CLOCK, &clk);
+    } else if (kind == 25) {
+      free(kvm_pio);
+      kvm_npio = len / 4;
+      kvm_pio  = io_mem(malloc(len ? len : 4));
+      memcpy(kvm_pio, p, (size_t)kvm_npio * 4);
+    }
+    if (r != 0) {
+      fprintf(stderr, "bend-vmm: restore: VM state %u: %s\n", kind, strerror(errno));
+      bad = 1;
+    }
+  }
+  return bad ? -1 : 0;
 }
 
-#define HVF_HYPERVISOR 2 // Snapf.version: 2 KVM on x86_64
+#define HVF_HYPERVISOR 2 // Snapf.version: 3 KVM on x86_64
 #endif
 
 // Saves this vCPU's registers when a snapshot asked for them. Called by the
@@ -1888,6 +2117,32 @@ Term hvf_vcpu_queue_run(Env e, Term* f, IoWork* w) {
     pthread_mutex_unlock(&c->mu);
     sched_yield();
   }
+}
+
+// Hvf.x86_pio_put(words) -> U32: the x86 port machine's state as Bend
+// encodes it (Pio.saved), kept for the next snapshot (X86.vm_plan's kind
+// 25). Hvf.x86_pio_get() -> List<U32>: those words, or what a restore read.
+Term hvf_x86_pio_put_run(Env e, Term* f, IoWork* w) {
+#if defined(__x86_64__) && !defined(__APPLE__)
+  u64       n;
+  uint32_t* ws = hvf_u32s(e, f[0], &n);
+  free(kvm_pio);
+  kvm_pio  = ws;
+  kvm_npio = n;
+  return (Term)0;
+#else
+  (void)e;
+  (void)f;
+  return (Term)HVF_ERR;
+#endif
+}
+
+Term hvf_x86_pio_get_run(Env e, Term* f, IoWork* w) {
+#if defined(__x86_64__) && !defined(__APPLE__)
+  return hvf_words(e, kvm_pio, kvm_pio ? kvm_npio : 0);
+#else
+  return term_pak(CID(Nil), 0);
+#endif
 }
 
 // Hvf.arch() -> U32: the guest architecture this host runs: 0 arm64
@@ -6834,6 +7089,12 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.irq)
   io_eff(CID(Hvf.irq), hvf_irq_run);
+#endif
+#ifdef CID(Hvf.x86_pio_put)
+  io_eff(CID(Hvf.x86_pio_put), hvf_x86_pio_put_run);
+#endif
+#ifdef CID(Hvf.x86_pio_get)
+  io_eff(CID(Hvf.x86_pio_get), hvf_x86_pio_get_run);
 #endif
 #ifdef CID(Hvf.arch)
   io_eff(CID(Hvf.arch), hvf_arch_run);

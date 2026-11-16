@@ -7,7 +7,8 @@ import ../lib/bytes.bend as B
 # decided here (laws/snapfile.bend).
 #
 #   0   "BVMSNAP1"
-#   8   version u32 (the host's hypervisor: 1 Hypervisor.framework, 2 KVM)
+#   8   version u32 (the host's hypervisor: 1 Hypervisor.framework, 2 KVM,
+#       3 KVM on x86_64)
 #   12  vCPUs u32
 #   16  RAM base u64
 #   24  RAM size u64
@@ -383,12 +384,14 @@ def Snapf.load.wire(l: Layout) -> +List<U32>:
 
 # The snapshot format each hypervisor writes and reads, from the host's fact
 # (the first word Hvf.snap_save answers, the second of Hvf.snap_open's:
-# 0 Hypervisor.framework, 1 KVM): version 1 holds Hypervisor.framework's
-# register entries and hv_gic_state, version 2 KVM's register list and its
-# vGIC replay. A snapshot restores only where its version is this host's;
-# another hypervisor has no version (0, which no header carries).
+# 0 Hypervisor.framework, 1 KVM, 2 KVM on x86_64): version 1 holds
+# Hypervisor.framework's register entries and hv_gic_state, version 2 KVM's
+# register list and its vGIC replay, version 3 KVM's x86 state structures
+# (src/x86/layout.bend's plans). A snapshot restores only where its version
+# is this host's; another hypervisor has no version (0, which no header
+# carries).
 def Snapf.version(+hv: U32) -> U32:
-  Bool.pick(U32, U32.is_eq(hv, 0), 1, Bool.pick(U32, U32.is_eq(hv, 1), 2, 0))
+  Bool.pick(U32, U32.is_eq(hv, 0), 1, Bool.pick(U32, U32.is_eq(hv, 1), 2, Bool.pick(U32, U32.is_eq(hv, 2), 3, 0)))
 
 # The sizes Hvf.snap_save answers, with its hypervisor word made the
 # format's version (Snapf.plan_of reads a version there).

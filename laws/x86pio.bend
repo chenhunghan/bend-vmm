@@ -111,3 +111,16 @@ law x86pio.no_reset_cf9:
 
 law x86pio.ones:
   {P.Pio.ones(2) == 65535 : U32}
+
+law x86pio.saved_new:
+  {P.Pio.saved(P.Pio.new()) == [0, 0, 0, 0, 12, 0, 0, 0] : List<&2, U32>}
+
+law x86pio.restored_roundtrip:
+  {P.Pio.saved(P.Pio.restored([2, 3, 11, 0, 1, 0, 1, 13, 65])) == [2, 3, 11, 0, 1, 0, 1, 13, 65] : List<&2, U32>}
+
+# a restore raises a transmit-empty interrupt where it is enabled
+law x86pio.restored_thri:
+  {P.Uart.iid(P.Uart.restored_uart(P.Pio.restored([2, 3, 11, 0, 1, 0, 0, 0]))) == 2 : U32}
+
+law x86pio.restored_short:
+  {P.Pio.saved(P.Pio.restored([1, 2])) == [0, 0, 0, 0, 12, 0, 0, 0] : List<&2, U32>}

@@ -85,3 +85,15 @@ def L.x86pio.no_reset_cf9():
 def L.x86pio.ones():
   {==}
 
+def L.x86pio.saved_new():
+  {==}
+
+def L.x86pio.restored_roundtrip():
+  {==}
+
+def L.x86pio.restored_thri():
+  {==}
+
+def L.x86pio.restored_short():
+  {==}
+

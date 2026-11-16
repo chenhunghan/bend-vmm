@@ -56,3 +56,9 @@ law x86layout.kvm_words:
 # the identity map and the TSS sit in the hole, past the local APICs
 law x86layout.vmx_pages:
   {Bool.and(U32.is_gt(4278173696, X.X86.lapic_base()), U32.is_lt(4278177792, 4294967295)) == True{} : Bool}
+
+law x86layout.cpu_plan_sregs_before_msrs:
+  {List.take(&2, U32, X.X86.cpu_plan(), 5n) == [1, 3, 4, 2, 5] : List<&2, U32>}
+
+law x86layout.vm_plan:
+  {X.X86.vm_plan() == [20, 21, 22, 23, 24, 25] : List<&2, U32>}

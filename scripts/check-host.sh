@@ -4,7 +4,7 @@
 # macOS (Apple Silicon), KVM on Linux (arm64 or x86_64, /dev/kvm). On an
 # x86_64 host the guest is Alpine's x86_64 virt kernel
 # (scripts/guest-assets-x86.sh) and what x86_64 guests do not have yet is
-# skipped: bare-metal payloads, snapshots, the display, UEFI.
+# skipped: bare-metal payloads, the display, UEFI.
 # CHECK_SLOW=N stretches every timeout and pause N times (an emulated host,
 # such as scripts/lima/linux-host.sh on an M1/M2 Mac); SKIP_NATIVE=1 skips
 # the native test build; SKIP_BUILD=1 uses the binaries already in out/
@@ -45,8 +45,10 @@ if [ $X86 = 1 ]; then
 else
   GIMG=out/guest/Image; GZ=out/guest/vmlinuz; GI=out/guest/guest.cpio; GCON=console=ttyAMA0; GDIR=out/guest; LK=out/linux/linux; LI=out/linux/initrd.cpio
 fi
-# arm64 guests only (bare-metal payloads, snapshots, the display, UEFI)
+# arm64 guests only (bare-metal payloads, the display, UEFI)
 arm() { [ $X86 = 0 ]; }
+# the guest, for the Python checks (absolute: a VM folder keeps its paths)
+export BEND_GUEST_KERNEL=$PWD/$GIMG BEND_GUEST_INITRD=$PWD/$GI BEND_GUEST_CONSOLE=$GCON
 SLOW=${CHECK_SLOW:-1}
 # sleep and alarm, stretched by CHECK_SLOW
 slp() { sleep $(( $1 * SLOW )); }
@@ -195,42 +197,38 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   [ "$(echo resume | nc -U "$sock")" = running ] && grn "ok: resume" || { red "failed: resume"; fail=1; }
   # the NAT's DNS server follows the host's resolver (read at each query)
   echo net | nc -U "$sock" | grep -q '^resolver .*: [0-9]*\.[0-9]*\.[0-9]*\.[0-9]*$' && grn "ok: net shows the resolver" || { red "failed: net shows the resolver"; fail=1; }
-  if arm; then
-    [ "$(echo "snapshot $t/vm.snap" | nc -U "$sock")" = saved ] && grn "ok: snapshot ($(du -h "$t/vm.snap" | cut -f1) on disk)" || { red "failed: snapshot"; fail=1; }
-    echo quit | nc -U "$sock" >/dev/null; slp 1
-    out=$(drive 40 "restored" 'cat /tmp/m\n' "MARK-42" 'poweroff -f\n' -- ./out/bend-vmm --restore "$t/vm.snap" 2>&1)
-    grep -q "^MARK-42" <<<"$(tr -d '\r' <<<"$out")" && grep -q "stopped (0)" <<<"$out" && grn "ok: restore (guest RAM and CPUs continue)" || { red "failed: restore"; grep -a -v sysreg <<<"$out" | tail -15; fail=1; }
-    # a snapshot cannot choose host files: a restore that names other ones
-    # than the snapshot was taken with is refused
-    out=$(./out/bend-vmm --restore "$t/vm.snap" --share "$t" 2>&1 < /dev/null)
-    grep -q "taken without --share" <<<"$out" && grn "ok: restore refuses host paths the snapshot was not taken with" || { red "failed: restore path check"; tail -3 <<<"$out"; fail=1; }
-    # malformed snapshots (src/vmm/snapfile.bend refuses them) end the VMM
-    # with an error, never a crash: a cut header, RAM cut short, 65 vCPUs, a
-    # machine word count past 2^26
-    head -c 30 "$t/vm.snap" > "$t/bad1.snap"
-    head -c 1048576 "$t/vm.snap" > "$t/bad2.snap"
-    head -c 65536 "$t/vm.snap" > "$t/bad3.snap"; printf 'A' | dd of="$t/bad3.snap" bs=1 seek=12 conv=notrunc 2>/dev/null
-    head -c 65536 "$t/vm.snap" > "$t/bad4.snap"
-    nargs=$(od -An -tu4 -j32 -N4 "$t/vm.snap" | tr -d ' ')
-    printf '\377\377\377\377' | dd of="$t/bad4.snap" bs=1 seek=$((40 + nargs)) conv=notrunc 2>/dev/null
-    ok=1
-    for b in 1 2 3 4; do
-      out=$(./out/bend-vmm --restore "$t/bad$b.snap" 2>&1 < /dev/null); code=$?
-      [ $code = 1 ] && grep -q "cannot read the snapshot (22)" <<<"$out" || { ok=0; echo "bad$b: exit $code: $(tail -1 <<<"$out")"; }
-    done
-    [ $ok = 1 ] && grn "ok: restore refuses malformed snapshots (cut header, RAM cut short, 65 vCPUs, 2^32 machine words)" || { red "failed: malformed snapshots"; fail=1; }
-    # a snapshot of a restored VM (its command line is the restore's: no
-    # --mem, no --cpus; the header says), written over the very file its RAM
-    # is mapped from (a new file renamed into place), restores again
-    ( (slp 30) | ./out/bend-vmm --restore "$t/vm.snap" --control "$t/c.sock" > "$t/c.log" 2>&1 & )
-    slp 4
-    r=$(echo "snapshot $t/vm.snap" | nc -U "$t/c.sock"); echo quit | nc -U "$t/c.sock" > /dev/null; slp 2
-    out=$(drive 40 "restored" 'echo CHAIN-$((6*7)) $(nproc)\n' "CHAIN-42" 'poweroff -f\n' -- ./out/bend-vmm --restore "$t/vm.snap" 2>&1)
-    [ "$r" = saved ] && grep -q "^CHAIN-42 2" <<<"$(tr -d '\r' <<<"$out")" && ! ls "$t"/*.bend-vmm-tmp > /dev/null 2>&1 \
-      && grn "ok: a restored VM snapshots over its own file, and that restores (2 vCPUs)" || { red "failed: snapshot of a restored VM ($r)"; tail -5 <<<"$out"; fail=1; }
-  else
-    echo quit | nc -U "$sock" >/dev/null; slp 1
-  fi
+  [ "$(echo "snapshot $t/vm.snap" | nc -U "$sock")" = saved ] && grn "ok: snapshot ($(du -h "$t/vm.snap" | cut -f1) on disk)" || { red "failed: snapshot"; fail=1; }
+  echo quit | nc -U "$sock" >/dev/null; slp 1
+  out=$(drive 40 "restored" 'cat /tmp/m\n' "MARK-42" 'poweroff -f\n' -- ./out/bend-vmm --restore "$t/vm.snap" 2>&1)
+  grep -q "^MARK-42" <<<"$(tr -d '\r' <<<"$out")" && grep -q "stopped (0)" <<<"$out" && grn "ok: restore (guest RAM and CPUs continue)" || { red "failed: restore"; grep -a -v sysreg <<<"$out" | tail -15; fail=1; }
+  # a snapshot cannot choose host files: a restore that names other ones
+  # than the snapshot was taken with is refused
+  out=$(./out/bend-vmm --restore "$t/vm.snap" --share "$t" 2>&1 < /dev/null)
+  grep -q "taken without --share" <<<"$out" && grn "ok: restore refuses host paths the snapshot was not taken with" || { red "failed: restore path check"; tail -3 <<<"$out"; fail=1; }
+  # malformed snapshots (src/vmm/snapfile.bend refuses them) end the VMM
+  # with an error, never a crash: a cut header, RAM cut short, 65 vCPUs, a
+  # machine word count past 2^26
+  head -c 30 "$t/vm.snap" > "$t/bad1.snap"
+  head -c 1048576 "$t/vm.snap" > "$t/bad2.snap"
+  head -c 65536 "$t/vm.snap" > "$t/bad3.snap"; printf 'A' | dd of="$t/bad3.snap" bs=1 seek=12 conv=notrunc 2>/dev/null
+  head -c 65536 "$t/vm.snap" > "$t/bad4.snap"
+  nargs=$(od -An -tu4 -j32 -N4 "$t/vm.snap" | tr -d ' ')
+  printf '\377\377\377\377' | dd of="$t/bad4.snap" bs=1 seek=$((40 + nargs)) conv=notrunc 2>/dev/null
+  ok=1
+  for b in 1 2 3 4; do
+    out=$(./out/bend-vmm --restore "$t/bad$b.snap" 2>&1 < /dev/null); code=$?
+    [ $code = 1 ] && grep -q "cannot read the snapshot (22)" <<<"$out" || { ok=0; echo "bad$b: exit $code: $(tail -1 <<<"$out")"; }
+  done
+  [ $ok = 1 ] && grn "ok: restore refuses malformed snapshots (cut header, RAM cut short, 65 vCPUs, 2^32 machine words)" || { red "failed: malformed snapshots"; fail=1; }
+  # a snapshot of a restored VM (its command line is the restore's: no
+  # --mem, no --cpus; the header says), written over the very file its RAM
+  # is mapped from (a new file renamed into place), restores again
+  ( (slp 30) | ./out/bend-vmm --restore "$t/vm.snap" --control "$t/c.sock" > "$t/c.log" 2>&1 & )
+  slp 4
+  r=$(echo "snapshot $t/vm.snap" | nc -U "$t/c.sock"); echo quit | nc -U "$t/c.sock" > /dev/null; slp 2
+  out=$(drive 40 "restored" 'echo CHAIN-$((6*7)) $(nproc)\n' "CHAIN-42" 'poweroff -f\n' -- ./out/bend-vmm --restore "$t/vm.snap" 2>&1)
+  [ "$r" = saved ] && grep -q "^CHAIN-42 2" <<<"$(tr -d '\r' <<<"$out")" && ! ls "$t"/*.bend-vmm-tmp > /dev/null 2>&1 \
+    && grn "ok: a restored VM snapshots over its own file, and that restores (2 vCPUs)" || { red "failed: snapshot of a restored VM ($r)"; tail -5 <<<"$out"; fail=1; }
   # SIGTERM, and the control socket's powerdown, press the guest's power
   # button (the virtio keyboard's KEY_POWER): the guest powers off
   for how in sigterm powerdown; do
@@ -269,7 +267,7 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   rm -rf "$t"
 fi
 
-if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && arm; then
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 5a. disk snapshots: memory and disk go back together, to any snapshot"
   # (src/vmm/disksnap.bend) marks A, B, C on the disk with snapshots between;
   # restoring s1, s2, s1 reads A, B, A; a snapshot over s1 replaces its copies
@@ -279,7 +277,7 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && arm; then
   rm -rf "$t"
 fi
 
-if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && arm; then
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 5g. VM folders and named snapshots (bend-vmm create, run, snapshot, restore, ...)"
   t=$(mktemp -d)
   out=$(python3 scripts/vmdir-test.py ./out/bend-vmm "$t" "$SLOW" 2>&1)
@@ -290,13 +288,13 @@ fi
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 5h. memory give-back: virtio-balloon (on by default; --balloon off)"
   t=$(mktemp -d)
-  snaps=0; arm && snaps=1
-  out=$(BALLOON_KERNEL=$GIMG BALLOON_INITRD=$GI BALLOON_CONSOLE=$GCON BALLOON_SNAPSHOTS=$snaps BALLOON_FRAG=$snaps python3 scripts/balloon-test.py ./out/bend-vmm "$t" "$SLOW" 2>&1)
-  if [ $? = 0 ]; then grn "ok: balloon: $(grep -o 'boot: freeing 1 GiB.*MiB)' <<<"$out" | sed 's/boot: //'); $(arm && echo 'again after a restore; ')the host sees the guest's data; $(grep -o 'inflating gives.*MiB)' <<<"$out"), balloon 0 gives it back"; else red "failed: balloon"; grep -v '^ok:' <<<"$out" | tail -6; fail=1; fi
+  frag=0; arm && frag=1
+  out=$(BALLOON_KERNEL=$GIMG BALLOON_INITRD=$GI BALLOON_CONSOLE=$GCON BALLOON_SNAPSHOTS=1 BALLOON_FRAG=$frag python3 scripts/balloon-test.py ./out/bend-vmm "$t" "$SLOW" 2>&1)
+  if [ $? = 0 ]; then grn "ok: balloon: $(grep -o 'boot: freeing 1 GiB.*MiB)' <<<"$out" | sed 's/boot: //'); again after a restore; the host sees the guest's data; $(grep -o 'inflating gives.*MiB)' <<<"$out"), balloon 0 gives it back"; else red "failed: balloon"; grep -v '^ok:' <<<"$out" | tail -6; fail=1; fi
   rm -rf "$t"
 fi
 
-if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && arm; then
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 5i. incremental snapshots: RAM maps the last one; the next writes what changed"
   t=$(mktemp -d)
   out=$(python3 scripts/snapshot-test.py ./out/bend-vmm "$t" "$SLOW" 2>&1)

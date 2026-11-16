@@ -62,6 +62,14 @@ def Hvf.x86_boot(cpu: U32, words: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.x86_pio_put(words: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.x86_pio_get() -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.set_args(bytes: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"

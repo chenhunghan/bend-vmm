@@ -49,3 +49,9 @@ def L.x86layout.kvm_words():
 def L.x86layout.vmx_pages():
   {==}
 
+def L.x86layout.cpu_plan_sregs_before_msrs():
+  {==}
+
+def L.x86layout.vm_plan():
+  {==}
+

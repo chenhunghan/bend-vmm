@@ -201,3 +201,7 @@ law snapfile.plan_ram_example:
 
 law snapfile.plan_ram_none:
   {S.Snapf.plan_ram(None{}) == None{} : Maybe<&2, U.U64>}
+
+# Proposed: KVM on x86_64 writes and reads version 3.
+law snapfile.version_kvm_x86:
+  {S.Snapf.version(2) == 3 : U32}
