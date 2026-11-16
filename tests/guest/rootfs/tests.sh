@@ -36,8 +36,8 @@ fi
 t1=$(cut -d' ' -f1 /proc/uptime); sleep 1; t2=$(cut -d' ' -f1 /proc/uptime)
 check timer [ "${t1%.*}" != "${t2%.*}" ] || [ "$t1" != "$t2" ]
 
-# interrupts reach the guest on every CPU (timer PPI 27 counts up)
-check irqs grep -q "arch_timer" /proc/interrupts
+# interrupts reach the guest (arm64: the timer PPI 27; x86_64: the local APIC timer)
+check irqs grep -q -E "arch_timer|LOC:" /proc/interrupts
 
 # PL031 RTC: the clock was set from the host at boot
 if [ -e /dev/rtc0 ]; then
