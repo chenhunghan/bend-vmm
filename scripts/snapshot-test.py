@@ -71,8 +71,9 @@ def mem_mib(listing, name):
     m = re.search(r"^" + name + r"\s.*memory (\d+) (KiB|MiB)", listing, re.M)
     return -1 if not m else int(m.group(1)) / (1024 if m.group(2) == "KiB" else 1)
 
-guest = [os.path.join(here, "guest", "Image"), os.path.join(here, "guest", "guest.cpio")]
-cli("create", V, "--mem", "1024", "--kernel", guest[0], "--initrd", guest[1], "--cmdline", "console=ttyAMA0 quiet")
+# the guest (BEND_GUEST_KERNEL, BEND_GUEST_INITRD, BEND_GUEST_CONSOLE: arm64's by default)
+guest = [os.environ.get("BEND_GUEST_KERNEL", os.path.join(here, "guest", "Image")), os.environ.get("BEND_GUEST_INITRD", os.path.join(here, "guest", "guest.cpio"))]
+cli("create", V, "--mem", "1024", "--kernel", guest[0], "--initrd", guest[1], "--cmdline", os.environ.get("BEND_GUEST_CONSOLE", "console=ttyAMA0") + " quiet")
 v = Vm(["run", V])
 check("boot", v.wait("~ #", 60))
 time.sleep(2)

@@ -11,7 +11,8 @@ import re, os, socket, subprocess, sys, time, glob
 vmm, d = sys.argv[1], sys.argv[2]
 slow = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
 disk, sock = os.path.join(d, "d.img"), os.path.join(d, "vm.sock")
-kernel = ["--mem", "256", "--kernel", "out/guest/Image", "--initrd", "out/guest/guest.cpio"]
+# the guest (BEND_GUEST_KERNEL, BEND_GUEST_INITRD, BEND_GUEST_CONSOLE: arm64's by default)
+kernel = ["--mem", "256", "--kernel", os.environ.get("BEND_GUEST_KERNEL", "out/guest/Image"), "--initrd", os.environ.get("BEND_GUEST_INITRD", "out/guest/guest.cpio")]
 
 def ctl(cmd):
     s = socket.socket(socket.AF_UNIX)
@@ -71,7 +72,7 @@ def check(name, ok, why=""):
 
 with open(disk, "wb") as f:
     f.truncate(16 << 20)
-vm = Vm(kernel + ["--disk", disk, "--control", sock, "--cmdline", "console=ttyAMA0 quiet"])
+vm = Vm(kernel + ["--disk", disk, "--control", sock, "--cmdline", os.environ.get("BEND_GUEST_CONSOLE", "console=ttyAMA0") + " quiet"])
 check("boot", vm.wait("busybox shell", 60))
 vm.mark("A"); r1 = ctl("snapshot " + os.path.join(d, "s1.snap"))
 vm.mark("B"); r2 = ctl("snapshot " + os.path.join(d, "s2.snap"))

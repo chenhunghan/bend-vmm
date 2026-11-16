@@ -156,3 +156,6 @@ def L.snapfile.plan_ram_example():
 
 def L.snapfile.plan_ram_none():
   {==}
+
+def L.snapfile.version_kvm_x86():
+  {==}

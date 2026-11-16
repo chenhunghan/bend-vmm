@@ -318,3 +318,35 @@ def Pio.room(p: Pio) -> Nat:
   match p:
     case Pio{u, cmos}:
       Uart.room(u)
+
+# The port machine in a snapshot (X86.vm_plan's kind 25): the UART's
+# interrupt enable, line and modem control, scratch, divisor, FIFO control,
+# the CMOS index, then the receive FIFO. Not kept: whether a
+# transmit-empty interrupt is pending (a restore raises one: the register
+# is empty, and a driver that was waiting for it goes on) and the line's
+# level (Pio.input syncs it).
+def Pio.saved(p: Pio) -> +List<U32>:
+  match p:
+    case Pio{Uart{ier, lcr, mcr, scr, dll, dlm, fcr, thri, rx, line}, cmos}:
+      List.append(&2, U32, [ier, lcr, mcr, scr, dll, dlm, fcr, cmos], rx)
+
+def Pio.restored(ws: +List<U32>) -> Pio:
+  match ws:
+    case Con{ier, Con{lcr, Con{mcr, Con{scr, Con{dll, Con{dlm, Con{fcr, Con{cmos, rx}}}}}}}}:
+      Pio{Uart{ier, lcr, mcr, scr, dll, dlm, fcr, True{}, List.take(&2, U32, rx, Uart.fifo()), False{}}, cmos}
+    case _:
+      Pio.new()
+
+def Pio.same(a: +List<U32>, b: +List<U32>) -> Bool:
+  match a b:
+    case Nil{} Nil{}:
+      True{}
+    case Con{x, xs} Con{y, ys}:
+      U32.is_eq(x, y) && Pio.same(xs, ys)
+    case _ _:
+      False{}
+
+def Uart.restored_uart(p: Pio) -> Uart:
+  match p:
+    case Pio{u, cmos}:
+      u

@@ -15,6 +15,8 @@ io_eff(CID(Hvf.kick), hvf_unavailable);
 io_eff(CID(Hvf.arch), () => 0);
 io_eff(CID(Hvf.x86_setup), hvf_unavailable);
 io_eff(CID(Hvf.x86_boot), hvf_unavailable);
+io_eff(CID(Hvf.x86_pio_put), hvf_unavailable);
+io_eff(CID(Hvf.x86_pio_get), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.out), hvf_unavailable);
 io_eff(CID(Hvf.stdin), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.random), () => ({ $: CID(Nil) }));

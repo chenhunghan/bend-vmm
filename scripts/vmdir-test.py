@@ -68,8 +68,8 @@ class Run:
         except subprocess.TimeoutExpired:
             self.p.kill()
 
-rc, out = cmd("create", vm, "--kernel", os.path.join(root, "out/guest/Image"), "--initrd", os.path.join(root, "out/guest/guest.cpio"),
-              "--mem", "256", "--disk", "disk.img", "--cmdline", "console=ttyAMA0 quiet")
+rc, out = cmd("create", vm, "--kernel", os.path.join(root, os.environ.get("BEND_GUEST_KERNEL", "out/guest/Image")), "--initrd", os.path.join(root, os.environ.get("BEND_GUEST_INITRD", "out/guest/guest.cpio")),
+              "--mem", "256", "--disk", "disk.img", "--cmdline", os.environ.get("BEND_GUEST_CONSOLE", "console=ttyAMA0") + " quiet")
 check("create writes vm.conf", rc == 0 and os.path.exists(os.path.join(vm, "vm.conf")), out)
 with open(os.path.join(vm, "disk.img"), "wb") as f:
     f.truncate(16 << 20)
