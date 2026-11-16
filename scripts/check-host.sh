@@ -43,7 +43,7 @@ esac
 if [ $X86 = 1 ]; then
   GIMG=out/x86/vmlinuz-virt; GZ=$GIMG; GI=out/x86/guest.cpio; GCON=console=ttyS0; GDIR=out/x86; LK=$GIMG; LI=$GI
 else
-  GIMG=$GIMG; GZ=$GZ; GI=$GI; GCON=$GCON; GDIR=out/guest; LK=out/linux/linux; LI=out/linux/initrd.cpio
+  GIMG=out/guest/Image; GZ=out/guest/vmlinuz; GI=out/guest/guest.cpio; GCON=console=ttyAMA0; GDIR=out/guest; LK=out/linux/linux; LI=out/linux/initrd.cpio
 fi
 # arm64 guests only (bare-metal payloads, snapshots, the display, UEFI)
 arm() { [ $X86 = 0 ]; }
