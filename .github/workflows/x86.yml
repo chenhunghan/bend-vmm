@@ -1,0 +1,37 @@
+name: x86
+# x86_64 guests on KVM: builds the VMM on an x86_64 runner (they have
+# /dev/kvm) and boots Alpine's virt kernel (scripts/ci/x86-boot.sh).
+on:
+  push:
+    branches: [main, x86]
+  workflow_dispatch:
+jobs:
+  x86-kvm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      BEND_VERSION: 2.0.40
+      BEND_SHA_LINUX_X64: c9ff8d67bd903fb6ad9a26b43d8a62c01021de82a44d55ce4a3dcd4732113d6b
+      BEND_NO_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bend
+        run: |
+          name="bend-$BEND_VERSION-linux-x64.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "/tmp/$name" "https://github.com/bendlang/bend/releases/download/v$BEND_VERSION/$name"
+          echo "$BEND_SHA_LINUX_X64  /tmp/$name" | sha256sum -c -
+          tar -xzf "/tmp/$name" -C /tmp
+          mkdir -p "$HOME/.bend/bin"
+          mv /tmp/bend/bend2 /tmp/bend/guide "$HOME/.bend/"
+          mv /tmp/bend/bin/bend "$HOME/.bend/bin/bend"
+          echo "$HOME/.bend/bin" >> "$GITHUB_PATH"
+      - name: Toolchain and /dev/kvm
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q clang lld zlib1g-dev libx11-dev
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: Build
+        run: time scripts/build.sh
+      - name: Boot
+        run: scripts/ci/x86-boot.sh

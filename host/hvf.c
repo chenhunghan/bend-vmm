@@ -139,12 +139,32 @@ static int      hvf_commit_cloned; // the snapshot being written began as the ba
 static uint64_t hvf_ram_base;
 static uint64_t hvf_ram_size;
 
+// An x86_64 guest sees RAM in two pieces around the 32-bit device hole
+// (src/x86/layout.bend): [0, min(size, 3 GiB)) and the rest from 4 GiB.
+#define HVF_X86_LOW_MAX 0xC0000000ull  // X86.low_max
+#define HVF_X86_HIGH    0x100000000ull // X86.high_base
+
 // A host pointer for [gpa, gpa+len) inside RAM, or NULL.
 static uint8_t* hvf_ptr(uint64_t gpa, uint64_t len) {
+#if defined(__x86_64__) && !defined(__APPLE__)
+  uint64_t low = hvf_ram_size < HVF_X86_LOW_MAX ? hvf_ram_size : HVF_X86_LOW_MAX;
+  if (gpa >= HVF_X86_HIGH) {
+    uint64_t off = gpa - HVF_X86_HIGH;
+    if (len > hvf_ram_size - low || off > hvf_ram_size - low - len) {
+      return NULL;
+    }
+    return hvf_ram + low + off;
+  }
+  if (len > low || gpa > low - len) {
+    return NULL;
+  }
+  return hvf_ram + gpa;
+#else
   if (gpa < hvf_ram_base || len > hvf_ram_size || gpa - hvf_ram_base > hvf_ram_size - len) {
     return NULL;
   }
   return hvf_ram + (gpa - hvf_ram_base);
+#endif
 }
 
 // Guest RAM the VMM's own threads write (macOS). A page the host writes
@@ -256,6 +276,7 @@ typedef struct {
   pthread_t       tid;      // its thread, for kicks
   int             in_mmio;  // the last exit was KVM_EXIT_MMIO: the machine's
                             // X0 write is the load's data, its PC advance KVM's
+  int             in_io;    // x86: the last exit was an IN: RAX's write is its data
 #endif
 } HvfCpu;
 
@@ -361,7 +382,7 @@ static int vmb_kick(HvfCpu* c) {
   return hv.vcpus_exit(&c->vcpu, 1) == HV_SUCCESS ? 0 : -1;
 }
 
-#else // KVM
+#elif defined(__aarch64__) // KVM on arm64
 
 static int      kvm_fd = -1, kvm_vm = -1, kvm_gic = -1;
 static size_t   kvm_run_size;
@@ -551,6 +572,231 @@ static int vmb_kick(HvfCpu* c) {
   return pthread_kill(c->tid, SIGUSR1) == 0 ? 0 : -1;
 }
 
+#else // KVM on x86_64
+
+// An x86_64 guest (src/x86): KVM's in-kernel local APICs, IOAPIC, PIC and
+// PIT; RAM in two slots around the 32-bit device hole (hvf_ptr); MMIO and
+// port IO exits to the machine. Register numbers: 0 is RAX, which is also
+// where the machine answers a trapped load or IN (the exit's data, written
+// back by KVM on the next KVM_RUN); the boot registers come whole from
+// Hvf.x86_boot.
+
+static int      kvm_fd = -1, kvm_vm = -1;
+static size_t   kvm_run_size;
+static uint32_t kvm_ncpus;
+// The machine's interrupt numbers as IOAPIC pins (X86.gsi_table, by
+// Hvf.x86_setup; 255: none), and the CPUID rules (Boot.cpuid_rules).
+static uint8_t   kvm_gsi[256];
+static int       kvm_gsi_set;
+static uint32_t* kvm_cpuid_rules;
+static u64       kvm_ncpuid_rules;
+
+static uint64_t vmb_get(HvfCpu* c, uint64_t r) {
+  struct kvm_regs regs;
+  if (r != 0 || ioctl(c->fd, KVM_GET_REGS, &regs) != 0) {
+    return 0;
+  }
+  return regs.rax;
+}
+
+static int vmb_set(HvfCpu* c, uint64_t r, uint64_t v) {
+  if (r != 0) {
+    return -1;
+  }
+  if (c->in_mmio) {
+    memcpy(c->run->mmio.data, &v, sizeof c->run->mmio.data);
+    return 0;
+  }
+  if (c->in_io) {
+    // an IN: every element of a string IN gets the answer
+    uint8_t* d = (uint8_t*)c->run + c->run->io.data_offset;
+    for (uint32_t i = 0; i < c->run->io.count; i++) {
+      memcpy(d + (size_t)i * c->run->io.size, &v, c->run->io.size);
+    }
+    return 0;
+  }
+  struct kvm_regs regs;
+  if (ioctl(c->fd, KVM_GET_REGS, &regs) != 0) {
+    return -1;
+  }
+  regs.rax = v;
+  return ioctl(c->fd, KVM_SET_REGS, &regs) == 0 ? 0 : -1;
+}
+
+static void vmb_advance_pc(HvfCpu* c) {
+  (void)c; // KVM moves RIP past an MMIO access or an IN/OUT itself
+}
+
+static int vmb_open(void) {
+  if (kvm_fd >= 0) {
+    return 0;
+  }
+  kvm_fd = open("/dev/kvm", O_RDWR | O_CLOEXEC);
+  return kvm_fd >= 0 && ioctl(kvm_fd, KVM_GET_API_VERSION, 0) == KVM_API_VERSION ? 0 : -1;
+}
+
+static void kvm_signal(int sig) {
+  (void)sig;
+}
+
+// The CPUID KVM supports, with the rules applied for vCPU cpu (its index is
+// its APIC ID).
+static int kvm_cpuid(HvfCpu* c, uint32_t cpu) {
+  uint32_t           n   = 256;
+  struct kvm_cpuid2* cid = NULL;
+  for (;;) {
+    cid = io_mem(realloc(cid, sizeof *cid + n * sizeof(struct kvm_cpuid_entry2)));
+    cid->nent = n;
+    if (ioctl(kvm_fd, KVM_GET_SUPPORTED_CPUID, cid) == 0) {
+      break;
+    }
+    if (errno != E2BIG || n > 4096) {
+      free(cid);
+      return -1;
+    }
+    n *= 2;
+  }
+  for (uint32_t i = 0; i < cid->nent; i++) {
+    struct kvm_cpuid_entry2* e = &cid->entries[i];
+    for (u64 k = 0; k + 5 <= kvm_ncpuid_rules; k += 5) {
+      const uint32_t* r = kvm_cpuid_rules + k;
+      if (r[0] != e->function || r[1] > 3) {
+        continue;
+      }
+      uint32_t* reg = r[1] == 0 ? &e->eax : r[1] == 1 ? &e->ebx : r[1] == 2 ? &e->ecx : &e->edx;
+      *reg = (*reg & ~r[2]) | r[3] | (r[4] < 32 ? cpu << r[4] : 0);
+    }
+  }
+  int rc = ioctl(c->fd, KVM_SET_CPUID2, cid);
+  free(cid);
+  return rc;
+}
+
+// LINT0 as ExtINT (the PIC's line before the guest sets up its IOAPIC) and
+// LINT1 as NMI, as a PC's firmware leaves them.
+static int kvm_lint(HvfCpu* c) {
+  struct kvm_lapic_state l;
+  if (ioctl(c->fd, KVM_GET_LAPIC, &l) != 0) {
+    return -1;
+  }
+  uint32_t lvt0, lvt1;
+  memcpy(&lvt0, l.regs + 0x350, 4);
+  memcpy(&lvt1, l.regs + 0x360, 4);
+  lvt0 = (lvt0 & ~0x700u) | (7u << 8);
+  lvt1 = (lvt1 & ~0x700u) | (4u << 8);
+  memcpy(l.regs + 0x350, &lvt0, 4);
+  memcpy(l.regs + 0x360, &lvt1, 4);
+  return ioctl(c->fd, KVM_SET_LAPIC, &l);
+}
+
+// The VM, its in-kernel interrupt controllers and timer, and every vCPU
+// (an AP waits in the kernel for the boot CPU's INIT and SIPI).
+static int vmb_create(uint64_t gicd, uint64_t gicr, uint32_t ncpus) {
+  (void)gicd;
+  (void)gicr;
+  kvm_vm = ioctl(kvm_fd, KVM_CREATE_VM, 0);
+  if (kvm_vm < 0) {
+    return 2;
+  }
+  kvm_run_size = (size_t)ioctl(kvm_fd, KVM_GET_VCPU_MMAP_SIZE, 0);
+  // the TSS and identity map VMX needs, in the hole below 4 GiB
+  uint64_t idmap = 0xfeffc000ull;
+  if (ioctl(kvm_vm, KVM_SET_IDENTITY_MAP_ADDR, &idmap) != 0 || ioctl(kvm_vm, KVM_SET_TSS_ADDR, 0xfeffd000ul) != 0) {
+    return 3;
+  }
+  if (ioctl(kvm_vm, KVM_CREATE_IRQCHIP, 0) != 0) {
+    return 3;
+  }
+  struct kvm_pit_config pit;
+  memset(&pit, 0, sizeof pit);
+  pit.flags = KVM_PIT_SPEAKER_DUMMY;
+  if (ioctl(kvm_vm, KVM_CREATE_PIT2, &pit) != 0) {
+    return 3;
+  }
+  kvm_ncpus = ncpus ? ncpus : 1;
+  for (uint32_t i = 0; i < kvm_ncpus && i < HVF_MAX_CPUS; i++) {
+    HvfCpu* c = &hvf_cpus[i];
+    c->fd     = ioctl(kvm_vm, KVM_CREATE_VCPU, (unsigned long)i);
+    if (c->fd < 0) {
+      return 7;
+    }
+    c->run = mmap(NULL, kvm_run_size, PROT_READ | PROT_WRITE, MAP_SHARED, c->fd, 0);
+    if (c->run == MAP_FAILED) {
+      return 7;
+    }
+    if (kvm_cpuid(c, i) != 0) {
+      return 8;
+    }
+    if (kvm_lint(c) != 0) {
+      return 9;
+    }
+  }
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = kvm_signal;
+  sigaction(SIGUSR1, &sa, NULL);
+  return 0;
+}
+
+// RAM: [0, low) in slot 1 and the rest at 4 GiB in slot 4 (hvf_ptr's map);
+// nothing else maps on x86 (no flash, no framebuffer).
+static int kvm_region(uint32_t slot, uint64_t gpa, uint64_t size, void* host, int prot) {
+  struct kvm_userspace_memory_region m = {slot, (prot & VMB_W) ? 0 : KVM_MEM_READONLY, gpa, size,
+                                          (uint64_t)(uintptr_t)host};
+  return ioctl(kvm_vm, KVM_SET_USER_MEMORY_REGION, &m) == 0 ? 0 : -1;
+}
+
+static int vmb_map(void* host, uint64_t gpa, uint64_t size, int prot) {
+  if (gpa != 0) {
+    return -1;
+  }
+  uint64_t low = size < HVF_X86_LOW_MAX ? size : HVF_X86_LOW_MAX;
+  if (kvm_region(1, 0, low, host, prot) != 0) {
+    return -1;
+  }
+  return size > low ? kvm_region(4, HVF_X86_HIGH, size - low, (uint8_t*)host + low, prot) : 0;
+}
+
+static int vmb_unmap(uint64_t gpa, uint64_t size) {
+  if (gpa != 0) {
+    return -1;
+  }
+  int rc = kvm_region(1, 0, 0, NULL, VMB_W);
+  return size > HVF_X86_LOW_MAX ? rc | kvm_region(4, HVF_X86_HIGH, 0, NULL, VMB_W) : rc;
+}
+
+static int vmb_vcpu_create(HvfCpu* c, int cpu) {
+  if ((uint32_t)cpu >= kvm_ncpus || c->fd <= 0) {
+    return -1;
+  }
+  c->tid = pthread_self();
+  return 0;
+}
+
+static int vmb_vtimer_mask(HvfCpu* c, int on) {
+  (void)c;
+  (void)on;
+  return 0;
+}
+
+// The machine's INTID as an IOAPIC pin (KVM_IRQ_LINE takes a GSI).
+static int vmb_spi(uint32_t intid, int level) {
+  if (!kvm_gsi_set || intid >= sizeof kvm_gsi || kvm_gsi[intid] == 255) {
+    return -1;
+  }
+  struct kvm_irq_level l;
+  l.irq   = kvm_gsi[intid];
+  l.level = level ? 1 : 0;
+  return ioctl(kvm_vm, KVM_IRQ_LINE, &l) == 0 ? 0 : -1;
+}
+
+static int vmb_kick(HvfCpu* c) {
+  if (!c->run) {
+    return -1;
+  }
+  c->run->immediate_exit = 1;
+  return pthread_kill(c->tid, SIGUSR1) == 0 ? 0 : -1;
+}
 #endif
 
 // Applies one queued register write or PC advance.
@@ -696,7 +942,7 @@ static int vmb_gic_restore(const uint8_t* blob, size_t size) {
 
 #define HVF_HYPERVISOR 0 // Snapf.version: 0 Hypervisor.framework
 
-#else
+#elif defined(__aarch64__)
 
 // A vCPU's registers as KVM lists them (KVM_GET_REG_LIST): entries
 // {u64 id, value}, each value as wide as its id says (KVM_REG_SIZE). A load
@@ -829,6 +1075,33 @@ static int vmb_gic_restore(const uint8_t* blob, size_t size) {
 
 #define HVF_HYPERVISOR 1 // Snapf.version: 1 KVM
 
+#else
+
+// x86_64 snapshots are not made yet (src/x86: the machine refuses them).
+static void hvf_save_regs(HvfCpu* c) {
+  free(c->saved);
+  c->saved  = NULL;
+  c->nsaved = 0;
+}
+
+static void hvf_load_regs(HvfCpu* c, const uint8_t* blob, size_t size) {
+  (void)c;
+  (void)blob;
+  (void)size;
+}
+
+static void vmb_gic_save(uint8_t** out, size_t* nout) {
+  *out  = NULL;
+  *nout = 0;
+}
+
+static int vmb_gic_restore(const uint8_t* blob, size_t size) {
+  (void)blob;
+  (void)size;
+  return -1;
+}
+
+#define HVF_HYPERVISOR 2 // Snapf.version: 2 KVM on x86_64
 #endif
 
 // Saves this vCPU's registers when a snapshot asked for them. Called by the
@@ -995,7 +1268,7 @@ static void hvf_run(HvfCpu* c) {
   }
 }
 
-#else
+#elif defined(__aarch64__)
 
 // KVM's exits as their facts, kind 2000 + KVM's exit reason:
 // src/arm64/kvmexit.bend makes them Hypervisor.framework's (an MMIO exit a
@@ -1050,6 +1323,81 @@ static void hvf_run(HvfCpu* c) {
       int smc = 0;
 #ifdef KVM_HYPERCALL_EXIT_SMC
       smc = (c->run->hypercall.flags & KVM_HYPERCALL_EXIT_SMC) != 0;
+#else
+
+// KVM's x86 exits as their facts, kind 2000 + KVM's exit reason
+// (src/x86/xexit.bend decodes them):
+//   MMIO       [2006, length, is a write, address (hi, lo), value (hi, lo)]
+//   port IO    [2002, is an OUT, size, port, count, the first value]
+//   shutdown   [2008] (a triple fault)
+// A signal is a cancel (2).
+static void hvf_run(HvfCpu* c) {
+  hvf_gate(c);
+  c->in_mmio = 0;
+  c->in_io   = 0;
+  int r   = ioctl(c->fd, KVM_RUN, 0);
+  int err = errno;
+  hvf_ungate();
+  c->run->immediate_exit = 0;
+  if (r < 0) {
+    if (hvf_trace & 1) {
+      struct kvm_regs regs;
+      ioctl(c->fd, KVM_GET_REGS, &regs);
+      fprintf(stderr, "[trace] kvm_run: %s, rip=%llx\n", strerror(err), (unsigned long long)regs.rip);
+    }
+    c->out[c->nout++] = err == EINTR || err == EAGAIN ? 2 : 1000 + (uint32_t)err;
+    return;
+  }
+  switch (c->run->exit_reason) {
+    case KVM_EXIT_MMIO: {
+      uint32_t len = c->run->mmio.len;
+      uint64_t xt  = 0, a = c->run->mmio.phys_addr;
+      if (c->run->mmio.is_write) {
+        memcpy(&xt, c->run->mmio.data, len <= 8 ? len : 8);
+      }
+      c->in_mmio        = 1;
+      c->out[c->nout++] = 2000 + KVM_EXIT_MMIO;
+      c->out[c->nout++] = len;
+      c->out[c->nout++] = c->run->mmio.is_write ? 1 : 0;
+      hvf_put64(c, a);
+      hvf_put64(c, xt);
+      break;
+    }
+    case KVM_EXIT_IO: {
+      uint32_t       size = c->run->io.size, v = 0;
+      const uint8_t* d    = (const uint8_t*)c->run + c->run->io.data_offset;
+      int            out  = c->run->io.direction == KVM_EXIT_IO_OUT;
+      if (out) {
+        memcpy(&v, d, size <= 4 ? size : 4);
+      } else {
+        c->in_io = 1;
+      }
+      if (hvf_trace & 1) {
+        fprintf(stderr, "[trace] io %s port=%x size=%u count=%u v=%x\n", out ? "out" : "in", c->run->io.port, size,
+                c->run->io.count, v);
+      }
+      c->out[c->nout++] = 2000 + KVM_EXIT_IO;
+      c->out[c->nout++] = (uint32_t)out;
+      c->out[c->nout++] = size;
+      c->out[c->nout++] = c->run->io.port;
+      c->out[c->nout++] = c->run->io.count;
+      c->out[c->nout++] = v;
+      break;
+    }
+    case KVM_EXIT_SHUTDOWN:
+      c->out[c->nout++] = 2000 + KVM_EXIT_SHUTDOWN;
+      break;
+    case KVM_EXIT_INTR:
+      c->out[c->nout++] = 2;
+      break;
+    default:
+      if (hvf_trace & 1) {
+        fprintf(stderr, "[trace] kvm exit %u\n", c->run->exit_reason);
+      }
+      c->out[c->nout++] = 3 + c->run->exit_reason;
+      break;
+  }
+}
 #endif
       c->out[c->nout++] = 2000 + KVM_EXIT_HYPERCALL;
       c->out[c->nout++] = (uint32_t)smc;
@@ -1124,7 +1472,11 @@ static void hvf_do(HvfCpu* c, int cpu) {
 #define HVF_SPIN_NS 40000
 
 static inline void hvf_relax(void) {
+#if defined(__x86_64__)
+  __asm__ volatile("pause");
+#else
   __asm__ volatile("yield");
+#endif
 }
 
 static uint64_t hvf_ns(void) {
@@ -1528,6 +1880,113 @@ Term hvf_vcpu_queue_run(Env e, Term* f, IoWork* w) {
     pthread_mutex_unlock(&c->mu);
     sched_yield();
   }
+}
+
+// Hvf.arch() -> U32: the guest architecture this host runs: 0 arm64
+// (Hypervisor.framework, KVM on arm64), 1 x86_64 (KVM on x86_64).
+Term hvf_arch_run(Env e, Term* f, IoWork* w) {
+#if defined(__x86_64__) && !defined(__APPLE__)
+  return (Term)1;
+#else
+  return (Term)0;
+#endif
+}
+
+// Hvf.x86_setup(gsis, cpuid) -> U32: before Hvf.init on an x86_64 host,
+// the machine's interrupt numbers as IOAPIC pins (X86.gsi_table: one byte
+// per INTID, 255 none) and the CPUID rules (Boot.cpuid_rules: five words
+// each). 0, or 0xFFFFFFFF elsewhere or for a malformed list.
+Term hvf_x86_setup_run(Env e, Term* f, IoWork* w) {
+#if defined(__x86_64__) && !defined(__APPLE__)
+  u64       ng, nr;
+  uint32_t* g = hvf_u32s(e, f[0], &ng);
+  uint32_t* r = hvf_u32s(e, f[1], &nr);
+  if (ng > sizeof kvm_gsi || nr % 5 != 0) {
+    free(g);
+    free(r);
+    return (Term)HVF_ERR;
+  }
+  memset(kvm_gsi, 255, sizeof kvm_gsi);
+  for (u64 i = 0; i < ng; i++) {
+    kvm_gsi[i] = g[i] < 24 ? (uint8_t)g[i] : 255;
+  }
+  kvm_gsi_set = 1;
+  free(g);
+  free(kvm_cpuid_rules);
+  kvm_cpuid_rules  = r;
+  kvm_ncpuid_rules = nr;
+  return (Term)0;
+#else
+  (void)e;
+  (void)f;
+  return (Term)HVF_ERR;
+#endif
+}
+
+// Hvf.x86_boot(cpu, words) -> U32: an x86_64 vCPU's registers before its
+// first run, as Boot.regs (src/x86/boot.bend) lays them out: rip, rsi,
+// rsp, rflags, cr0, cr3, cr4, efer (hi, lo each), the GDT's base (hi, lo)
+// and limit, the IDT's, then cs, ds, es, fs, gs, ss, tr, ldt as base (hi,
+// lo), limit, selector, type, present, dpl, db, s, l, g, avl, unusable.
+// 0, or 0xFFFFFFFF.
+Term hvf_x86_boot_run(Env e, Term* f, IoWork* w) {
+#if defined(__x86_64__) && !defined(__APPLE__)
+  u32       cpu = (u32)f[0];
+  u64       n;
+  uint32_t* ws = hvf_u32s(e, f[1], &n);
+  if (cpu >= kvm_ncpus || n != 126) {
+    free(ws);
+    return (Term)HVF_ERR;
+  }
+  HvfCpu*          c = &hvf_cpus[cpu];
+  struct kvm_regs  regs;
+  struct kvm_sregs sregs;
+  memset(&regs, 0, sizeof regs);
+  if (ioctl(c->fd, KVM_GET_SREGS, &sregs) != 0) {
+    free(ws);
+    return (Term)HVF_ERR;
+  }
+#define HVF_W64(i) (((uint64_t)ws[i] << 32) | ws[(i) + 1])
+  regs.rip         = HVF_W64(0);
+  regs.rsi         = HVF_W64(2);
+  regs.rsp         = HVF_W64(4);
+  regs.rflags      = HVF_W64(6);
+  sregs.cr0        = HVF_W64(8);
+  sregs.cr3        = HVF_W64(10);
+  sregs.cr4        = HVF_W64(12);
+  sregs.efer       = HVF_W64(14);
+  sregs.gdt.base   = HVF_W64(16);
+  sregs.gdt.limit  = (uint16_t)ws[18];
+  sregs.idt.base   = HVF_W64(19);
+  sregs.idt.limit  = (uint16_t)ws[21];
+  struct kvm_segment* segs[8] = {&sregs.cs, &sregs.ds, &sregs.es, &sregs.fs, &sregs.gs, &sregs.ss, &sregs.tr, &sregs.ldt};
+  for (int i = 0; i < 8; i++) {
+    const uint32_t*     s = ws + 22 + 13 * i;
+    struct kvm_segment* g = segs[i];
+    g->base               = ((uint64_t)s[0] << 32) | s[1];
+    g->limit              = s[2];
+    g->selector           = (uint16_t)s[3];
+    g->type               = (uint8_t)s[4];
+    g->present            = (uint8_t)s[5];
+    g->dpl                = (uint8_t)s[6];
+    g->db                 = (uint8_t)s[7];
+    g->s                  = (uint8_t)s[8];
+    g->l                  = (uint8_t)s[9];
+    g->g                  = (uint8_t)s[10];
+    g->avl                = (uint8_t)s[11];
+    g->unusable           = (uint8_t)s[12];
+  }
+#undef HVF_W64
+  free(ws);
+  if (ioctl(c->fd, KVM_SET_SREGS, &sregs) != 0 || ioctl(c->fd, KVM_SET_REGS, &regs) != 0) {
+    return (Term)HVF_ERR;
+  }
+  return (Term)0;
+#else
+  (void)e;
+  (void)f;
+  return (Term)HVF_ERR;
+#endif
 }
 
 // Hvf.irq(intid, level) -> U32: sets an SPI's level (0 low, else high).
@@ -6354,6 +6813,15 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.irq)
   io_eff(CID(Hvf.irq), hvf_irq_run);
+#endif
+#ifdef CID(Hvf.arch)
+  io_eff(CID(Hvf.arch), hvf_arch_run);
+#endif
+#ifdef CID(Hvf.x86_setup)
+  io_eff(CID(Hvf.x86_setup), hvf_x86_setup_run);
+#endif
+#ifdef CID(Hvf.x86_boot)
+  io_eff(CID(Hvf.x86_boot), hvf_x86_boot_run);
 #endif
 #ifdef CID(Hvf.kick)
   io_eff(CID(Hvf.kick), hvf_kick_run);
