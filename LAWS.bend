@@ -66,3 +66,8 @@ import ./laws/cmds.bend as Laws_cmds
 import ./laws/balloon.bend as Laws_balloon
 import ./laws/balauto.bend as Laws_balauto
 import ./laws/ext4free.bend as Laws_ext4free
+import ./laws/x86layout.bend as Laws_x86layout
+import ./laws/x86exit.bend as Laws_x86exit
+import ./laws/x86pio.bend as Laws_x86pio
+import ./laws/x86acpi.bend as Laws_x86acpi
+import ./laws/x86boot.bend as Laws_x86boot
