@@ -7,6 +7,7 @@
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/stat.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -50,6 +51,8 @@ int main(void) {
   cat("/sys/class/rtc/rtc0/date");
   printf("x86-init: done\n");
   fflush(stdout);
+  tcdrain(1); // the serial line's output goes out before the power does
+  sleep(1);
   sync();
   reboot(RB_POWER_OFF);
   return 0;

@@ -164,10 +164,12 @@ def Uart.room(u: Uart) -> Nat:
       Nat.sub(Uart.fifo(), List.length(&2, U32, rx))
 
 # The CMOS clock from the host's wall clock (seconds since the epoch, the
-# low 32 bits: good to 2106), in binary 24-hour mode (status B 6):
+# low 32 bits: good to 2106), in BCD 24-hour mode (status B 2: x86 Linux
+# reads the clock as BCD whatever status B says, RTC_ALWAYS_BCD); each
+# date and time register below holds its value in BCD:
 #   0 seconds, 2 minutes, 4 hours, 6 the day of the week (1 Sunday), 7 the
 #   day, 8 the month, 9 the year in the century, 50 (0x32) the century,
-#   10 status A (38: no update in progress), 11 status B (6), 13 status D
+#   10 status A (38: no update in progress), 11 status B (2), 13 status D
 #   (128: the battery is good); every other register reads 0.
 # Civil dates from days since 1970-01-01 (H. Hinnant's days_from_civil
 # inverse, all in unsigned arithmetic).
@@ -186,19 +188,23 @@ def Cmos.date(+days: U32) -> Date:
   +y = ((yoe + (era * 400 : U32) : U32) + Bool.pick(U32, U32.is_le(m, 2), 1, 0) : U32)
   Date{y, m, d}
 
+# Two decimal digits as BCD.
+def Cmos.bcd(+v: U32) -> U32:
+  (((v / 10 : U32) << 4n : U32) .|. (v % 10 : U32) : U32)
+
 def Cmos.reg.at(+idx: U32, +days: U32, +tod: U32, date: Date) -> U32:
   match date:
     case Date{+y, +mo, +d}:
-      Bool.pick(U32, U32.is_eq(idx, 0), (tod % 60 : U32),
-      Bool.pick(U32, U32.is_eq(idx, 2), ((tod / 60 : U32) % 60 : U32),
-      Bool.pick(U32, U32.is_eq(idx, 4), (tod / 3600 : U32),
+      Bool.pick(U32, U32.is_eq(idx, 0), Cmos.bcd((tod % 60 : U32)),
+      Bool.pick(U32, U32.is_eq(idx, 2), Cmos.bcd(((tod / 60 : U32) % 60 : U32)),
+      Bool.pick(U32, U32.is_eq(idx, 4), Cmos.bcd((tod / 3600 : U32)),
       Bool.pick(U32, U32.is_eq(idx, 6), (((days + 4 : U32) % 7 : U32) + 1 : U32),
-      Bool.pick(U32, U32.is_eq(idx, 7), d,
-      Bool.pick(U32, U32.is_eq(idx, 8), mo,
-      Bool.pick(U32, U32.is_eq(idx, 9), (y % 100 : U32),
-      Bool.pick(U32, U32.is_eq(idx, 50), (y / 100 : U32),
+      Bool.pick(U32, U32.is_eq(idx, 7), Cmos.bcd(d),
+      Bool.pick(U32, U32.is_eq(idx, 8), Cmos.bcd(mo),
+      Bool.pick(U32, U32.is_eq(idx, 9), Cmos.bcd((y % 100 : U32)),
+      Bool.pick(U32, U32.is_eq(idx, 50), Cmos.bcd((y / 100 : U32)),
       Bool.pick(U32, U32.is_eq(idx, 10), 38,
-      Bool.pick(U32, U32.is_eq(idx, 11), 6,
+      Bool.pick(U32, U32.is_eq(idx, 11), 2,
       Bool.pick(U32, U32.is_eq(idx, 13), 128, 0)))))))))))
 
 def Cmos.reg(+idx: U32, +secs: U32) -> U32:
