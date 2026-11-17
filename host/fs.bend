@@ -267,13 +267,13 @@ def Host.meta.list.got(es: Maybe<&2, List<&2, V.FsEntry>>, +idx: U32, +host: Str
     case None{}:
       Host.fs.do(idx, V.FsList{host, from, max})
     case Some{l}:
-      IO.pure(V.FsResult, Fs.paged(V.FsEntries{l}, from, max))
+      IO.pure(V.FsResult, V.FsEntries{l})
 
 def Host.meta.list(+sh: U32, +p: String, +host: String, +from: U32, +max: U32) -> IO(V.FsResult):
   do IO<V.FsResult>:
     _ : Mt.Found <- Host.meta.resolve(Host.meta.depth(p), sh, Mt.Meta.join(p, "."))
-    +ws : +List<U32> <- H.Hvf.meta_list(sh, p)
-    Host.meta.list.got(Mt.Meta.entries(p, ws), Ro.Ro.index(sh), host, from, max)
+    +ws : +List<U32> <- H.Hvf.meta_list(sh, p, from, max)
+    Host.meta.list.got(Mt.Meta.entries(p, ws, from, max), Ro.Ro.index(sh), host, from, max)
 
 def Host.meta.on(+idx: U32, +sh: U32, op: V.FsOp, +host: String, line: Maybe<&2, String>) -> IO(V.FsResult):
   match op:

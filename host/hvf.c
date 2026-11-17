@@ -4305,9 +4305,10 @@ Term hvf_meta_resolve_run(Env e, Term* f, IoWork* w) {
   return t;
 }
 
-// Hvf.meta_list(share, gdir) -> List<U32>: the table of the directory at
-// guest path gdir: [0] when none is loaded, else [1, plain, n, then n
-// times name and line (each a length and its bytes)].
+// Hvf.meta_list(share, gdir, from, max) -> List<U32>: the table of the
+// directory at guest path gdir: [0] when none is loaded, else [1, plain,
+// n, then the records from index from on, at most max of them, each its
+// name and line (each a length and its bytes)].
 Term hvf_meta_list_run(Env e, Term* f, IoWork* w) {
   u32   sh = (u32)f[0];
   u64   n;
@@ -4318,10 +4319,11 @@ Term hvf_meta_list_run(Env e, Term* f, IoWork* w) {
   if (!d) {
     hvf_mw(&out, 0);
   } else {
+    u32 from = (u32)f[2], max = (u32)f[3];
     hvf_mw(&out, 1);
     hvf_mw(&out, d->plain);
     hvf_mw(&out, d->n);
-    for (u32 i = 0; i < d->n; i++) {
+    for (u32 i = from; i < d->n && i - from < max; i++) {
       hvf_mw_str(&out, d->recs[i].name, d->recs[i].nlen);
       hvf_mw_str(&out, d->recs[i].line, d->recs[i].llen);
     }

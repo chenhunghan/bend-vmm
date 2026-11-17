@@ -84,3 +84,9 @@ def L.meta.p9_xpath_is():
 
 def L.meta.p9_xpath_plain():
   {==}
+
+def L.meta.entries_page():
+  {==}
+
+def L.meta.entries_past_end():
+  {==}
