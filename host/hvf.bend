@@ -382,7 +382,7 @@ def Hvf.meta_resolve(share: U32, gpath: String) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.meta_list(share: U32, gdir: String) -> IO(+List<U32>):
+def Hvf.meta_list(share: U32, gdir: String, from: U32, max: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 

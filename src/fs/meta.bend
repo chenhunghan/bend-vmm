@@ -7,7 +7,8 @@ import ../vmm/abi.bend as V
 #
 # Each directory of such a share may hold `.bend-meta`, text, one record a
 # line after the first line `bend-meta 1`. A record is space-separated
-# key=value tokens; unknown keys are ignored, so the format can grow:
+# key=value tokens; unknown keys are ignored, so the format can grow (a
+# directory lists its records in their order, which is stable):
 #   name=NAME      the entry's name in the guest (percent-encoded; needed)
 #   host=NAME      its name on the host (percent-encoded; default: name)
 #   type=f|d|l|c|b|p   regular, directory, symlink, char or block device,
@@ -451,11 +452,15 @@ def Meta.entries.go(+dir: String, +n: Nat, +ws: +List<U32>) -> List<&2, V.FsEntr
       +ll : Nat = U32.to_nat(Meta.at(rest, 0n))
       Con{Meta.entry(dir, name, Meta.line(Meta.str_at(rest, 0n))), Meta.entries.go(dir, k, List.drop(&2, U32, rest, Nat.add(1n, ll)))}
 
-# A directory's entries from Hvf.meta_list's words, or none when it has
-# no table or a plain one (then the host lists it).
-def Meta.entries(+dir: String, +ws: +List<U32>) -> Maybe<&2, List<&2, V.FsEntry>>:
+# A page of a directory's entries, [from, from + max) in the order of its
+# records (stable: the share is read-only), from Hvf.meta_list's words for
+# that page (n, the records in all, then the page's records). None when the
+# directory has no table or a plain one (then the host lists it, by name).
+def Meta.entries(+dir: String, +ws: +List<U32>, +from: U32, +max: U32) -> Maybe<&2, List<&2, V.FsEntry>>:
+  +n : U32 = Meta.at(ws, 2n)
+  +left : U32 = Bool.pick(U32, U32.is_lt(from, n), (n - from : U32), 0)
   Bool.pick(Maybe<&2, List<&2, V.FsEntry>>, U32.is_eq(Meta.at(ws, 0n), 1) && U32.is_zero(Meta.at(ws, 1n)),
-    Some{Meta.entries.go(dir, U32.to_nat(Meta.at(ws, 2n)), List.drop(&2, U32, ws, 3n))}, None{})
+    Some{Meta.entries.go(dir, U32.to_nat(U32.min(left, max)), List.drop(&2, U32, ws, 3n))}, None{})
 
 # An extended attribute of a record: its value, or none (ENODATA). Name ""
 # lists every name, each followed by a 0 byte.

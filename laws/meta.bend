@@ -92,11 +92,18 @@ law meta.table_escape:
 
 # Proposed: a directory's listing is its records, by their names.
 law meta.entries:
-  {M.Meta.entries("d", [1, 0, 1, 1, 97, 14, 110, 97, 109, 101, 61, 97, 32, 116, 121, 112, 101, 61, 100])
+  {M.Meta.entries("d", [1, 0, 1, 1, 97, 14, 110, 97, 109, 101, 61, 97, 32, 116, 121, 112, 101, 61, 100], 0, 100)
     == Some{[V.FsEntry{"a", M.Meta.fnv("d/a"), 4}]} : Maybe<&2, List<&2, V.FsEntry>>}
 
+law meta.entries_page:
+  {M.Meta.entries("", [1, 0, 3, 1, 98, 6, 110, 97, 109, 101, 61, 98], 1, 1)
+    == Some{[V.FsEntry{"b", M.Meta.fnv("b"), 0}]} : Maybe<&2, List<&2, V.FsEntry>>}
+
+law meta.entries_past_end:
+  {M.Meta.entries("", [1, 0, 1], 5, 10) == Some{[]} : Maybe<&2, List<&2, V.FsEntry>>}
+
 law meta.entries_plain:
-  {M.Meta.entries("d", [1, 1, 0]) == None{} : Maybe<&2, List<&2, V.FsEntry>>}
+  {M.Meta.entries("d", [1, 1, 0], 0, 100) == None{} : Maybe<&2, List<&2, V.FsEntry>>}
 
 # Proposed: a device's number as Linux packs it for 9p (new_encode_dev),
 # and the path of a fid Txattrwalk binds (its name and file kept apart).
