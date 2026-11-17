@@ -5487,7 +5487,17 @@ Term hvf_chmod_run(Env e, Term* f, IoWork* w) {
 #include <dirent.h>
 #include <sys/un.h>
 
-#define HVF_LAN_FRAME 2048 // an Ethernet frame without FCS (src/virtio/lan.bend, Lan.mtu: 2034)
+// A LAN packet: the 12-byte virtio_net_hdr and an Ethernet frame without
+// FCS, up to 64 KiB with TSO (src/virtio/lan.bend). One Unix datagram
+// carries at most HVF_LAN_DGRAM bytes (macOS's default
+// net.local.dgram.maxdgram); a packet past that goes in pieces, each a
+// 12-byte piece header (0xFF, 0, 0, 0, the packet's length, the piece's
+// offset; a virtio_net_hdr never starts with 0xFF) and up to
+// HVF_LAN_DGRAM - 12 bytes, in order, which the receiver joins again.
+#define HVF_LAN_FRAME 65600
+#define HVF_LAN_DGRAM 2048
+#define HVF_LAN_PIECE (HVF_LAN_DGRAM - 12)
+#define HVF_LAN_PARTS 8 // senders whose packets are being joined at once
 
 static struct {
   int      fd;
@@ -5496,6 +5506,14 @@ static struct {
   char     self[32];
   uint8_t  held[HVF_LAN_FRAME];
   uint32_t held_len;
+  // packets arriving in pieces, by sender (its socket's name)
+  struct {
+    char     from[108];
+    uint32_t total, got;
+    uint8_t  buf[HVF_LAN_FRAME];
+  } part[HVF_LAN_PARTS];
+  uint32_t part_next;
+  uint8_t  dgram[HVF_LAN_DGRAM];
 } hvf_lan = {.fd = -1, .wake = {-1, -1}};
 
 static int hvf_lan_addr(struct sockaddr_un* a, const char* name);
@@ -5565,13 +5583,36 @@ Term hvf_lan_open_run(Env e, Term* f, IoWork* w) {
   return (Term)(u32)err;
 }
 
-static void hvf_lan_sendto(const char* name, struct iovec* iov, int niov) {
+// A packet to name: one datagram, or pieces (see HVF_LAN_DGRAM); a VM gone
+// or full drops it, as a switch would (a piece lost loses the packet).
+static void hvf_lan_sendto(const char* name, struct iovec* iov, int niov, u64 total) {
   struct sockaddr_un a;
   if (hvf_lan_addr(&a, name) != 0) {
     return;
   }
-  struct msghdr m = {.msg_name = &a, .msg_namelen = sizeof a, .msg_iov = iov, .msg_iovlen = niov};
-  (void)sendmsg(hvf_lan.fd, &m, MSG_DONTWAIT); // a VM gone or full drops it, as a switch would
+  if (total <= HVF_LAN_DGRAM) {
+    struct msghdr m = {.msg_name = &a, .msg_namelen = sizeof a, .msg_iov = iov, .msg_iovlen = niov};
+    (void)sendmsg(hvf_lan.fd, &m, MSG_DONTWAIT);
+    return;
+  }
+  static uint8_t pk[HVF_LAN_FRAME];
+  u64            at = 0;
+  for (int i = 0; i < niov; i++) {
+    memcpy(pk + at, iov[i].iov_base, iov[i].iov_len);
+    at += iov[i].iov_len;
+  }
+  for (u64 off = 0; off < total; off += HVF_LAN_PIECE) {
+    uint8_t      h[12] = {0xFF, 0, 0, 0};
+    uint32_t     t = (uint32_t)total, o = (uint32_t)off;
+    u64          n = total - off < HVF_LAN_PIECE ? total - off : HVF_LAN_PIECE;
+    memcpy(h + 4, &t, 4);
+    memcpy(h + 8, &o, 4);
+    struct iovec  v[2] = {{h, 12}, {pk + off, n}};
+    struct msghdr m    = {.msg_name = &a, .msg_namelen = sizeof a, .msg_iov = v, .msg_iovlen = 2};
+    if (sendmsg(hvf_lan.fd, &m, MSG_DONTWAIT) < 0) {
+      return;
+    }
+  }
 }
 
 // Hvf.lan_send(name, iovs) -> U32: sends the frame in guest RAM at iovs to
@@ -5593,7 +5634,7 @@ Term hvf_lan_send_run(Env e, Term* f, IoWork* w) {
     total += len[i];
   }
   if (k > 0 && total <= HVF_LAN_FRAME && nn > 0) {
-    hvf_lan_sendto(name, iov, k);
+    hvf_lan_sendto(name, iov, k, total);
   }
   free(name);
   free(b);
@@ -5614,13 +5655,62 @@ Term hvf_lan_names_run(Env e, Term* f, IoWork* w) {
   return io_node(e, CID(Con), io_str(e, hvf_lan.self, strlen(hvf_lan.self)), xs);
 }
 
-static Term hvf_lan_read(Env e, IoWork* w) {
-  ssize_t n = recv(hvf_lan.fd, hvf_lan.held, sizeof hvf_lan.held, MSG_DONTWAIT);
-  if (n <= 0) {
-    return io_wait_on(w, hvf_lan.fd, POLLIN, 0, hvf_lan_read);
+// A piece from a sender: joined to its packet; the packet's length once it
+// is whole (then held), else 0. A piece out of order drops what was joined.
+static uint32_t hvf_lan_piece(const char* from, const uint8_t* d, size_t n) {
+  uint32_t total, off;
+  memcpy(&total, d + 4, 4);
+  memcpy(&off, d + 8, 4);
+  n -= 12;
+  int k = -1;
+  for (int i = 0; i < HVF_LAN_PARTS; i++) {
+    if (hvf_lan.part[i].total && !strcmp(hvf_lan.part[i].from, from)) {
+      k = i;
+    }
   }
-  hvf_lan.held_len = (uint32_t)n;
-  return (Term)(u32)n;
+  if (off == 0) {
+    if (k < 0) {
+      k                 = (int)(hvf_lan.part_next++ % HVF_LAN_PARTS);
+    }
+    snprintf(hvf_lan.part[k].from, sizeof hvf_lan.part[k].from, "%s", from);
+    hvf_lan.part[k].total = total;
+    hvf_lan.part[k].got   = 0;
+  }
+  if (k < 0 || total != hvf_lan.part[k].total || off != hvf_lan.part[k].got || total > HVF_LAN_FRAME || off + n > total) {
+    if (k >= 0) {
+      hvf_lan.part[k].total = 0;
+    }
+    return 0;
+  }
+  memcpy(hvf_lan.part[k].buf + off, d + 12, n);
+  hvf_lan.part[k].got += (uint32_t)n;
+  if (hvf_lan.part[k].got < total) {
+    return 0;
+  }
+  memcpy(hvf_lan.held, hvf_lan.part[k].buf, total);
+  hvf_lan.part[k].total = 0;
+  return total;
+}
+
+static Term hvf_lan_read(Env e, IoWork* w) {
+  for (;;) {
+    struct sockaddr_un from = {0};
+    socklen_t          fl   = sizeof from;
+    ssize_t            n    = recvfrom(hvf_lan.fd, hvf_lan.dgram, sizeof hvf_lan.dgram, MSG_DONTWAIT, (struct sockaddr*)&from, &fl);
+    if (n <= 0) {
+      return io_wait_on(w, hvf_lan.fd, POLLIN, 0, hvf_lan_read);
+    }
+    if (hvf_lan.dgram[0] != 0xFF) {
+      memcpy(hvf_lan.held, hvf_lan.dgram, (size_t)n);
+      hvf_lan.held_len = (uint32_t)n;
+      return (Term)(u32)n;
+    }
+    uint32_t whole = n > 12 ? hvf_lan_piece(from.sun_path, hvf_lan.dgram, (size_t)n) : 0;
+    if (whole) {
+      hvf_lan.held_len = whole;
+      return (Term)(u32)whole;
+    }
+  }
 }
 
 static Term hvf_lan_taken(Env e, IoWork* w) {

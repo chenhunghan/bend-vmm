@@ -13,12 +13,17 @@ import ../net/dhcp.bend as D
 # broadcast or multicast one to every socket (the host does the sending:
 # V.LanSend). No frame byte passes through Bend but the headers it routes by.
 #
-# The device offers VIRTIO_F_VERSION_1, VIRTIO_NET_F_MAC and VIRTIO_NET_F_MTU
-# with an MTU of 2034 (Lan.mtu: a frame of 2048 bytes, the most a macOS
-# Unix datagram carries by default; fewer frames for the same bytes than
-# Ethernet's 1500), and no checksum or segmentation offload (the guest
-# sends whole frames with checksums); config space its MAC, status, queue
-# pairs and the MTU. Every chain starts with the 12-byte virtio_net_hdr.
+# The device offers VIRTIO_F_VERSION_1, VIRTIO_NET_F_MAC, VIRTIO_NET_F_MTU
+# with an MTU of 2022 (Lan.mtu), and checksum and segmentation offload both
+# ways (CSUM, GUEST_CSUM, HOST_TSO4/6, GUEST_TSO4/6): a guest sends TCP in
+# packets of up to 64 KiB with their checksums left to do, and every packet
+# crosses the LAN with its 12-byte virtio_net_hdr, which the receiving
+# device hands its guest as is (both ends are Linux virtio-net guests: the
+# receiver takes the large packet whole). The host splits a packet larger
+# than a macOS Unix datagram (2048 bytes) into datagrams and the receiving
+# host joins them (host/hvf.c, "The LAN NIC"); an ordinary frame, the
+# header and at most 2022 + 14 bytes, is one datagram. Every chain starts
+# with the 12-byte virtio_net_hdr. All VMs on one LAN run the same version.
 #
 # DHCP: when the device has an address (ip, prefix), it answers its own
 # guest's DHCP DISCOVER and REQUEST with that address, its netmask, a lease
@@ -45,14 +50,16 @@ type Lan is Data:
 def Lan.new(mac: +List<U32>, ip: U32, prefix: U32) -> Lan:
   Lan{mac, ip, prefix, []}
 
-# The LAN's MTU: an Ethernet frame of 2048 bytes (14 of header), the most
-# a macOS Unix datagram carries by default (net.local.dgram.maxdgram).
+# The LAN's MTU: an Ethernet frame (14 bytes of header) and the 12-byte
+# virtio_net_hdr in 2048 bytes, the most a macOS Unix datagram carries by
+# default (net.local.dgram.maxdgram).
 def Lan.mtu() -> U32:
-  2034
+  2022
 
-# VIRTIO_F_VERSION_1, VIRTIO_NET_F_MTU (bit 3) and VIRTIO_NET_F_MAC (bit 5).
+# VIRTIO_F_VERSION_1 and VIRTIO_NET_F_CSUM (bit 0), GUEST_CSUM (1), MTU (3),
+# MAC (5), GUEST_TSO4 (7), GUEST_TSO6 (8), HOST_TSO4 (11), HOST_TSO6 (12).
 def Lan.features() -> U.U64:
-  U.U64{1, 40}
+  U.U64{1, 6571}
 
 # virtio_net_config: mac[6], status[2], max_virtqueue_pairs[2], mtu[2].
 def Lan.config(mac: +List<U32>) -> +List<U32>:
@@ -203,11 +210,11 @@ def Lan.tx.send(-R: Type, rt: Route, +l: Lan, +r: +List<Q.Desc>, +len: U32) -> V
       V.Op.pure(R, Lan, l)
     case ToMac{dst}:
       do V.Op<R, Lan>:
-        V.Op.net(R, V.LanSend{dst, Q.Vq.segs(r, 12, len)})
+        V.Op.net(R, V.LanSend{dst, Q.Vq.segs(r, 0, (len + 12 : U32))})
         return l
     case ToAll{}:
       do V.Op<R, Lan>:
-        V.Op.net(R, V.LanSend{[], Q.Vq.segs(r, 12, len)})
+        V.Op.net(R, V.LanSend{[], Q.Vq.segs(r, 0, (len + 12 : U32))})
         return l
     case ToDhcp{}:
       do V.Op<R, Lan>:
@@ -267,10 +274,12 @@ type LanRxOut is Data:
 def Lan.hdr() -> +List<U32>:
   List.append(&2, U32, B.Bytes.zeros(10n), B.Bytes.le16(1))
 
+# The bytes an item takes in a chain: a frame built here and its header;
+# a held packet came with its own (from the sending device).
 def Lan.size(x: LanRx) -> U32:
   match x:
     case Local{f}:
-      U32.from_nat(List.length(&2, U32, f))
+      (12 + U32.from_nat(List.length(&2, U32, f)) : U32)
     case Held{n}:
       n
 
@@ -283,10 +292,9 @@ def Lan.rx.deliver(-R: Type, x: LanRx, q: Q.Vq, +h: U32, +w: +List<Q.Desc>) -> V
         Q.Vq.push(R, q, h, (12 + U32.from_nat(List.length(&2, U32, f)) : U32))
     case Held{+n}:
       do V.Op<R, Q.Vq>:
-        k : U32 <- Q.Vq.scatter(R, Q.Chain{h, [], w}, Lan.hdr())
-        V.Op.lan_to_ram(R, Q.Vq.segs(w, 12, n))
+        V.Op.lan_to_ram(R, Q.Vq.segs(w, 0, n))
         V.Op.net(R, V.LanRelease{})
-        Q.Vq.push(R, q, h, (12 + n : U32))
+        Q.Vq.push(R, q, h, n)
 
 # An item too large for the chain: dropped (a held frame released); the
 # chain is pushed used with length 0.
@@ -309,7 +317,7 @@ def Lan.rx.fit(-R: Type, fits: Bool, x: LanRx, q: Q.Vq, +h: U32, +w: +List<Q.Des
 def Lan.rx.serve(-R: Type, +x: LanRx, q: Q.Vq, c: Q.Chain) -> V.Op<R, Q.Vq>:
   match c:
     case Q.Chain{+h, r, +w}:
-      Lan.rx.fit(R, U32.is_le((12 + Lan.size(x) : U32), Lan.room(w)), x, q, h, w)
+      Lan.rx.fit(R, U32.is_le(Lan.size(x), Lan.room(w)), x, q, h, w)
 
 def Lan.rx.step(-R: Type, r: Q.Vq & Maybe<&2, Q.Chain>, +x: LanRx, rest: +List<LanRx>, used: Bool, k: Q.Vq & Bool -> V.Op<R, LanRxOut>) -> V.Op<R, LanRxOut>:
   match r:

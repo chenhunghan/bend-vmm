@@ -93,7 +93,7 @@ Options:
 | `--console-log PATH,max=SIZE[,keep=N]` | the guest's console goes to PATH instead of stdout and rotates at about SIZE (PATH.1 … PATH.N, N 1 by default), so a guest cannot fill the host's disk with it |
 | `--payload FILE` | a bare-metal binary entered at the start of RAM |
 | `--vsock PATH` | virtio-vsock (guest CID 3) bridged to Unix sockets under PATH |
-| `--lan DIR,ip=A.B.C.D/N[,mac=…]` | a second NIC (`eth1`) on a LAN with every other VM given the same DIR (this user's, mode 0700): the VMM answers its guest's DHCP with that address (a lease that never ends; no router, so the NAT NIC keeps the default route); without `mac=` the MAC is 52:54:01 and the address's last three bytes |
+| `--lan DIR,ip=A.B.C.D/N[,mac=…]` | a second NIC (`eth1`) on a LAN with every other VM given the same DIR (this user's, mode 0700): the VMM answers its guest's DHCP with that address (a lease that never ends; no router, so the NAT NIC keeps the default route); without `mac=` the MAC is 52:54:01 and the address's last three bytes; checksum and TSO offload (MTU 2022), so every VM on one LAN must run the same bend-vmm version |
 | `--forward [ADDR:]HP:GP[,…]` | TCP port forwarding: the host listens on ADDR (default `127.0.0.1`; `0.0.0.0` for every interface) port HP, and each client is connected to the guest's port GP (from 10.0.2.2); repeatable, at most 16; a port already in use stops the VMM at startup |
 | `--firmware FILE` | UEFI firmware (`out/uefi/code.fd` from `scripts/uefi-assets.sh`) instead of `--kernel` |
 | `--vars FILE` | the UEFI variable store (copy `out/uefi/vars.fd` per VM); without it variables last one run |
