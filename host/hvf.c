@@ -5487,7 +5487,7 @@ Term hvf_chmod_run(Env e, Term* f, IoWork* w) {
 #include <dirent.h>
 #include <sys/un.h>
 
-#define HVF_LAN_FRAME 1514 // an Ethernet frame without FCS (MTU 1500)
+#define HVF_LAN_FRAME 2048 // an Ethernet frame without FCS (src/virtio/lan.bend, Lan.mtu: 2034)
 
 static struct {
   int      fd;
@@ -5577,7 +5577,7 @@ static void hvf_lan_sendto(const char* name, struct iovec* iov, int niov) {
 // Hvf.lan_send(name, iovs) -> U32: sends the frame in guest RAM at iovs to
 // the socket name in the LAN directory (Bend names it: Files.lan_sock, or
 // each of Files.lan_peers for a broadcast); a VM gone or full drops it, as
-// does a frame past 1514 bytes or a piece outside RAM. 0.
+// does a frame past HVF_LAN_FRAME bytes or a piece outside RAM. 0.
 Term hvf_lan_send_run(Env e, Term* f, IoWork* w) {
   u64      nn, nb;
   char*    name = io_cstr(e, f[0], &nn);

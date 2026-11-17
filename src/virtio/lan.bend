@@ -13,10 +13,12 @@ import ../net/dhcp.bend as D
 # broadcast or multicast one to every socket (the host does the sending:
 # V.LanSend). No frame byte passes through Bend but the headers it routes by.
 #
-# The device offers VIRTIO_F_VERSION_1 and VIRTIO_NET_F_MAC only (no
-# checksum or segmentation offload: the guest sends whole 1514-byte frames
-# with checksums), config space its MAC. Every chain starts with the 12-byte
-# virtio_net_hdr.
+# The device offers VIRTIO_F_VERSION_1, VIRTIO_NET_F_MAC and VIRTIO_NET_F_MTU
+# with an MTU of 2034 (Lan.mtu: a frame of 2048 bytes, the most a macOS
+# Unix datagram carries by default; fewer frames for the same bytes than
+# Ethernet's 1500), and no checksum or segmentation offload (the guest
+# sends whole frames with checksums); config space its MAC, status, queue
+# pairs and the MTU. Every chain starts with the 12-byte virtio_net_hdr.
 #
 # DHCP: when the device has an address (ip, prefix), it answers its own
 # guest's DHCP DISCOVER and REQUEST with that address, its netmask, a lease
@@ -43,12 +45,18 @@ type Lan is Data:
 def Lan.new(mac: +List<U32>, ip: U32, prefix: U32) -> Lan:
   Lan{mac, ip, prefix, []}
 
-# VIRTIO_F_VERSION_1 and VIRTIO_NET_F_MAC (bit 5).
-def Lan.features() -> U.U64:
-  U.U64{1, 32}
+# The LAN's MTU: an Ethernet frame of 2048 bytes (14 of header), the most
+# a macOS Unix datagram carries by default (net.local.dgram.maxdgram).
+def Lan.mtu() -> U32:
+  2034
 
+# VIRTIO_F_VERSION_1, VIRTIO_NET_F_MTU (bit 3) and VIRTIO_NET_F_MAC (bit 5).
+def Lan.features() -> U.U64:
+  U.U64{1, 40}
+
+# virtio_net_config: mac[6], status[2], max_virtqueue_pairs[2], mtu[2].
 def Lan.config(mac: +List<U32>) -> +List<U32>:
-  mac
+  List.append(&2, U32, mac, [0, 0, 1, 0, (Lan.mtu() .&. 255 : U32), (Lan.mtu() >> 8n : U32)])
 
 # The most answers kept for the guest (it asks again).
 def Lan.max_local() -> Nat:
