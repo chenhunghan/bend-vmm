@@ -180,8 +180,13 @@ floor (`Csum.small`, `Tcp.small`).
   MAC, or every socket for a broadcast) and answers its own guest's DHCP;
   the frame goes from guest memory to the peer socket and from the host's
   one held frame into guest memory (VmLanToRam, LanRelease), never through
-  Bend. No offloads (1514-byte frames: macOS's Unix datagrams top out at
-  2 KiB by default).
+  Bend. Checksum and TSO offload both ways (2026-11-17): a guest sends TCP
+  in packets of up to 64 KiB, each with its virtio_net_hdr, and the
+  receiving guest takes it whole; macOS's Unix datagrams top out at 2 KiB
+  by default, so the host splits a larger packet into pieces and the
+  receiving host joins them (MTU 2022 keeps an ordinary frame in one
+  datagram). LAN TCP between two VMs went 56 -> 91 MB/s; the sending VMM's
+  main thread is then the limit (33 datagrams per 64 KiB packet).
 - Lifecycle: SIGTERM presses a virtio power key (systemd guests shut down in
   a few seconds); `scripts/ubuntu-check.sh` boots Ubuntu 24.04's cloud image.
 

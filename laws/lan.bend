@@ -87,10 +87,12 @@ law lan.forget_held:
 law lan.keep_bounded:
   {List.length(&2, L.LanRx, L.Lan.rx_of(L.Lan.keep(L.Lan{me(), ip(), 24, List.replicate(L.LanRx, 8n, L.Local{[1]})}, Some{[2]}))) == 8n : Nat}
 
-# The LAN's MTU is 2034 (a 2048-byte frame, a macOS Unix datagram's
-# default limit), offered with VIRTIO_NET_F_MTU (approved 2026-11-17).
+# The LAN's MTU is 2022 (a frame and its 12-byte virtio_net_hdr in 2048
+# bytes, a macOS Unix datagram's default limit), offered with
+# VIRTIO_NET_F_MTU, and checksum and TSO offload both ways (approved
+# 2026-11-17; amended for TSO with the owner's approval the same day).
 law lan.features_mtu:
-  {L.Lan.features() == U.U64{1, 40} : U.U64}
+  {L.Lan.features() == U.U64{1, 6571} : U.U64}
 
 law lan.config_mtu:
-  {L.Lan.config([2, 0, 0, 0, 0, 1]) == [2, 0, 0, 0, 0, 1, 0, 0, 1, 0, 242, 7] : List<&2, U32>}
+  {L.Lan.config([2, 0, 0, 0, 0, 1]) == [2, 0, 0, 0, 0, 1, 0, 0, 1, 0, 230, 7] : List<&2, U32>}
