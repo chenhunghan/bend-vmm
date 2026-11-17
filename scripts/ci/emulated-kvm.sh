@@ -29,6 +29,7 @@ scripts/uefi-assets.sh >/dev/null
 for g in tests/guest/*.S; do scripts/guest.sh "$(basename "$g" .S)" >/dev/null; done
 scripts/build.sh host/smoke.bend out/smoke >/dev/null
 scripts/build.sh host/main.bend out/bend-vmm >/dev/null
+scripts/build.sh host/files_smoke.bend out/files_smoke >/dev/null
 
 echo "== the emulated KVM host"
 l1=out/l1
