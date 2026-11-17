@@ -65,3 +65,14 @@ law hostfiles.sock_too_long:
 
 law hostfiles.sock_utf8:
   {F.Files.utf8_len("é/x") == 4 : U32}
+
+# Proposed: a LAN broadcast goes to every VM's socket in the directory but
+# this VM's own (Hvf.lan_names answers this VM's socket first).
+law hostfiles.lan_peers:
+  {F.Files.lan_peers(["02-00-00-00-00-01.sock", ".", "..", "02-00-00-00-00-02.sock", "02-00-00-00-00-01.sock", "notes", "02-00-00-00-00-03.sock"]) == ["02-00-00-00-00-02.sock", "02-00-00-00-00-03.sock"] : List<String>}
+
+law hostfiles.lan_peers_alone:
+  {F.Files.lan_peers(["02-00-00-00-00-01.sock", "02-00-00-00-00-01.sock"]) == [] : List<String>}
+
+law hostfiles.lan_peers_none:
+  {F.Files.lan_peers([]) == [] : List<String>}

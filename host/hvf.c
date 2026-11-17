@@ -2319,15 +2319,6 @@ Term hvf_irq_run(Env e, Term* f, IoWork* w) {
   return (Term)(r == 0 ? 0 : HVF_ERR);
 }
 
-// Hvf.kick(cpu) -> U32: forces a running vCPU out of the guest.
-Term hvf_kick_run(Env e, Term* f, IoWork* w) {
-  u32 cpu = (u32)f[0];
-  if (cpu >= HVF_MAX_CPUS || !hvf_cpus[cpu].live) {
-    return (Term)HVF_ERR;
-  }
-  return (Term)(vmb_kick(&hvf_cpus[cpu]) == 0 ? 0 : HVF_ERR);
-}
-
 // Console and disks
 // =================
 
@@ -2451,23 +2442,6 @@ Term hvf_log_put_run(Env e, Term* f, IoWork* w) {
 Term hvf_out_flush_run(Env e, Term* f, IoWork* w) {
   hvf_out_flush();
   return (Term)0;
-}
-
-// Hvf.stdin(max) -> List<U32>: up to max bytes typed on stdin, without
-// blocking ([] when none are waiting).
-Term hvf_stdin_run(Env e, Term* f, IoWork* w) {
-  static int nonblock;
-  if (!nonblock) {
-    fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
-    nonblock = 1;
-  }
-  char    buf[256];
-  u64     max = (u32)f[0] < sizeof buf ? (u32)f[0] : sizeof buf;
-  ssize_t k   = read(0, buf, max);
-  if ((hvf_trace & 2) && k > 0) {
-    fprintf(stderr, "[trace] stdin %zd bytes\n", k);
-  }
-  return k > 0 ? io_list(e, buf, (u64)k) : term_pak(CID(Nil), 0);
 }
 
 // Hvf.random(len) -> List<U32>: len bytes from the host's entropy source.
@@ -4899,73 +4873,6 @@ Term hvf_snap_commit_run(Env e, Term* f, IoWork* w) {
   return (Term)(u32)err;
 }
 
-// Hvf.tick_wait(ms) -> U32: parks until ms milliseconds from now, on a pipe
-// a host thread writes at that deadline, then 0. A timer the event loop
-// always sees: a parked IO.sleep alone was not woken while nothing else
-// happened (an idle guest), and the automatic balloon (host/main.bend,
-// balloon_poll) must run then most of all. One deadline at a time (the
-// latest asked for).
-static int             hvf_tick_pipe[2] = {-1, -1};
-static pthread_mutex_t hvf_tick_lock    = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  hvf_tick_bell    = PTHREAD_COND_INITIALIZER;
-static struct timespec hvf_tick_due; // realtime; tv_sec 0: none
-
-static void* hvf_tick_thread(void* arg) {
-  (void)arg;
-  pthread_mutex_lock(&hvf_tick_lock);
-  for (;;) {
-    while (hvf_tick_due.tv_sec == 0) {
-      pthread_cond_wait(&hvf_tick_bell, &hvf_tick_lock);
-    }
-    struct timespec due = hvf_tick_due;
-    if (pthread_cond_timedwait(&hvf_tick_bell, &hvf_tick_lock, &due) == ETIMEDOUT && hvf_tick_due.tv_sec == due.tv_sec &&
-        hvf_tick_due.tv_nsec == due.tv_nsec) {
-      hvf_tick_due.tv_sec = 0;
-      char b = 1;
-      (void)!write(hvf_tick_pipe[1], &b, 1);
-    }
-  }
-  return NULL;
-}
-
-static void hvf_tick_drain(void) {
-  char b[64];
-  while (read(hvf_tick_pipe[0], b, sizeof b) > 0) {
-  }
-}
-
-static Term hvf_tick_more(Env e, IoWork* w) {
-  hvf_tick_drain();
-  return (Term)0;
-}
-
-Term hvf_tick_wait_run(Env e, Term* f, IoWork* w) {
-  if (hvf_tick_pipe[0] < 0) {
-    pthread_t t;
-    if (pipe(hvf_tick_pipe) != 0) {
-      return (Term)HVF_ERR;
-    }
-    for (int i = 0; i < 2; i++) {
-      fcntl(hvf_tick_pipe[i], F_SETFL, fcntl(hvf_tick_pipe[i], F_GETFL) | O_NONBLOCK);
-      fcntl(hvf_tick_pipe[i], F_SETFD, FD_CLOEXEC);
-    }
-    if (pthread_create(&t, NULL, hvf_tick_thread, NULL) != 0) {
-      return (Term)HVF_ERR;
-    }
-    pthread_detach(t);
-  }
-  hvf_tick_drain();
-  struct timeval now;
-  gettimeofday(&now, NULL);
-  uint64_t ns = (uint64_t)now.tv_usec * 1000 + (uint64_t)(u32)f[0] * 1000000ull;
-  pthread_mutex_lock(&hvf_tick_lock);
-  hvf_tick_due.tv_sec  = now.tv_sec + (time_t)(ns / 1000000000ull);
-  hvf_tick_due.tv_nsec = (long)(ns % 1000000000ull);
-  pthread_cond_signal(&hvf_tick_bell);
-  pthread_mutex_unlock(&hvf_tick_lock);
-  return io_wait_on(w, hvf_tick_pipe[0], POLLIN, 0, hvf_tick_more);
-}
-
 // Hvf.rename(from, to) -> U32: 0, or an errno. A rename replaces a symlink
 // at to rather than following it, and a file mapped (a restored snapshot's
 // RAM) keeps its old contents.
@@ -5248,10 +5155,6 @@ static struct {
   uint32_t held_len;
 } hvf_lan = {.fd = -1, .wake = {-1, -1}};
 
-static void hvf_lan_name(char* out, size_t room, const uint8_t* mac) {
-  snprintf(out, room, "%02x-%02x-%02x-%02x-%02x-%02x.sock", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-}
-
 static int hvf_lan_addr(struct sockaddr_un* a, const char* name);
 
 // This VM's socket leaves the LAN when the VMM exits.
@@ -5269,23 +5172,23 @@ static int hvf_lan_addr(struct sockaddr_un* a, const char* name) {
   return k > 0 && k < (int)sizeof a->sun_path ? 0 : -1;
 }
 
-// Hvf.lan_open(dir, mac, mode, replace) -> U32: binds this VM's socket on
-// the LAN in dir, which Bend trusts (src/vmm/hostfiles.bend,
-// Files.dir_trusted), with mode; replace (Files.listen) removes a dead
-// socket of this MAC first. 0, or an errno.
+// Hvf.lan_open(dir, name, mode, replace) -> U32: binds this VM's socket,
+// name (Bend's: Files.lan_sock), on the LAN in dir, which Bend trusts
+// (src/vmm/hostfiles.bend, Files.dir_trusted), with mode; replace
+// (Files.listen) removes a dead socket of that name first. 0, or an errno.
 Term hvf_lan_open_run(Env e, Term* f, IoWork* w) {
   u64      n;
   char*    dir = io_cstr(e, f[0], &n);
   u64      nm;
-  char*    mac = io_cbuf(e, f[1], &nm, CID(Con));
+  char*    name = io_cstr(e, f[1], &nm);
   int      err = 0;
-  if (!mac || nm != 6 || n == 0 || n >= sizeof hvf_lan.dir) {
+  if (nm == 0 || nm >= sizeof hvf_lan.self || n == 0 || n >= sizeof hvf_lan.dir) {
     err = EINVAL;
   }
   struct sockaddr_un a;
   if (!err) {
     memcpy(hvf_lan.dir, dir, n + 1);
-    hvf_lan_name(hvf_lan.self, sizeof hvf_lan.self, (const uint8_t*)mac);
+    memcpy(hvf_lan.self, name, nm + 1);
     if (hvf_lan_addr(&a, hvf_lan.self) != 0) {
       err = ENAMETOOLONG;
     }
@@ -5315,7 +5218,7 @@ Term hvf_lan_open_run(Env e, Term* f, IoWork* w) {
     }
   }
   free(dir);
-  free(mac);
+  free(name);
   return (Term)(u32)err;
 }
 
@@ -5328,14 +5231,14 @@ static void hvf_lan_sendto(const char* name, struct iovec* iov, int niov) {
   (void)sendmsg(hvf_lan.fd, &m, MSG_DONTWAIT); // a VM gone or full drops it, as a switch would
 }
 
-// Hvf.lan_send(dst, iovs) -> U32: sends the frame in the pieces of guest
-// memory to the VM whose MAC is dst (6 bytes), or to every other VM on the
-// LAN (dst []). A frame past 1514 bytes, or a piece outside RAM, is
-// dropped. 0.
+// Hvf.lan_send(name, iovs) -> U32: sends the frame in guest RAM at iovs to
+// the socket name in the LAN directory (Bend names it: Files.lan_sock, or
+// each of Files.lan_peers for a broadcast); a VM gone or full drops it, as
+// does a frame past 1514 bytes or a piece outside RAM. 0.
 Term hvf_lan_send_run(Env e, Term* f, IoWork* w) {
-  u64      nd, nb;
-  char*    dst = io_cbuf(e, f[0], &nd, CID(Con));
-  char*    b   = io_cbuf(e, f[1], &nb, CID(Con));
+  u64      nn, nb;
+  char*    name = io_cstr(e, f[0], &nn);
+  char*    b    = io_cbuf(e, f[1], &nb, CID(Con));
   uint8_t* hva[HVF_MAX_IOVS];
   u64      len[HVF_MAX_IOVS];
   int      k = hvf_lan.fd >= 0 ? hvf_iovs(b, nb, hva, len, HVF_MAX_IOVS) : -1;
@@ -5346,27 +5249,26 @@ Term hvf_lan_send_run(Env e, Term* f, IoWork* w) {
     iov[i].iov_len  = len[i];
     total += len[i];
   }
-  if (k > 0 && total <= HVF_LAN_FRAME) {
-    if (dst && nd == 6) {
-      char name[32];
-      hvf_lan_name(name, sizeof name, (const uint8_t*)dst);
-      hvf_lan_sendto(name, iov, k);
-    } else {
-      DIR* d = opendir(hvf_lan.dir);
-      for (struct dirent* de; d && (de = readdir(d)) != NULL;) {
-        size_t l = strlen(de->d_name);
-        if (l > 5 && strcmp(de->d_name + l - 5, ".sock") == 0 && strcmp(de->d_name, hvf_lan.self) != 0) {
-          hvf_lan_sendto(de->d_name, iov, k);
-        }
-      }
-      if (d) {
-        closedir(d);
-      }
-    }
+  if (k > 0 && total <= HVF_LAN_FRAME && nn > 0) {
+    hvf_lan_sendto(name, iov, k);
   }
-  free(dst);
+  free(name);
   free(b);
   return (Term)0;
+}
+
+// Hvf.lan_names() -> List<String>: this VM's socket name, then the names
+// in the LAN directory (Files.lan_peers picks a broadcast's).
+Term hvf_lan_names_run(Env e, Term* f, IoWork* w) {
+  Term  xs = term_pak(CID(Nil), 0);
+  DIR*  d  = hvf_lan.fd >= 0 ? opendir(hvf_lan.dir) : NULL;
+  for (struct dirent* de; d && (de = readdir(d)) != NULL;) {
+    xs = io_node(e, CID(Con), io_str(e, de->d_name, strlen(de->d_name)), xs);
+  }
+  if (d) {
+    closedir(d);
+  }
+  return io_node(e, CID(Con), io_str(e, hvf_lan.self, strlen(hvf_lan.self)), xs);
 }
 
 static Term hvf_lan_read(Env e, IoWork* w) {
@@ -7090,9 +6992,6 @@ static void __attribute__((constructor)) hvf_use(void) {
 #ifdef CID(Hvf.snap_rebase)
   io_eff(CID(Hvf.snap_rebase), hvf_snap_rebase_run);
 #endif
-#ifdef CID(Hvf.tick_wait)
-  io_eff(CID(Hvf.tick_wait), hvf_tick_wait_run);
-#endif
 #ifdef CID(Hvf.rename)
   io_eff(CID(Hvf.rename), hvf_rename_run);
 #endif
@@ -7183,9 +7082,6 @@ static void __attribute__((constructor)) hvf_use(void) {
 #ifdef CID(Hvf.x86_boot)
   io_eff(CID(Hvf.x86_boot), hvf_x86_boot_run);
 #endif
-#ifdef CID(Hvf.kick)
-  io_eff(CID(Hvf.kick), hvf_kick_run);
-#endif
 #ifdef CID(Hvf.set_args)
   io_eff(CID(Hvf.set_args), hvf_set_args_run);
 #endif
@@ -7194,6 +7090,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.lan_send)
   io_eff(CID(Hvf.lan_send), hvf_lan_send_run);
+#endif
+#ifdef CID(Hvf.lan_names)
+  io_eff(CID(Hvf.lan_names), hvf_lan_names_run);
 #endif
 #ifdef CID(Hvf.lan_recv)
   io_eff(CID(Hvf.lan_recv), hvf_lan_recv_run);
@@ -7281,9 +7180,6 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.out_flush)
   io_eff(CID(Hvf.out_flush), hvf_out_flush_run);
-#endif
-#ifdef CID(Hvf.stdin)
-  io_eff(CID(Hvf.stdin), hvf_stdin_run);
 #endif
 #ifdef CID(Hvf.stdin_tty)
   io_eff(CID(Hvf.stdin_tty), hvf_stdin_tty_run);

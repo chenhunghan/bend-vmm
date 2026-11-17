@@ -54,3 +54,12 @@ def L.hostfiles.sock_too_long():
 
 def L.hostfiles.sock_utf8():
   {==}
+
+def L.hostfiles.lan_peers():
+  {==}
+
+def L.hostfiles.lan_peers_alone():
+  {==}
+
+def L.hostfiles.lan_peers_none():
+  {==}
