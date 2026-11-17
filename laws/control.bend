@@ -120,7 +120,7 @@ law control.status_json_kept:
 law control.with_ram:
   {C.Ctl.with_ram("{\"state\":\"running\"}", 2048, 0) == "{\"state\":\"running\",\"ram\":{\"resident_mib\":2,\"compressed_mib\":0}}" : String}
 
-# Proposed: status json also counts each vCPU's exits by kind (bend-vk8s,
+# status json also counts each vCPU's exits by kind (approved 2026-11-17; bend-vk8s,
 # for idle cost): host/hvf.c's buckets, named here.
 law control.exit_name_vtimer:
   {C.Ctl.exit_name(64) == "vtimer" : String}

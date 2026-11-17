@@ -5,8 +5,6 @@ import ../src/x86/xexit.bend as E
 
 # Spec for src/x86/xexit.bend: KVM's x86 exits as the VMM sees them.
 
-# Proposed: (a new module; every law here is proposed)
-
 # OUT of one byte 65 to port 1016
 law x86exit.out:
   {E.XExit.decode([2002, 1, 1, 1016, 1, 65]) == E.XIo{True{}, 1016, 1, 65} : E.XExit}

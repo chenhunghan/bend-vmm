@@ -4,8 +4,6 @@ import ../src/x86/pio.bend as P
 # Spec for src/x86/pio.bend: the 16550A, the CMOS clock and the ports that
 # power off and reset.
 
-# Proposed: (a new module; every law here is proposed)
-
 def value(r: P.URead) -> U32:
   match r:
     case P.URead{u, v}:
