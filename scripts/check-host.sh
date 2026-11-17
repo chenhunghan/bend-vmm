@@ -97,7 +97,8 @@ if [ -f host/main.bend ]; then
   fi
   arm && expect "machine hello" 20 "hello from the guest" ./out/bend-vmm --payload out/guest/hello.bin
   # the package's host file calls (main.bend's Fs), for programs that embed the VMM
-  if [ "${SKIP_BUILD:-0}" = 1 ] || scripts/build.sh host/files_smoke.bend out/files_smoke >/dev/null; then
+  # (built here even under SKIP_BUILD when missing: CI's emulated run builds only bend-vmm and smoke ahead)
+  if { [ "${SKIP_BUILD:-0}" = 1 ] && [ -x out/files_smoke ]; } || scripts/build.sh host/files_smoke.bend out/files_smoke >/dev/null; then
     fd=$(mktemp -d); printf 0123456789 > "$fd/blob"; out=$(./out/files_smoke "$fd" 2>&1)
     grep -q "mkdir_p 0 again 0" <<<"$out" && grep -q "facts kind 2 size 10 mtime 1000000000" <<<"$out" && grep -q "missing kind 0" <<<"$out" \
       && grep -q "rename 0, ls moved," <<<"$out" && grep -q "remove 0 rmdir 0, gone kind 0" <<<"$out" && grep -q "files: done" <<<"$out" \
