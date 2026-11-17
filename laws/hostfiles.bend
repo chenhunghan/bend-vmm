@@ -1,5 +1,6 @@
 import Base
 import ../src/vmm/hostfiles.bend as F
+import ../src/lib/u64.bend as U
 
 # Spec for src/vmm/hostfiles.bend: what the VMM makes on the host, and where.
 
@@ -66,8 +67,9 @@ law hostfiles.sock_too_long:
 law hostfiles.sock_utf8:
   {F.Files.utf8_len("é/x") == 4 : U32}
 
-# Proposed: a LAN broadcast goes to every VM's socket in the directory but
-# this VM's own (Hvf.lan_names answers this VM's socket first).
+# A LAN broadcast goes to every VM's socket in the directory but this
+# VM's own (Hvf.lan_names answers this VM's socket first; approved
+# 2026-11-17).
 law hostfiles.lan_peers:
   {F.Files.lan_peers(["02-00-00-00-00-01.sock", ".", "..", "02-00-00-00-00-02.sock", "02-00-00-00-00-01.sock", "notes", "02-00-00-00-00-03.sock"]) == ["02-00-00-00-00-02.sock", "02-00-00-00-00-03.sock"] : List<String>}
 
@@ -76,3 +78,29 @@ law hostfiles.lan_peers_alone:
 
 law hostfiles.lan_peers_none:
   {F.Files.lan_peers([]) == [] : List<String>}
+
+# Proposed: files for a program that embeds the VMM (main.bend's Fs):
+# `mkdir -p`'s directories, outermost first, and what a path is.
+law hostfiles.prefixes_abs:
+  {F.Files.prefixes("/a/b/c") == ["/a", "/a/b", "/a/b/c"] : List<&2, String>}
+
+law hostfiles.prefixes_rel:
+  {F.Files.prefixes("a//b/") == ["a", "a/b"] : List<&2, String>}
+
+law hostfiles.prefixes_root:
+  {F.Files.prefixes("/") == [] : List<&2, String>}
+
+law hostfiles.facts:
+  {F.Files.facts([1, 33188, 0, 4096, 0, 1763366400]) == F.Facts{2, U.U64{0, 4096}, U.U64{0, 1763366400}} : F.Facts}
+
+law hostfiles.facts_nothing:
+  {F.Files.facts([0, 0, 0, 0, 0, 0]) == F.Facts{0, U.U64{0, 0}, U.U64{0, 0}} : F.Facts}
+
+law hostfiles.kind_dir:
+  {F.Files.kind(1, 16877) == 1 : U32}
+
+law hostfiles.kind_symlink:
+  {F.Files.kind(1, 41453) == 3 : U32}
+
+law hostfiles.kind_fifo:
+  {F.Files.kind(1, 4516) == 4 : U32}
