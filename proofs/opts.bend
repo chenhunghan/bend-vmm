@@ -31,3 +31,6 @@ def L.opts.restore_lan():
 def L.opts.with_size():
   {==}
 
+
+def L.opts.share_twice():
+  {==}

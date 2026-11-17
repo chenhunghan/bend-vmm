@@ -184,3 +184,10 @@ def Files.prefixes.first(parts: List<&2, String>) -> List<&2, String>:
 # then "/a/b", "a//b/" is "a" then "a/b".
 def Files.prefixes(path: String) -> List<&2, String>:
   Files.prefixes.first(String.split(path, '/'))
+
+# Whether a path's facts say it is a symlink (Fs.no_symlinks refuses a
+# path with one anywhere along it).
+def Files.is_link(f: Facts) -> Bool:
+  match f:
+    case Facts{k, s, m}:
+      U32.is_eq(k, 3)

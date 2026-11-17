@@ -9,7 +9,7 @@ carries out plans that Bend hands it.
 This file is the audit of that boundary. It covered all 113 effects in
 host/hvf.c as of 2026-11-09 and says, for each group, where the
 decisions are made; the migration ledger at the end lists every effect
-(146 as of 2026-11-17) with its target in the C-to-Bend plan. The
+(152 as of 2026-11-17) with its target in the C-to-Bend plan. The
 section before it lists every decision still in C, with the reason it
 stays.
 
@@ -25,8 +25,8 @@ stays.
 | NAT | `tcp_*` `udp_*` `nat_send` `net_copy` `net_holds` `net_limits` `stage` `stage_drop` `dns` `set_dns` | sockets, send buffers, parking, wakeups | the whole NAT (`src/net`), limits (`net/limits.bend`), flusher actions (`net/flush.bend`), UDP flows (`net/udpflow.bend`) |
 | Descriptors | `nofile` `set_nofile` `fd_room` | reads and sets rlimit; counts sockets | soft limit and flow budget (`net/fds.bend`) |
 | Sockets and listeners | `ctl_listen` `ctl_next` `ctl_reply` `vsock_listen` `vsock_accept` `vsock_base` `vsock_file` `unix_connect` `fwd_listen` `fwd_accept` `accept_retry` `sock_facts` `sock_remove` | binds, accepts, connects; reports what a path holds | protocol (`vmm/control.bend`), deadlines, backlogs, retry and CONNECT (`vmm/clients.bend`), forward specs (`vmm/cli.bend`), which paths may be listened on (`vmm/hostfiles.bend`) |
-| LAN | `lan_open` `lan_send` `lan_names` `lan_recv` `lan_to_ram` `lan_release` `mkdir` `dir_facts` `path_facts` `set_mtime` | datagram sockets, one frame per datagram | where frames go (`virtio/lan.bend`), directory trust and socket replacement (`vmm/hostfiles.bend`) |
-| Shares (9p) | `fs` `share_open` `share_quota` `share_usage` | walks paths with openat and O_NOFOLLOW; keeps a descriptor cache | valid names (`fs/contain.bend`), listing order and pages (`fs/listing.bend`), entries, types and modes (`fs/entry.bend`), quota (`fs/quota.bend`) |
+| LAN | `lan_open` `lan_send` `lan_names` `lan_recv` `lan_to_ram` `lan_release` `mkdir` `dir_facts` `path_facts` `set_mtime` `fsync` `chmod` | datagram sockets, one frame per datagram | where frames go (`virtio/lan.bend`), directory trust and socket replacement (`vmm/hostfiles.bend`) |
+| Shares (9p) | `fs` `share_open` `share_ro` `meta_load` `meta_resolve` `meta_list` `share_quota` `share_usage` | walks paths with openat and O_NOFOLLOW; keeps a descriptor cache | valid names (`fs/contain.bend`), listing order and pages (`fs/listing.bend`), entries, types and modes (`fs/entry.bend`), quota (`fs/quota.bend`) |
 | Display | `fb_init` `fb_present` `fb_dump` | maps the framebuffer, draws it with Metal, writes PPM | display size (`Cli.display.fits`), pointer and keys (`dev/pointer.bend`), file mode |
 
 ## Moved on 2026-11-09, after the first version of this audit
@@ -147,6 +147,7 @@ performance, or as defence beneath Bend's own checks.
 | Decision | Where | Why it stays |
 |---|---|---|
 | A share opens only regular files for reads and writes | `hvf_fs_run` | Moving it costs a round trip on every open that misses the descriptor cache, on the 9p hot path. `check-host` tests it. |
+| A read-only share changes nothing | `hvf_fs_run` (`hvf_share_ro`) | Beneath Bend's own refusal (`Ro.refuses`, src/fs/readonly.bend), which answers EROFS before the host is asked; the C check is defence in depth, as the caps below (2026-11-17). `check-host` 5n tests it. |
 | gzip and deflate decoding | `hvf_inflate` | Decoding a ~30 MB kernel in Bend would cost far more than the 0.55 s boot. Bend decides whether to inflate. |
 | A held share file the host replaced or removed is let go | `hvf_fs_run` (stat), `hvf_fdc_stale` | Each guest lookup, open and getattr stats the path; a descriptor the cache holds for that path that is no longer the file there (another inode) is closed, so the next read opens the one there now (2026-11-17, bend-vk8s: a directory the host made again read as the old file's bytes under the new size). One `fstat` when the path is cached; done inside the stat for the same reason as the line above. `check-host` 5j tests it. |
 | Memory-safety caps (sizes, counts, path lengths) | throughout | Defence in depth beneath Bend's own checks; never the only check. |
@@ -299,6 +300,8 @@ row but the decisions listed as moved above.
 | `dir_facts` | `hvf_dir_facts_run` (4129) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
 | `path_facts` | `hvf_path_facts_run` | main.bend's Fs (a program embedding the VMM) | none | 2 | host/files_smoke.bend (check-host) | none | C reports a fact (lstat: mode bits, size, mtime); Bend reads the kind (Files.kind) and decodes the rest (Files.facts) (2026-11-17) |
 | `set_mtime` | `hvf_set_mtime_run` | main.bend's Fs | none | 2 | host/files_smoke.bend (check-host) | none | C sets the time Bend chose (2026-11-17) |
+| `fsync` | `hvf_fsync_run` | main.bend's Fs | none | 2 | host/files_smoke.bend (check-host) | none | C writes a file or directory to the disk (macOS F_FULLFSYNC), never through a symlink (2026-11-17) |
+| `chmod` | `hvf_chmod_run` | main.bend's Fs | none | 2 | host/files_smoke.bend (check-host) | none | C sets the bits Bend chose, never through a symlink (2026-11-17) |
 | `lan_open` | `hvf_lan_open_run` (4192) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C binds and sends; Bend names every socket (Files.lan_sock) and picks a broadcast's (Files.lan_peers) (2026-11-17) |
 | `lan_send` | `hvf_lan_send_run` (4251) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C binds and sends; Bend names every socket (Files.lan_sock) and picks a broadcast's (Files.lan_peers) (2026-11-17) |
 | `lan_names` | `hvf_lan_names_run` | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C reports a fact (the directory's names, this VM's first); Bend picks (Files.lan_peers) (2026-11-17) |
@@ -306,6 +309,10 @@ row but the decisions listed as moved above.
 | `lan_to_ram` | `hvf_lan_to_ram_run` (4323) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
 | `lan_release` | `hvf_lan_release_run` (4344) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
 | `share_quota` | `hvf_share_quota_run` (5562) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
+| `share_ro` | `hvf_share_ro_run` | host/main.bend (devices.share) | none | 4 | check-host 5n (read-only share) | none | C refuses a read-only share's changes beneath Bend's own refusal (src/fs/readonly.bend, Ro.refuses), as with the memory-safety caps (2026-11-17) |
+| `meta_load` | `hvf_meta_load_run` | host/fs.bend (Host.meta.load) | none | 4 | check-host 5o (meta share) | none | C keeps the table Bend parsed from a .bend-meta (guest name, host name, the record's line) (2026-11-17) |
+| `meta_resolve` | `hvf_meta_resolve_run` | host/fs.bend (Host.meta.resolve) | none | 4 | check-host 5o | none | C finds a guest path's names in the tables Bend loaded, as hvf_fdc finds descriptors; Bend decides every attribute from the record line it gets back (Meta.attr) (2026-11-17) |
+| `meta_list` | `hvf_meta_list_run` | host/fs.bend (Host.meta.list) | none | 4 | check-host 5o | none | C hands back a loaded table; Bend makes the listing (Meta.entries) (2026-11-17) |
 | `share_usage` | `hvf_share_usage_run` (5578) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
 | `share_open` | `hvf_share_open_run` (3219) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
 | `fs` | `hvf_fs_run` (3413) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |

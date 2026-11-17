@@ -4044,6 +4044,20 @@ static char* hvf_shares[HVF_MAX_SHARES];
 // Each share's root, open (Hvf.share_open): paths walk from it.
 static int hvf_share_fd[HVF_MAX_SHARES];
 static int   hvf_nshares;
+// A read-only share (--share DIR,ro; Hvf.share_ro): Bend refuses every
+// change first (src/fs/readonly.bend); hvf_fs_run refuses them again,
+// beneath it, as with the memory-safety caps.
+static int hvf_share_ro[HVF_MAX_SHARES];
+
+// Hvf.share_ro(share) -> U32: marks a share read-only. 0, or 0xFFFFFFFF.
+Term hvf_share_ro_run(Env e, Term* f, IoWork* w) {
+  u32 sh = (u32)f[0];
+  if (sh >= (u32)hvf_nshares) {
+    return (Term)HVF_ERR;
+  }
+  hvf_share_ro[sh] = 1;
+  return (Term)0;
+}
 
 // Hvf.share_open(path) -> U32: a share index, or 0xFFFFFFFF.
 // A share's quota (0: none) and the bytes its files hold, approximately:
@@ -4088,6 +4102,235 @@ Term hvf_share_open_run(Env e, Term* f, IoWork* w) {
   hvf_share_fd[hvf_nshares] = rfd;
   hvf_shares[hvf_nshares]   = real;
   return (Term)(u32)hvf_nshares++;
+}
+
+// Linux metadata on a share marked meta (src/fs/meta.bend decides all of
+// it): Bend reads each directory's .bend-meta, parses it and loads its
+// records here, by the directory's guest path: each record's guest name,
+// its host name and its line as written (Bend parses the line again when
+// it needs it). C keeps the tables and finds names in them, nothing more.
+// A directory without .bend-meta is loaded plain: names are themselves.
+typedef struct {
+  char *name, *host, *line;
+  u32   nlen, hlen, llen;
+} HvfMetaRec;
+typedef struct HvfMetaDir {
+  u32                sh, plain, n;
+  char*              gdir;
+  HvfMetaRec*        recs;
+  struct HvfMetaDir* next;
+} HvfMetaDir;
+#define HVF_META_BUCKETS 4096
+static HvfMetaDir*     hvf_meta[HVF_META_BUCKETS];
+static pthread_mutex_t hvf_meta_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static u32 hvf_meta_hash(u32 sh, const char* p, size_t n) {
+  uint32_t h = 2166136261u ^ sh;
+  for (size_t i = 0; i < n; i++) {
+    h = (h ^ (uint8_t)p[i]) * 16777619u;
+  }
+  return h % HVF_META_BUCKETS;
+}
+
+static HvfMetaDir* hvf_meta_dir(u32 sh, const char* p, size_t n) {
+  for (HvfMetaDir* d = hvf_meta[hvf_meta_hash(sh, p, n)]; d; d = d->next) {
+    if (d->sh == sh && strlen(d->gdir) == n && !memcmp(d->gdir, p, n)) {
+      return d;
+    }
+  }
+  return NULL;
+}
+
+// Words as bytes: a length then that many words, each a byte.
+static char* hvf_meta_str(const uint32_t* w, u64 nw, u64* at, u32* len) {
+  if (*at >= nw) {
+    return NULL;
+  }
+  u32 n = w[(*at)++];
+  if (n > nw - *at) {
+    return NULL;
+  }
+  char* s = io_mem(malloc((size_t)n + 1));
+  for (u32 i = 0; i < n; i++) {
+    s[i] = (char)w[*at + i];
+  }
+  s[n] = 0;
+  *at += n;
+  *len = n;
+  return s;
+}
+
+// Hvf.meta_load(share, gdir, words) -> U32: the records of the directory at
+// guest path gdir: [plain, n, then n times name, host, line (each a length
+// and its bytes)]. A table loaded again replaces nothing (the share is
+// read-only). 0, or 0xFFFFFFFF on malformed words.
+Term hvf_meta_load_run(Env e, Term* f, IoWork* w) {
+  u32       sh = (u32)f[0];
+  u64       gn, nw, at = 0;
+  char*     gdir  = io_cstr(e, f[1], &gn);
+  uint32_t* ws    = hvf_u32s(e, f[2], &nw);
+  u32       plain = nw > 0 ? ws[at++] : 1, n = nw > 1 ? ws[at++] : 0;
+  int       bad   = nw < 2 || n > nw;
+  HvfMetaRec* recs = io_mem(calloc(n ? n : 1, sizeof *recs));
+  for (u32 i = 0; i < n && !bad; i++) {
+    recs[i].name = hvf_meta_str(ws, nw, &at, &recs[i].nlen);
+    recs[i].host = hvf_meta_str(ws, nw, &at, &recs[i].hlen);
+    recs[i].line = hvf_meta_str(ws, nw, &at, &recs[i].llen);
+    bad          = !recs[i].name || !recs[i].host || !recs[i].line;
+  }
+  free(ws);
+  pthread_mutex_lock(&hvf_meta_mu);
+  if (bad || hvf_meta_dir(sh, gdir, gn)) {
+    pthread_mutex_unlock(&hvf_meta_mu);
+    for (u32 i = 0; i < n; i++) {
+      free(recs[i].name);
+      free(recs[i].host);
+      free(recs[i].line);
+    }
+    free(recs);
+    free(gdir);
+    return (Term)(bad ? HVF_ERR : 0);
+  }
+  HvfMetaDir* d = io_mem(calloc(1, sizeof *d));
+  *d            = (HvfMetaDir){sh, plain, n, gdir, recs, NULL};
+  u32 b         = hvf_meta_hash(sh, gdir, gn);
+  d->next       = hvf_meta[b];
+  hvf_meta[b]   = d;
+  pthread_mutex_unlock(&hvf_meta_mu);
+  return (Term)0;
+}
+
+static HvfMetaRec* hvf_meta_find(HvfMetaDir* d, const char* name, size_t n) {
+  for (u32 i = 0; i < d->n; i++) {
+    if (d->recs[i].nlen == n && !memcmp(d->recs[i].name, name, n)) {
+      return &d->recs[i];
+    }
+  }
+  return NULL;
+}
+
+typedef struct {
+  uint32_t* w;
+  u64       n, cap;
+} HvfMw;
+
+static void hvf_mw(HvfMw* m, uint32_t x) {
+  if (m->n == m->cap) {
+    m->cap = m->cap ? m->cap * 2 : 256;
+    m->w   = io_mem(realloc(m->w, m->cap * sizeof *m->w));
+  }
+  m->w[m->n++] = x;
+}
+
+static void hvf_mw_str(HvfMw* m, const char* s, size_t n) {
+  hvf_mw(m, (uint32_t)n);
+  for (size_t i = 0; i < n; i++) {
+    hvf_mw(m, (uint8_t)s[i]);
+  }
+}
+
+// Hvf.meta_resolve(share, gpath) -> List<U32>: gpath's host path, through
+// the loaded tables: [0, host path, its record's line (a length of
+// 0xFFFFFFFF: none)]; [1, k, host path of the directory] when the
+// directory of gpath's first k components has no table yet (Bend loads it
+// and asks again); [2] when a name is not among a table's records.
+Term hvf_meta_resolve_run(Env e, Term* f, IoWork* w) {
+  u32   sh = (u32)f[0];
+  u64   n;
+  char* g  = io_cstr(e, f[1], &n);
+  HvfMw out = {0}, host = {0};
+  char  hostp[PATH_MAX];
+  size_t hl = 0, k = 0, start = 0;
+  HvfMetaRec* rec = NULL;
+  int   done = 0;
+  hostp[0] = 0;
+  pthread_mutex_lock(&hvf_meta_mu);
+  while (!done && start <= n && n > 0) {
+    size_t end = start;
+    while (end < n && g[end] != '/') {
+      end++;
+    }
+    HvfMetaDir* d = hvf_meta_dir(sh, g, start ? start - 1 : 0);
+    if (!d) {
+      hvf_mw(&out, 1);
+      hvf_mw(&out, (uint32_t)k);
+      hvf_mw_str(&out, hostp, hl);
+      done = 2;
+      break;
+    }
+    const char* hn  = g + start;
+    size_t      hnl = end - start;
+    rec             = NULL;
+    if (!d->plain) {
+      rec = hvf_meta_find(d, g + start, end - start);
+      if (!rec) {
+        hvf_mw(&out, 2);
+        done = 2;
+        break;
+      }
+      hn  = rec->host;
+      hnl = rec->hlen;
+    }
+    if (hl + hnl + 2 >= sizeof hostp) {
+      hvf_mw(&out, 2);
+      done = 2;
+      break;
+    }
+    if (hl) {
+      hostp[hl++] = '/';
+    }
+    memcpy(hostp + hl, hn, hnl);
+    hl += hnl;
+    hostp[hl] = 0;
+    k++;
+    if (end >= n) {
+      break;
+    }
+    start = end + 1;
+  }
+  if (!done) {
+    hvf_mw(&out, 0);
+    hvf_mw_str(&out, hostp, hl);
+    if (rec) {
+      hvf_mw_str(&out, rec->line, rec->llen);
+    } else {
+      hvf_mw(&out, 0xFFFFFFFFu);
+    }
+  }
+  pthread_mutex_unlock(&hvf_meta_mu);
+  free(g);
+  free(host.w);
+  Term t = hvf_words(e, out.w, out.n);
+  free(out.w);
+  return t;
+}
+
+// Hvf.meta_list(share, gdir) -> List<U32>: the table of the directory at
+// guest path gdir: [0] when none is loaded, else [1, plain, n, then n
+// times name and line (each a length and its bytes)].
+Term hvf_meta_list_run(Env e, Term* f, IoWork* w) {
+  u32   sh = (u32)f[0];
+  u64   n;
+  char* g  = io_cstr(e, f[1], &n);
+  HvfMw out = {0};
+  pthread_mutex_lock(&hvf_meta_mu);
+  HvfMetaDir* d = hvf_meta_dir(sh, g, n);
+  if (!d) {
+    hvf_mw(&out, 0);
+  } else {
+    hvf_mw(&out, 1);
+    hvf_mw(&out, d->plain);
+    hvf_mw(&out, d->n);
+    for (u32 i = 0; i < d->n; i++) {
+      hvf_mw_str(&out, d->recs[i].name, d->recs[i].nlen);
+      hvf_mw_str(&out, d->recs[i].line, d->recs[i].llen);
+    }
+  }
+  pthread_mutex_unlock(&hvf_meta_mu);
+  free(g);
+  Term t = hvf_words(e, out.w, out.n);
+  free(out.w);
+  return t;
 }
 
 // Walks rel's directories from the share's root, never through a symlink:
@@ -4303,7 +4546,10 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
   int      fd    = io && sh < (u32)hvf_nshares ? hvf_fdc_find(sh, rel, wr) : -1;
   int      dfd = -1, dfd2 = -1;
   const char *leaf = ".", *leaf2 = ".";
-  int      err   = sh >= (u32)hvf_nshares ? EINVAL : fd >= 0 ? 0 : hvf_fs_at(sh, rel, path, &dfd, &leaf);
+  // a read-only share changes nothing: write, create, mkdir, remove,
+  // rename, truncate, chmod, symlink, write from guest memory
+  int      ro    = sh < (u32)hvf_nshares && hvf_share_ro[sh] && op != 0 && op != 1 && op != 2 && op != 11 && op != 12 && op != 13;
+  int      err   = sh >= (u32)hvf_nshares ? EINVAL : ro ? EROFS : fd >= 0 ? 0 : hvf_fs_at(sh, rel, path, &dfd, &leaf);
   if (!err && flush) {
     hvf_fdc_flush(sh);
   }
@@ -5183,6 +5429,45 @@ Term hvf_set_mtime_run(Env e, Term* f, IoWork* w) {
   char*           path  = io_cstr(e, f[0], &n);
   struct timespec ts[2] = {{0, UTIME_OMIT}, {(time_t)hvf_u64(f[1], f[2]), 0}};
   int             err   = utimensat(AT_FDCWD, path, ts, AT_SYMLINK_NOFOLLOW) != 0 ? errno : 0;
+  free(path);
+  return (Term)(u32)err;
+}
+
+// Hvf.fsync(path, dir) -> U32: writes path's data and metadata to the disk
+// (macOS: F_FULLFSYNC, past the drive's cache), a directory when dir is 1
+// (its entries: a rename into it). Never through a symlink. 0, or an errno.
+Term hvf_fsync_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* path = io_cstr(e, f[0], &n);
+  int   fd   = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | ((u32)f[1] ? O_DIRECTORY : 0));
+  int   err  = fd < 0 ? errno : 0;
+  if (fd >= 0) {
+#ifdef __APPLE__
+    if (fcntl(fd, F_FULLFSYNC) != 0 && fsync(fd) != 0) {
+      err = errno;
+    }
+#else
+    if (fsync(fd) != 0) {
+      err = errno;
+    }
+#endif
+    close(fd);
+  }
+  free(path);
+  return (Term)(u32)err;
+}
+
+// Hvf.chmod(path, mode) -> U32: sets path's permission bits (mode & 07777),
+// never through a symlink (the file is opened O_NOFOLLOW, then fchmod).
+// 0, or an errno.
+Term hvf_chmod_run(Env e, Term* f, IoWork* w) {
+  u64   n;
+  char* path = io_cstr(e, f[0], &n);
+  int   fd   = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+  int   err  = fd < 0 ? errno : fchmod(fd, (mode_t)((u32)f[1] & 07777)) != 0 ? errno : 0;
+  if (fd >= 0) {
+    close(fd);
+  }
   free(path);
   return (Term)(u32)err;
 }
@@ -6916,6 +7201,12 @@ static void __attribute__((constructor)) hvf_use(void) {
 #ifdef CID(Hvf.sock_remove)
   io_eff(CID(Hvf.sock_remove), hvf_sock_remove_run);
 #endif
+#ifdef CID(Hvf.fsync)
+  io_eff(CID(Hvf.fsync), hvf_fsync_run);
+#endif
+#ifdef CID(Hvf.chmod)
+  io_eff(CID(Hvf.chmod), hvf_chmod_run);
+#endif
 #ifdef CID(Hvf.path_facts)
   io_eff(CID(Hvf.path_facts), hvf_path_facts_run);
 #endif
@@ -6978,6 +7269,18 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.console_reopen)
   io_eff(CID(Hvf.console_reopen), hvf_console_reopen_run);
+#endif
+#ifdef CID(Hvf.meta_load)
+  io_eff(CID(Hvf.meta_load), hvf_meta_load_run);
+#endif
+#ifdef CID(Hvf.meta_resolve)
+  io_eff(CID(Hvf.meta_resolve), hvf_meta_resolve_run);
+#endif
+#ifdef CID(Hvf.meta_list)
+  io_eff(CID(Hvf.meta_list), hvf_meta_list_run);
+#endif
+#ifdef CID(Hvf.share_ro)
+  io_eff(CID(Hvf.share_ro), hvf_share_ro_run);
 #endif
 #ifdef CID(Hvf.share_quota)
   io_eff(CID(Hvf.share_quota), hvf_share_quota_run);

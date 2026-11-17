@@ -87,3 +87,9 @@ def L.hostfiles.kind_symlink():
 
 def L.hostfiles.kind_fifo():
   {==}
+
+def L.hostfiles.is_link():
+  {==}
+
+def L.hostfiles.is_not_link():
+  {==}

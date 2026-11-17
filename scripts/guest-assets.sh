@@ -19,11 +19,11 @@ fi
 # Drivers this kernel builds as modules: virtio-rng, the 9p and vsock stacks,
 # virtio-input.
 kver=6.8.0-147-generic
-if [ ! -f out/guest/modules/9p.ko ] || [ ! -f out/guest/modules/vsock.ko ] || [ ! -f out/guest/modules/virtio_input.ko ]; then
+if [ ! -f out/guest/modules/9p.ko ] || [ ! -f out/guest/modules/vsock.ko ] || [ ! -f out/guest/modules/virtio_input.ko ] || [ ! -f out/guest/modules/overlay.ko ]; then
   mkdir -p out/guest/modules out/guest/deb
   curl -fsSL -o out/guest/modules.deb "http://ports.ubuntu.com/ubuntu-ports/pool/main/l/linux/linux-modules-${kver%-generic}-generic_${kver%-generic}.147_arm64.deb"
   (cd out/guest/deb && ar x ../modules.deb && tar -xf data.tar ./lib/modules)
-  for m in drivers/char/hw_random/virtio-rng fs/netfs/netfs net/9p/9pnet net/9p/9pnet_virtio fs/9p/9p net/vmw_vsock/vsock net/vmw_vsock/vmw_vsock_virtio_transport_common net/vmw_vsock/vmw_vsock_virtio_transport drivers/virtio/virtio_input; do
+  for m in drivers/char/hw_random/virtio-rng fs/netfs/netfs net/9p/9pnet net/9p/9pnet_virtio fs/9p/9p net/vmw_vsock/vsock net/vmw_vsock/vmw_vsock_virtio_transport_common net/vmw_vsock/vmw_vsock_virtio_transport drivers/virtio/virtio_input fs/overlayfs/overlay; do
     zstd -dqf "out/guest/deb/lib/modules/$kver/kernel/$m.ko.zst" -o "out/guest/modules/$(basename $m).ko"
   done
   rm -rf out/guest/deb out/guest/modules.deb

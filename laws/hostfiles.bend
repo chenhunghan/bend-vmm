@@ -104,3 +104,10 @@ law hostfiles.kind_symlink:
 
 law hostfiles.kind_fifo:
   {F.Files.kind(1, 4516) == 4 : U32}
+
+# Proposed: a path's facts name a symlink by kind 3 (Fs.no_symlinks).
+law hostfiles.is_link:
+  {F.Files.is_link(F.Files.facts([1, 41453, 0, 9, 0, 0])) == True{} : Bool}
+
+law hostfiles.is_not_link:
+  {F.Files.is_link(F.Files.facts([1, 16877, 0, 64, 0, 0])) == False{} : Bool}

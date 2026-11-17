@@ -81,9 +81,14 @@ def Opts.display(o: Opts) -> String:
 def Opts.num(s: String, d: U32) -> U32:
   Maybe.default(&2, U32, U32.read(s), d)
 
+# --share is repeatable: Opts.share keeps every value, one a line
+# (src/vmm/cli.bend, Cli.shares).
+def Opts.more(+was: String, +v: String) -> String:
+  Bool.pick(String, String.is_empty(was), v, was ++ "\n" ++ v)
+
 def Opts.set(+flag: String, +v: String, o: Opts) -> Opts:
   match o:
-    case Opts{k, i, p, c, +m, +n, d, sh, rs, ct, vk, dp, fw, nv, +fd, ln}:
+    case Opts{k, i, p, c, +m, +n, d, +sh, rs, ct, vk, dp, fw, nv, +fd, ln}:
       Opts{
         Bool.pick(String, String.eq(flag, "--kernel"), v, k),
         Bool.pick(String, String.eq(flag, "--initrd"), v, i),
@@ -92,7 +97,7 @@ def Opts.set(+flag: String, +v: String, o: Opts) -> Opts:
         Bool.pick(U32, String.eq(flag, "--mem"), Opts.num(v, m), m),
         Bool.pick(U32, String.eq(flag, "--cpus"), Opts.num(v, n), n),
         Bool.pick(String, String.eq(flag, "--disk"), v, d),
-        Bool.pick(String, String.eq(flag, "--share"), v, sh),
+        Bool.pick(String, String.eq(flag, "--share"), Opts.more(sh, v), sh),
         Bool.pick(String, String.eq(flag, "--restore"), v, rs),
         Bool.pick(String, String.eq(flag, "--control"), v, ct),
         Bool.pick(String, String.eq(flag, "--vsock"), v, vk),

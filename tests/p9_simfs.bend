@@ -57,6 +57,8 @@ def show_res(r: V.FsResult) -> String:
       "link " ++ t
     case V.FsStatfsOk{bs, b, bf, ba, f, ff}:
       "statfs " ++ U32.show(bs) ++ " " ++ show_u64(b) ++ " " ++ show_u64(ff)
+    case V.FsGotMeta{V.FsAttr{mode, uid, gid, nlink, size, ino, blocks, at, mt, ct}, ma, mi, ns}:
+      "meta " ++ U32.show(mode) ++ " " ++ U32.show(ma) ++ "," ++ U32.show(mi)
 
 # Runs ops in order on share sh, answers their text forms joined by "; ".
 def ops(xs: +List<V.FsOp>, -R: Type, +sh: U32, acc: String) -> V.Op<R, String>:

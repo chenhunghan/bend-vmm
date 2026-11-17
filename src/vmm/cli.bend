@@ -268,6 +268,161 @@ def Cli.share_ok(m: Maybe<&2, ShareSpec>) -> Bool:
     case Some{x}:
       True{}
 
+# --share DIR[,quota=SIZE][,tag=NAME][,ro][,meta], repeatable: each share
+# is its own virtio-9p device, mounted by its tag (mount -t 9p -o
+# trans=virtio TAG /mnt); a share given no tag is "share", the next
+# "share1", and so on. ro makes it read-only: the host refuses every change
+# (src/fs/readonly.bend). meta presents Linux metadata from each
+# directory's .bend-meta (src/fs/meta.bend), and is read-only too. Each
+# option at most once, in any order.
+type ShareOpt is Data:
+  ShareOpt{dir: String, quota: U.U64, tag: String, ro: Bool, meta: Bool}
+
+# The options so far and the ones seen (1 quota, 2 tag, 4 ro, 8 meta).
+type ShareAcc is Data:
+  ShareAcc{opt: ShareOpt, seen: U32}
+
+# A tag: 1 to 31 bytes of letters, digits, "-", "_" and ".".
+def Cli.tag_char(+c: U32) -> Bool:
+  (U32.is_ge(c, 48) && U32.is_le(c, 57)) || (U32.is_ge(c, 65) && U32.is_le(c, 90)) || (U32.is_ge(c, 97) && U32.is_le(c, 122)) || U32.is_eq(c, 45) || U32.is_eq(c, 95) || U32.is_eq(c, 46)
+
+def Cli.tag_chars(cs: String) -> Bool:
+  match cs:
+    case SNil{}:
+      True{}
+    case SCon{c, rest}:
+      Cli.tag_char(Char.to_u32(c)) && Cli.tag_chars(rest)
+
+def Cli.tag_ok(+t: String) -> Bool:
+  +n : U32 = U32.from_nat(String.length(t))
+  U32.is_ge(n, 1) && U32.is_le(n, 31) && Cli.tag_chars(t)
+
+def Cli.share_acc.set(+bit: U32, +seen: U32, ok: Bool, +next: ShareOpt) -> Maybe<&2, ShareAcc>:
+  Bool.pick(Maybe<&2, ShareAcc>, ok && U32.is_zero((seen .&. bit : U32)), Some{ShareAcc{next, (seen .|. bit : U32)}}, None{})
+
+def Cli.share_acc.quota(+seen: U32, +d: String, m: Maybe<&2, U.U64>, +t: String, +r: Bool, +mt: Bool) -> Maybe<&2, ShareAcc>:
+  match m:
+    case None{}:
+      None{}
+    case Some{q}:
+      Cli.share_acc.set(1, seen, True{}, ShareOpt{d, q, t, r, mt})
+
+def Cli.share_acc.step(a: Maybe<&2, ShareAcc>, +o: String) -> Maybe<&2, ShareAcc>:
+  match a:
+    case None{}:
+      None{}
+    case Some{ShareAcc{ShareOpt{+d, +q, +t, +r, +mt}, +seen}}:
+      Bool.pick(Maybe<&2, ShareAcc>, String.eq(o, "ro"), Cli.share_acc.set(4, seen, True{}, ShareOpt{d, q, t, True{}, mt}),
+      Bool.pick(Maybe<&2, ShareAcc>, String.eq(o, "meta"), Cli.share_acc.set(8, seen, True{}, ShareOpt{d, q, t, r, True{}}),
+      Bool.pick(Maybe<&2, ShareAcc>, String.starts_with(o, "tag="), Cli.share_acc.set(2, seen, Cli.tag_ok(String.drop(o, 4n)), ShareOpt{d, q, String.drop(o, 4n), r, mt}),
+      Bool.pick(Maybe<&2, ShareAcc>, String.starts_with(o, "quota="), Cli.share_acc.quota(seen, d, Cli.size(String.drop(o, 6n)), t, r, mt),
+        None{}))))
+
+def Cli.share_acc.all(os: List<&2, String>, a: Maybe<&2, ShareAcc>) -> Maybe<&2, ShareAcc>:
+  match os:
+    case Nil{}:
+      a
+    case Con{o, rest}:
+      Cli.share_acc.all(rest, Cli.share_acc.step(a, o))
+
+def Cli.share_opt.of(a: Maybe<&2, ShareAcc>) -> Maybe<&2, ShareOpt>:
+  match a:
+    case None{}:
+      None{}
+    case Some{ShareAcc{o, seen}}:
+      Some{o}
+
+def Cli.share_opt.parts(ps: List<&2, String>) -> Maybe<&2, ShareOpt>:
+  match ps:
+    case Nil{}:
+      None{}
+    case Con{+dir, rest}:
+      Bool.pick(Maybe<&2, ShareOpt>, String.is_empty(dir), None{},
+        Cli.share_opt.of(Cli.share_acc.all(rest, Some{ShareAcc{ShareOpt{dir, U.U64.zero(), "", False{}, False{}}, 0}})))
+
+# One --share value (tag "" when it names none).
+def Cli.share_opt(+spec: String) -> Maybe<&2, ShareOpt>:
+  Bool.pick(Maybe<&2, ShareOpt>, U32.is_eq(U32.from_nat(List.length(&2, String, String.split(spec, '\n'))), 1), Cli.share_opt.parts(String.split(spec, ',')), None{})
+
+def Cli.share_opt_ok(m: Maybe<&2, ShareOpt>) -> Bool:
+  match m:
+    case None{}:
+      False{}
+    case Some{x}:
+      True{}
+
+# Opts keeps every --share value, one a line (src/vmm/opts.bend).
+def Cli.nonempty(ls: List<&2, String>) -> List<&2, String>:
+  match ls:
+    case Nil{}:
+      []
+    case Con{+l, rest}:
+      List.append(&2, String, Bool.pick(List<&2, String>, String.is_empty(l), [], [l]), Cli.nonempty(rest))
+
+def Cli.share_lines(+all: String) -> List<&2, String>:
+  Cli.nonempty(String.split(all, '\n'))
+
+def Cli.share_tag(+given: String, +i: U32) -> String:
+  Bool.pick(String, Bool.not(String.is_empty(given)), given, Bool.pick(String, U32.is_zero(i), "share", "share" ++ U32.show(i)))
+
+def Cli.share_named(m: Maybe<&2, ShareOpt>, +i: U32) -> Maybe<&2, ShareOpt>:
+  match m:
+    case None{}:
+      None{}
+    case Some{ShareOpt{d, q, t, +r, +mt}}:
+      Some{ShareOpt{d, q, Cli.share_tag(t, i), r || mt, mt}}
+
+def Cli.shares.one(m: Maybe<&2, ShareOpt>, rest: List<&2, ShareOpt>) -> List<&2, ShareOpt>:
+  match m:
+    case None{}:
+      rest
+    case Some{o}:
+      Con{o, rest}
+
+def Cli.shares.go(ls: List<&2, String>, +i: U32) -> List<&2, ShareOpt>:
+  match ls:
+    case Nil{}:
+      []
+    case Con{l, rest}:
+      Cli.shares.one(Cli.share_named(Cli.share_opt(l), i), Cli.shares.go(rest, (i + 1 : U32)))
+
+# Every share, its tag given or made, in the order given.
+def Cli.shares(+all: String) -> List<&2, ShareOpt>:
+  Cli.shares.go(Cli.share_lines(all), 0)
+
+def Cli.share_tag_of(o: ShareOpt) -> String:
+  match o:
+    case ShareOpt{d, q, t, r, mt}:
+      t
+
+def Cli.tag_in(+t: String, ts: List<&2, String>) -> Bool:
+  match ts:
+    case Nil{}:
+      False{}
+    case Con{x, rest}:
+      String.eq(x, t) || Cli.tag_in(t, rest)
+
+def Cli.tags_dup(ts: List<&2, String>) -> Bool:
+  match ts:
+    case Nil{}:
+      False{}
+    case Con{+t, +rest}:
+      Cli.tag_in(t, rest) || Cli.tags_dup(rest)
+
+def Cli.share_tags(os: List<&2, ShareOpt>) -> List<&2, String>:
+  match os:
+    case Nil{}:
+      []
+    case Con{o, rest}:
+      Con{Cli.share_tag_of(o), Cli.share_tags(rest)}
+
+# What is wrong with the shares as a whole ("" when nothing): at most 8, and
+# no two with one tag.
+def Cli.shares_why(+all: String) -> String:
+  +ts : List<&2, String> = Cli.share_tags(Cli.shares(all))
+  Bool.pick(String, U32.is_lt(8, U32.from_nat(List.length(&2, String, ts))), "at most 8 --share",
+  Bool.pick(String, Cli.tags_dup(ts), "two --share with one tag", ""))
+
 # --console-log PATH,max=SIZE[,keep=N]: the console's file, the size it
 # rotates at, and how many old ones it keeps (1 when not given; at most 99).
 type ConLog is Data:
@@ -434,21 +589,40 @@ def Cli.why(+flag: String, +v: String) -> String:
   Bool.pick(String, String.eq(flag, "--cpus") && Bool.not(Cli.within(U32.read(v), 1, 64)), "--cpus takes 1 to 64 (not " ++ v ++ ")",
   Bool.pick(String, String.eq(flag, "--display") && Bool.not(Cli.is_some(Cli.display(v))), "--display takes WxH or WxH,headless (not " ++ v ++ ")",
   Bool.pick(String, String.eq(flag, "--lan") && Bool.not(Cli.lan_ok(Cli.lan(v))), "--lan takes DIR,ip=A.B.C.D/N and/or mac=xx:xx:xx:xx:xx:xx (not " ++ v ++ ")",
-  Bool.pick(String, String.eq(flag, "--share") && Bool.not(Cli.share_ok(Cli.share(v))), "--share takes DIR or DIR,quota=SIZE (bytes, or K, M, G) (not " ++ v ++ ")",
+  Bool.pick(String, String.eq(flag, "--share") && Bool.not(Cli.share_opt_ok(Cli.share_opt(v))), "--share takes DIR or DIR,quota=SIZE (bytes, or K, M, G) (not " ++ v ++ ")",
   Bool.pick(String, String.eq(flag, "--console-log") && Bool.not(Cli.conlog_ok(Cli.conlog(v))), "--console-log takes PATH,max=SIZE[,keep=N] (N up to 99) (not " ++ v ++ ")",
   Bool.pick(String, String.eq(flag, "--forward") && Bool.not(Fwd.all_ok(Fwd.specs(v))), "--forward takes [ADDR:]HOSTPORT:GUESTPORT[,...] (ports 1 to 65535) (not " ++ v ++ ")",
   Bool.pick(String, String.eq(flag, "--balloon") && Bool.not(Cli.balloon_ok(v)), "--balloon takes off (or free-page-reporting, the default) (not " ++ v ++ ")",
   "")))))))))
 
-# The first thing wrong with the arguments (flag and value pairs), or "".
-def Cli.check(args: List<String>) -> String:
+# One walk over the flags: the first wrong one's message, and every --share
+# value, one a line (as src/vmm/opts.bend keeps them).
+type Checked is Data:
+  Checked{why: String, shares: String}
+
+def Cli.check.next(+flag: String, +v: String, c: Checked) -> Checked:
+  match c:
+    case Checked{w, +sh}:
+      +why = Cli.why(flag, v)
+      Checked{Bool.pick(String, String.is_empty(why), w, why), Bool.pick(String, String.eq(flag, "--share"), v ++ "\n" ++ sh, sh)}
+
+def Cli.check.go(args: List<String>) -> Checked:
   match args:
     case Nil{}:
-      ""
+      Checked{"", ""}
     case Con{+flag, rest}:
       match rest:
         case Nil{}:
-          Bool.pick(String, Cli.known(flag, Cli.flags()), flag ++ " needs a value", "unknown option " ++ flag)
+          Checked{Bool.pick(String, Cli.known(flag, Cli.flags()), flag ++ " needs a value", "unknown option " ++ flag), ""}
         case Con{+v, more}:
-          +why = Cli.why(flag, v)
-          Bool.pick(String, String.is_empty(why), Cli.check(more), why)
+          Cli.check.next(flag, v, Cli.check.go(more))
+
+def Cli.check.fin(c: Checked) -> String:
+  match c:
+    case Checked{+w, sh}:
+      Bool.pick(String, String.is_empty(w), Cli.shares_why(sh), w)
+
+# The first thing wrong with the arguments (flag and value pairs), or "";
+# then the shares as a whole (Cli.shares_why).
+def Cli.check(args: List<String>) -> String:
+  Cli.check.fin(Cli.check.go(args))
