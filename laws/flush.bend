@@ -73,7 +73,7 @@ law flush.facts_wire:
 law flush.facts_gone:
   {F.Flush.facts([]) == None{} : Maybe<&2, F.Facts>}
 
-# Proposed: the bound on what a send may leave queued (32 MiB per
+# The bound on what a send may leave queued (32 MiB per
 # connection, 96 MiB over all).
 law flush.over_hard_limit:
   {F.Flush.over(w(33554433), w(33554433), lim()) == True{} : Bool}
@@ -84,7 +84,7 @@ law flush.at_hard_limit:
 law flush.over_wall:
   {F.Flush.over(w(1000), w(100663297), lim()) == True{} : Bool}
 
-# Proposed: what a close does (at most 64 closes linger by default).
+# What a close does (at most 64 closes linger by default).
 law flush.close_now:
   {F.Flush.close(False{}, 64, lim()) == F.CNow{} : F.Close}
 

@@ -49,7 +49,7 @@ law cmds.for_restore:
 law cmds.conf_disk_options:
   {C.Conf.flags("web", "--disk a.img:nocache,b.img:ro") == ["--disk", "web/a.img:nocache,web/b.img:ro"] : List<&2, String>}
 
-# Proposed: bend-vmm sparsify takes images, or a VM folder's (--vm).
+# Bend-vmm sparsify takes images, or a VM folder's (--vm).
 law cmds.sparsify:
   {C.Sub.parse(["sparsify", "a.img", "b.img", "--vm", "web"]) == C.SubSparsify{"web", ["a.img", "b.img"]} : C.Sub}
 

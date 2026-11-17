@@ -13,7 +13,7 @@ law conlog.at_max:
 law conlog.never:
   {L.Log.rotate(U.U64{1, 0}, U.U64{0, 0}) == False{} : Bool}
 
-# Proposed: a rotation's renames, planned in Bend (the host only reopens the
+# A rotation's renames, planned in Bend (the host only reopens the
 # log): the numbered logs move up from the oldest kept, then PATH becomes
 # PATH.1; with keep 0, nothing moves.
 law conlog.moves_keep3:
@@ -25,7 +25,7 @@ law conlog.moves_keep1:
 law conlog.moves_keep0:
   {L.Log.moves("log", 0) == [] : List<L.Rename>}
 
-# Proposed: console output waits at most 1 ms, and past 16 MiB waiting it
+# Console output waits at most 1 ms, and past 16 MiB waiting it
 # is dropped.
 law conlog.out_batch:
   {L.Out.batch_us() == 1000 : U32}

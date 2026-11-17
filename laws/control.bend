@@ -54,7 +54,7 @@ law control.empty:
 law control.verb_case:
   {C.Ctl.parse("PAUSE") == C.CUnknown{} : C.Cmd}
 
-# Proposed: framing of what the host reads (review of a6fba53): an empty
+# Framing of what the host reads (review of a6fba53): an empty
 # line or a bare connect gets an answer and the service goes on; a line cut
 # short and a command missing its argument get their usage.
 
@@ -82,7 +82,7 @@ law control.screendump_no_path:
 law control.type_nothing:
   {C.Ctl.parse("type") == C.CBad{"usage: type TEXT"} : C.Cmd}
 
-# Proposed: status json, for programs (bend-vk8s).
+# Status json, for programs (bend-vk8s).
 
 law control.status_json:
   {C.Ctl.parse("status json") == C.CStatusJson{} : C.Cmd}
@@ -93,7 +93,7 @@ law control.status_json_running:
 law control.status_json_paused:
   {C.Ctl.status_json(True{}) == "{\"state\":\"paused\"}" : String}
 
-# Proposed: balloon MiB sets the balloon's target (0 to 1048576 MiB), in
+# Balloon MiB sets the balloon's target (0 to 1048576 MiB), in
 # 4 KiB pages; status json with a balloon reports it.
 law control.balloon:
   {C.Ctl.parse("balloon 512") == C.CBalloon{512} : C.Cmd}
@@ -107,16 +107,16 @@ law control.balloon_pages:
 law control.status_json_balloon:
   {C.Ctl.status_json_balloon(False{}, 262144, 131072) == "{\"state\":\"running\",\"balloon\":{\"target_mib\":1024,\"actual_mib\":512}}" : String}
 
-# Proposed: balloon auto hands the target back to the automatic balloon.
+# Balloon auto hands the target back to the automatic balloon.
 law control.balloon_auto:
   {C.Ctl.parse("balloon auto") == C.CBalloonAuto{} : C.Cmd}
 
-# Proposed: status json also says what of the balloon the host could not
+# Status json also says what of the balloon the host could not
 # release (kept_mib).
 law control.status_json_kept:
   {C.Ctl.status_json_kept(False{}, 262144, 131072, 2560) == "{\"state\":\"running\",\"balloon\":{\"target_mib\":1024,\"actual_mib\":512,\"kept_mib\":10}}" : String}
 
-# Proposed: status json also says what of guest RAM the host holds.
+# Status json also says what of guest RAM the host holds.
 law control.with_ram:
   {C.Ctl.with_ram("{\"state\":\"running\"}", 2048, 0) == "{\"state\":\"running\",\"ram\":{\"resident_mib\":2,\"compressed_mib\":0}}" : String}
 

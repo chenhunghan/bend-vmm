@@ -33,7 +33,7 @@ law addr.reply_from_host:
 law addr.reply_from_resolver:
   {A.Addr.to_guest(151587081, 151587081) == 167772675 : U32}
 
-# Proposed: the host's resolver is read again for the guest's DNS server
+# The host's resolver is read again for the guest's DNS server
 # only, and an address shows as a dotted quad.
 law addr.reread_dns:
   {A.Addr.reread(167772675) == True{} : Bool}

@@ -21,7 +21,7 @@ law access.busy:
 law access.opened:
   {A.Access.fallback(0) == False{} : Bool}
 
-# Proposed: how each use opens an image (Access.flags: 1 read only,
+# How each use opens an image (Access.flags: 1 read only,
 # 2 exclusive lock, 4 regular file only).
 law access.writer:
   {A.Access.flags(A.Access.use(False{})) == 2 : U32}
@@ -32,7 +32,7 @@ law access.reader:
 law access.backing:
   {A.Access.flags(A.Backing{}) == 5 : U32}
 
-# Proposed: a --disk entry's options as suffixes, in any order, each once.
+# A --disk entry's options as suffixes, in any order, each once.
 law access.spec_plain:
   {A.Access.spec("a.img") == A.Spec{"a.img", False{}, False{}} : A.Spec}
 

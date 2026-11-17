@@ -131,7 +131,7 @@ law snapfile.plan_of_sizes:
 law snapfile.plan_of_short:
   {S.Snapf.plan_of([1, 0, 1073741824, 0, 536870912, 0, 2, 0, 10, 0, 64, 2, 0, 100]) == None{} : Maybe<&2, +List<S.Piece>>}
 
-# Proposed: bounds at their limits are accepted, and a stray word in the
+# Bounds at their limits are accepted, and a stray word in the
 # host's sizes is refused (review of a6fba53).
 
 law snapfile.head_at_limits:
@@ -152,7 +152,7 @@ law snapfile.plan_of_stray_word:
 law snapfile.plan_of_none_cpus:
   {S.Snapf.plan_of([1, 0, 1073741824, 0, 536870912, 0, 2, 0, 10, 0, 64, 0]) == S.Snapf.plan(1, w(1073741824), w(536870912), w(2), w(10), w(64), []) : Maybe<&2, +List<S.Piece>>}
 
-# Proposed: a restore makes the header's machine, at a base this host
+# A restore makes the header's machine, at a base this host
 # uses, from whole MiB of RAM (review of a6fba53).
 
 law snapfile.agrees:
@@ -173,11 +173,11 @@ law snapfile.cpus_header:
 law snapfile.cpus_asked:
   {S.Snapf.cpus(layout(), 4) == 4 : U32}
 
-# Proposed: a snapshot is written next to its path, then renamed over it.
+# A snapshot is written next to its path, then renamed over it.
 law snapfile.tmp:
   {S.Snapf.tmp("out/vm.snap") == "out/vm.snap.bend-vmm-tmp" : String}
 
-# Proposed: the format version is the hypervisor's (Hypervisor.framework 1,
+# The format version is the hypervisor's (Hypervisor.framework 1,
 # KVM 2, any other none), and it heads the sizes a plan is made from.
 law snapfile.version_hvf:
   {S.Snapf.version(0) == 1 : U32}
@@ -191,7 +191,7 @@ law snapfile.version_other:
 law snapfile.sizes:
   {S.Snapf.sizes([1, 0, 1073741824]) == [2, 0, 1073741824] : List<&2, U32>}
 
-# Proposed: after a snapshot, RAM maps it (Snapf.rebase); a plan's RAM
+# After a snapshot, RAM maps it (Snapf.rebase); a plan's RAM
 # offset is the one its PRam piece names.
 law snapfile.rebase:
   {S.Snapf.rebase() == True{} : Bool}

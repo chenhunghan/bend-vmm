@@ -75,7 +75,7 @@ law wire.eth_parse:
 law wire.eth_short:
   {W.Eth.parse([1, 2, 3]) == None{} : Maybe<&2, W.Eth>}
 
-# Proposed: a host frame's tag carries its segment size; 1460 keeps the
+# A host frame's tag carries its segment size; 1460 keeps the
 # plain tag 256, and both are host frames.
 law wire.host_tag_1460:
   {W.Wire.host_frame_of(1460, 3, 0, 9, [1]) == [256, 3, 0, 9, 1] : +List<U32>}

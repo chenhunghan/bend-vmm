@@ -15,7 +15,7 @@ law fds.linux:
 law fds.none:
   {F.Fds.room(0) == 0 : U32}
 
-# Proposed: the soft descriptor limit set at startup (Fds.soft).
+# The soft descriptor limit set at startup (Fds.soft).
 # macOS (exact, top 1024): a soft limit of 256 or 10240 under an unlimited
 # hard limit becomes 1024; a hard limit of 512 caps it.
 law fds.soft_macos_up:
