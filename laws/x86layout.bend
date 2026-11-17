@@ -4,8 +4,6 @@ import ../src/x86/layout.bend as X
 
 # Spec for src/x86/layout.bend: the x86_64 guest's memory map and lines.
 
-# Proposed: (a new module; every law here is proposed)
-
 law x86layout.low_2g:
   {X.X86.low_size(U.U64{0, 2147483648}) == U.U64{0, 2147483648} : U.U64}
 

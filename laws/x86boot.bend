@@ -6,8 +6,6 @@ import ../src/x86/boot.bend as Bz
 # Spec for src/x86/boot.bend: a bzImage's setup header, its placement, the
 # memory map, the page tables and the boot registers.
 
-# Proposed: (a new module; every law here is proposed)
-
 # A setup header: setup_sects 27, version 2.15, XLF_KERNEL_64, pref_address
 # 16 MiB, init_size 48 MiB, initrd_addr_max 0x7FFF_FFFF, cmdline_size 2047,
 # the header ending at 0x26C.

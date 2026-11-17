@@ -4,8 +4,6 @@ import ../src/x86/acpi.bend as A
 # Spec for src/x86/acpi.bend: the tables' checksums and lengths, and the
 # AML they carry.
 
-# Proposed: (a new module; every law here is proposed)
-
 def len(bs: List<&2, U32>) -> Nat:
   List.length(&2, U32, bs)
 
