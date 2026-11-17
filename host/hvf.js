@@ -110,6 +110,8 @@ io_eff(CID(Hvf.snap_plans), () => 0);
 io_eff(CID(Hvf.set_prog), () => 0);
 io_eff(CID(Hvf.lan_open), hvf_unavailable);
 io_eff(CID(Hvf.lan_send), () => 0);
+io_eff(CID(Hvf.path_facts), hvf_unavailable);
+io_eff(CID(Hvf.set_mtime), hvf_unavailable);
 io_eff(CID(Hvf.lan_names), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.lan_recv), hvf_unavailable);
 io_eff(CID(Hvf.lan_to_ram), () => 0);

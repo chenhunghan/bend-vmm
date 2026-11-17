@@ -63,3 +63,27 @@ def L.hostfiles.lan_peers_alone():
 
 def L.hostfiles.lan_peers_none():
   {==}
+
+def L.hostfiles.prefixes_abs():
+  {==}
+
+def L.hostfiles.prefixes_rel():
+  {==}
+
+def L.hostfiles.prefixes_root():
+  {==}
+
+def L.hostfiles.facts():
+  {==}
+
+def L.hostfiles.facts_nothing():
+  {==}
+
+def L.hostfiles.kind_dir():
+  {==}
+
+def L.hostfiles.kind_symlink():
+  {==}
+
+def L.hostfiles.kind_fifo():
+  {==}

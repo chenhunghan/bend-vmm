@@ -356,7 +356,11 @@ its `--control` socket and answer a `Result` (nothing prints or exits):
 `V.Vmm.status` (running, paused or stopped, and the forwards), `pause`,
 `resume`, `stop`, `powerdown`, `ctl`, `create`, `snapshot`, `snapshots`,
 `snapshot_rm` and `prune`; the error tells no socket, not running and a
-timeout apart (host/api.bend). On macOS the program needs the Hypervisor.framework entitlement
+timeout apart (host/api.bend). `V.Fs` has the host file calls such a
+program needs, so it adds no C of its own: `ls`, `facts` (kind, size,
+mtime; never through a symlink), `rename`, `remove`, `rmdir`, `mkdir_p`,
+`set_mtime` and `now`; each answers 0 or an errno (host/files_smoke.bend
+uses them all). On macOS the program needs the Hypervisor.framework entitlement
 (`scripts/build.sh your.bend out/your` builds and signs it).
 
 ## Start time

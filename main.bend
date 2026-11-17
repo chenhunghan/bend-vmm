@@ -1,7 +1,10 @@
 import Base
 import ./host/main.bend as H
 import ./host/api.bend as A
+import ./host/hvf.bend as Hv
 import ./src/vmm/snapdir.bend as Sd
+import ./src/vmm/hostfiles.bend as Hf
+import ./src/lib/u64.bend as U
 
 # bend-vmm as a BendHub package (import bend-vmm@<version>/main.bend as V).
 # V.Vmm.run(prog, flags) runs the VMM inside another Bend program: prog is
@@ -61,3 +64,40 @@ def Vmm.prune(+vm: String, +keep: U32) -> IO(Result<&1, &1, A.Err, List<&2, Stri
 
 @unsafe def main() -> IO(Unit):
   H.main()
+
+# Files on the host, for the program that embeds the VMM. Paths are
+# taken as given (relative to the working directory), never through a
+# symlink at their end; each call answers 0 or an errno unless it says.
+
+# The names in a directory, but . and .. ([] when it cannot be read).
+def Fs.ls(+dir: String) -> IO(List<String>):
+  Hv.Hvf.ls(dir)
+
+# What path is: kind (0 nothing, 1 a directory, 2 a regular file, 3 a
+# symlink, 4 anything else), size in bytes, mtime in seconds since 1970.
+def Fs.facts(+path: String) -> IO(Hf.Facts):
+  A.Fs.facts(path)
+
+# Replaces a file or symlink at `to`.
+def Fs.rename(+from: String, +to: String) -> IO(U32):
+  Hv.Hvf.rename(from, to)
+
+# Removes a file (not a directory).
+def Fs.remove(+path: String) -> IO(U32):
+  Hv.Hvf.remove(path)
+
+# Removes an empty directory.
+def Fs.rmdir(+path: String) -> IO(U32):
+  Hv.Hvf.rmdir(path)
+
+# mkdir -p with mode for each directory it makes.
+def Fs.mkdir_p(+path: String, +mode: U32) -> IO(U32):
+  A.Fs.mkdir_p(path, mode)
+
+# Sets path's modification time (seconds since 1970); its access time stays.
+def Fs.set_mtime(+path: String, t: U.U64) -> IO(U32):
+  A.Fs.set_mtime(path, t)
+
+# The wall clock, in seconds since 1970.
+def Fs.now() -> IO(U.U64):
+  Hv.Host.now()
