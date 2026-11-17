@@ -52,3 +52,9 @@ def L.lan.forget_held():
 def L.lan.keep_bounded():
   {==}
 
+
+def L.lan.features_mtu():
+  {==}
+
+def L.lan.config_mtu():
+  {==}

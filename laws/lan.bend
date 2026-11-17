@@ -2,6 +2,7 @@ import Base
 import ../src/lib/bytes.bend as B
 import ../src/net/wire.bend as W
 import ../src/virtio/lan.bend as L
+import ../src/lib/u64.bend as U
 
 # Spec for src/virtio/lan.bend: where a guest's LAN frame goes, its DHCP
 # answer, and what waits for the guest.
@@ -85,3 +86,11 @@ law lan.forget_held:
 
 law lan.keep_bounded:
   {List.length(&2, L.LanRx, L.Lan.rx_of(L.Lan.keep(L.Lan{me(), ip(), 24, List.replicate(L.LanRx, 8n, L.Local{[1]})}, Some{[2]}))) == 8n : Nat}
+
+# Proposed: the LAN's MTU is 2034 (a 2048-byte frame, a macOS Unix
+# datagram's default limit), offered with VIRTIO_NET_F_MTU.
+law lan.features_mtu:
+  {L.Lan.features() == U.U64{1, 40} : U.U64}
+
+law lan.config_mtu:
+  {L.Lan.config([2, 0, 0, 0, 0, 1]) == [2, 0, 0, 0, 0, 1, 0, 0, 1, 0, 242, 7] : List<&2, U32>}
