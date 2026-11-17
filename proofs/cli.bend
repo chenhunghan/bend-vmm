@@ -163,3 +163,33 @@ def L.cli.balloon_values():
 
 def L.cli.balloon_auto():
   {==}
+
+def L.cli.share_opt_tag_ro():
+  {==}
+
+def L.cli.share_opt_quota():
+  {==}
+
+def L.cli.share_opt_twice():
+  {==}
+
+def L.cli.share_opt_bad_tag():
+  {==}
+
+def L.cli.share_opt_empty_tag():
+  {==}
+
+def L.cli.shares_tags():
+  {==}
+
+def L.cli.shares_two():
+  {==}
+
+def L.cli.shares_dup_tag():
+  {==}
+
+def L.cli.shares_nine():
+  {==}
+
+def L.cli.share_opt_meta():
+  {==}

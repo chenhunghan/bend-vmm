@@ -102,6 +102,14 @@ def Hvf.ctl_call(path: String, line: String, ms: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.fsync(path: String, dir: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.chmod(path: String, mode: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.path_facts(path: String) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
@@ -363,6 +371,22 @@ def Hvf.console_size() -> IO(+List<U32>):
   import "./hvf.js"
 
 def Hvf.console_reopen() -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.meta_load(share: U32, gdir: String, words: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.meta_resolve(share: U32, gpath: String) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.meta_list(share: U32, gdir: String) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.share_ro(share: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 

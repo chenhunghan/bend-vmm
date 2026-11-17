@@ -89,7 +89,7 @@ Options:
 | `--mem MiB` | guest RAM (default 512) |
 | `--cpus N` | vCPUs (default 1) |
 | `--disk A[,B:ro…]` | disk images (raw, or qcow2 by its header) as virtio-blk (`/dev/vda`, `/dev/vdb`, …); `:ro` attaches one read-only, and so is an image you may not write (said on stderr); `:nocache` (with `:ro` or alone, any order) keeps the image's blocks out of the host's page cache, since the guest caches them already (macOS `F_NOCACHE`; Linux `O_DIRECT` for the guest's aligned transfers) |
-| `--share DIR[,quota=SIZE]` | a host directory over virtio-9p (`mount -t 9p -o trans=virtio,version=9p2000.L share /mnt`); with a quota (bytes, or K, M, G) the guest's writes past it fail with ENOSPC (its files' sizes are counted, approximately) |
+| `--share DIR[,quota=SIZE][,tag=NAME][,ro][,meta]` | a host directory over virtio-9p (`mount -t 9p -o trans=virtio,version=9p2000.L share /mnt`); repeatable (up to 8), each share its own device mounted by its tag (default `share`, then `share1`, ...); with a quota (bytes, or K, M, G) the guest's writes past it fail with ENOSPC (its files' sizes are counted, approximately); `ro` makes it read-only: every write, create, mkdir, remove, rename, chmod, truncate and symlink fails with EROFS whatever the guest does; `meta` (read-only too) presents Linux metadata from each directory's `.bend-meta` (owner, mode with setuid/setgid/sticky, file type including devices and FIFOs, device numbers, nanosecond mtime, inode and link count, extended attributes such as `security.capability` and `trusted.overlay.opaque`, and a host name apart from the guest's), so container image layers kept on a macOS volume work as overlayfs lower directories; the format is in src/fs/meta.bend |
 | `--console-log PATH,max=SIZE[,keep=N]` | the guest's console goes to PATH instead of stdout and rotates at about SIZE (PATH.1 … PATH.N, N 1 by default), so a guest cannot fill the host's disk with it |
 | `--payload FILE` | a bare-metal binary entered at the start of RAM |
 | `--vsock PATH` | virtio-vsock (guest CID 3) bridged to Unix sockets under PATH |
@@ -359,7 +359,8 @@ its `--control` socket and answer a `Result` (nothing prints or exits):
 timeout apart (host/api.bend). `V.Fs` has the host file calls such a
 program needs, so it adds no C of its own: `ls`, `facts` (kind, size,
 mtime; never through a symlink), `rename`, `remove`, `rmdir`, `mkdir_p`,
-`set_mtime` and `now`; each answers 0 or an errno (host/files_smoke.bend
+`set_mtime`, `fsync`, `fsync_dir`, `chmod`, `no_symlinks` and `now`;
+each answers 0 or an errno (host/files_smoke.bend
 uses them all). On macOS the program needs the Hypervisor.framework entitlement
 (`scripts/build.sh your.bend out/your` builds and signs it).
 

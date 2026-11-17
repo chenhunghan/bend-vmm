@@ -50,6 +50,8 @@ import ./proofs/loggate.bend as Proofs_loggate
 import ./proofs/fds.bend as Proofs_fds
 import ./proofs/clients.bend as Proofs_clients
 import ./proofs/contain.bend as Proofs_contain
+import ./proofs/readonly.bend as Proofs_readonly
+import ./proofs/meta.bend as Proofs_meta
 import ./proofs/listing.bend as Proofs_listing
 import ./proofs/kvmexit.bend as Proofs_kvmexit
 import ./proofs/gicplan.bend as Proofs_gicplan

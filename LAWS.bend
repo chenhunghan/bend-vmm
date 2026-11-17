@@ -49,6 +49,8 @@ import ./laws/loggate.bend as Laws_loggate
 import ./laws/fds.bend as Laws_fds
 import ./laws/clients.bend as Laws_clients
 import ./laws/contain.bend as Laws_contain
+import ./laws/readonly.bend as Laws_readonly
+import ./laws/meta.bend as Laws_meta
 import ./laws/listing.bend as Laws_listing
 import ./laws/kvmexit.bend as Laws_kvmexit
 import ./laws/gicplan.bend as Laws_gicplan

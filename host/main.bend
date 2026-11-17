@@ -14,6 +14,8 @@ import ../src/dev/conlog.bend as Cl
 import ../src/vmm/opts.bend as Op
 import ../src/disk/access.bend as Acc
 import ../src/vmm/hostfiles.bend as Hf
+import ../src/fs/readonly.bend as Ro
+import ../src/fs/meta.bend as Mt
 import ../src/vmm/disksnap.bend as Ds
 import ../src/virtio/balloon.bend as Bl
 import ../src/virtio/balauto.bend as Au
@@ -1510,25 +1512,44 @@ def path_under(+dir: String, +name: String) -> String:
     case False{}:
       devices.disks(String.split(disk, ','))
 
-# --share DIR[,quota=SIZE] (src/vmm/cli.bend; Cli.check refused a
-# malformed one): writes past the quota fail (src/fs/quota.bend).
-def devices.share.go(spec: Maybe<&2, Cli.ShareSpec>) -> IO(+List<D.DevKind>):
-  match spec:
-    case None{}:
-      IO.pure(+List<D.DevKind>, [])
-    case Some{Cli.ShareSpec{dir, U.U64{qh, ql}}}:
-      do IO<+List<D.DevKind>>:
-        +sh : U32 <- H.Hvf.share_open(dir)
-        die_if(U32.is_eq(sh, err()), "cannot open the shared directory")
-        _ : U32 <- H.Hvf.share_quota(sh, qh, ql)
-        return [D.P9Kind{sh, "share"}]
+# --share DIR[,quota=SIZE][,tag=NAME][,ro], repeatable (src/vmm/cli.bend;
+# Cli.check refused a malformed one): each share its own 9p device, by
+# its tag; writes past a quota fail (src/fs/quota.bend); a read-only
+# share's number carries Ro.bit() (src/fs/readonly.bend), and the host
+# refuses its changes too.
+def devices.share.ro(ro: Bool, +sh: U32) -> IO(U32):
+  match ro:
+    case True{}:
+      H.Hvf.share_ro(sh)
+    case False{}:
+      IO.pure(U32, 0)
 
-def devices.share(none: Bool, spec: String) -> IO(+List<D.DevKind>):
+def devices.share.one(o: Cli.ShareOpt) -> IO(D.DevKind):
+  match o:
+    case Cli.ShareOpt{+dir, U.U64{qh, ql}, tag, +ro, +meta}:
+      do IO<D.DevKind>:
+        +sh : U32 <- H.Hvf.share_open(dir)
+        die_if(U32.is_eq(sh, err()), "cannot open the shared directory " ++ dir)
+        _ : U32 <- H.Hvf.share_quota(sh, qh, ql)
+        _ : U32 <- devices.share.ro(ro, sh)
+        return D.P9Kind{(Ro.Ro.mark(sh, ro) .|. Bool.pick(U32, meta, Mt.Meta.bit_meta(), 0) : U32), tag}
+
+def devices.share.go(os: List<&2, Cli.ShareOpt>) -> IO(+List<D.DevKind>):
+  match os:
+    case Nil{}:
+      IO.pure(+List<D.DevKind>, [])
+    case Con{o, rest}:
+      do IO<+List<D.DevKind>>:
+        k : D.DevKind <- devices.share.one(o)
+        ks : +List<D.DevKind> <- devices.share.go(rest)
+        return Con{k, ks}
+
+def devices.share(none: Bool, +spec: String) -> IO(+List<D.DevKind>):
   match none:
     case True{}:
       IO.pure(+List<D.DevKind>, [])
     case False{}:
-      devices.share.go(Cli.Cli.share(spec))
+      devices.share.go(Cli.Cli.shares(spec))
 
 # --vsock PATH: a virtio-vsock device (guest CID 3) whose host side is
 # Unix sockets under PATH.

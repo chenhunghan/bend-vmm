@@ -7,6 +7,8 @@ import ../src/fs/contain.bend as Ct
 import ../src/fs/listing.bend as Ls
 import ../src/fs/entry.bend as En
 import ../src/host/fdcache.bend as Fc
+import ../src/fs/readonly.bend as Ro
+import ../src/fs/meta.bend as Mt
 
 # Shared directories: V.FsOp on the host (host/hvf.c, "Shared directories").
 
@@ -133,6 +135,8 @@ def Host.fs.do(sh: U32, op: V.FsOp) -> IO(V.FsResult):
       Fs.call(sh, 13, p, "", off, 0, H.Host.iovs(iovs))
     case V.FsWriteRam{p, off, iovs}:
       Fs.call(sh, 14, p, "", off, 0, H.Host.iovs(iovs))
+    case V.FsXattr{p, n}:
+      IO.pure(V.FsResult, V.FsErr{45})  # EOPNOTSUPP (macOS 45; Linux 95): a plain share serves no extended attributes
 
 # A write past the share's quota (src/fs/quota.bend) fails with ENOSPC
 # before it happens.
@@ -152,6 +156,178 @@ def Host.fs.grows(none: Bool, +growth: U.U64, +sh: U32, op: V.FsOp) -> IO(V.FsRe
         +ws : +List<U32> <- H.Hvf.share_usage(sh)
         Host.fs.quota(Qt.Quota.allows(Fs.w64(ws, 0n), growth, Fs.w64(ws, 2n)), sh, op)
 
-def Host.fs(+sh: U32, +op: V.FsOp) -> IO(V.FsResult):
+def Host.fs.rw(+sh: U32, +op: V.FsOp) -> IO(V.FsResult):
   +g = Qt.Quota.growth(op)
   Host.fs.grows(U.U64.is_zero(g), g, sh, op)
+
+# A share marked meta (src/fs/meta.bend): every guest path goes to its host
+# path through the directories' records, loaded from their .bend-meta the
+# first time (Hvf.meta_load), and attributes, listings and extended
+# attributes come from the records. It is read-only: Host.fs refused every
+# change before this.
+
+# A sidecar's text: read in 64 KiB pieces until one comes short.
+def Host.meta.bytes(r: V.FsResult) -> +List<U32>:
+  match r:
+    case V.FsBytes{bs}:
+      bs
+    case _:
+      []
+
+def Host.meta.read(fuel: Nat, +idx: U32, +path: String, +off: U.U64, +acc: +List<U32>) -> IO(+List<U32>):
+  match fuel:
+    case 0n:
+      IO.pure(+List<U32>, acc)
+    case 1n+f:
+      do IO<+List<U32>>:
+        r : V.FsResult <- Fs.call(idx, 2, path, "", off, 65536, [])
+        +bs : +List<U32> = Host.meta.bytes(r)
+        +n : U32 = U32.from_nat(List.length(&2, U32, bs))
+        Bool.pick(IO(+List<U32>), U32.is_lt(n, 65536), IO.pure(+List<U32>, List.append(&2, U32, acc, bs)),
+          Host.meta.read(f, idx, path, U.U64.add_u32(off, n), List.append(&2, U32, acc, bs)))
+
+# Loads the table of the guest directory gdir, whose host path is hostdir.
+def Host.meta.load(+sh: U32, +gdir: String, +hostdir: String) -> IO(U32):
+  do IO<U32>:
+    bs : +List<U32> <- Host.meta.read(256n, Ro.Ro.index(sh), Mt.Meta.join(hostdir, Mt.Meta.file()), U.U64.zero(), [])
+    H.Hvf.meta_load(sh, gdir, Mt.Meta.table(Mt.Meta.chars(bs)))
+
+# Loads the table a resolve asked for; True when it did (ask again).
+def Host.meta.load_need(+sh: U32, +p: String, r: Mt.Found) -> IO(Bool):
+  match r:
+    case Mt.NeedTable{k, hostdir}:
+      do IO<Bool>:
+        _ : U32 <- Host.meta.load(sh, Mt.Meta.prefix(p, k), hostdir)
+        return True{}
+    case _:
+      IO.pure(Bool, False{})
+
+# A guest path's host path and record line (Missing: no such name); each
+# directory along it loaded first (fuel: the path's depth, and some).
+def Host.meta.resolve(fuel: Nat, +sh: U32, +p: String) -> IO(Mt.Found):
+  match fuel:
+    case 0n:
+      IO.pure(Mt.Found, Mt.Missing{})
+    case 1n+f:
+      do IO<Mt.Found>:
+        +ws : +List<U32> <- H.Hvf.meta_resolve(sh, p)
+        +r : Mt.Found = Mt.Meta.found(ws)
+        +again : Bool <- Host.meta.load_need(sh, p, r)
+        Bool.pick(IO(Mt.Found), again, Host.meta.resolve(f, sh, p), IO.pure(Mt.Found, r))
+
+def Host.meta.depth(+p: String) -> Nat:
+  Nat.add(4n, List.length(&2, String, String.split(p, '/')))
+
+def Host.meta.stat.rec(m: Maybe<&2, Mt.Rec>, a: V.FsAttr, +p: String) -> V.FsResult:
+  match m:
+    case None{}:
+      V.FsGotAttr{a}
+    case Some{rec}:
+      Mt.Meta.attr(rec, a, p)
+
+
+# The attributes of what a resolved path names.
+def Host.meta.stat.got(r: V.FsResult, line: Maybe<&2, String>, +p: String) -> V.FsResult:
+  match r:
+    case V.FsGotAttr{a}:
+      match line:
+        case None{}:
+          V.FsGotAttr{a}
+        case Some{l}:
+          Host.meta.stat.rec(Mt.Meta.line(l), a, p)
+    case _:
+      r
+
+def Host.meta.xattr.val(m: Maybe<&2, +List<U32>>) -> V.FsResult:
+  match m:
+    case None{}:
+      V.FsErr{61}
+    case Some{v}:
+      V.FsBytes{v}
+
+def Host.meta.xattr.rec(m: Maybe<&2, Mt.Rec>, +name: String) -> V.FsResult:
+  match m:
+    case None{}:
+      V.FsErr{61}
+    case Some{rec}:
+      Host.meta.xattr.val(Mt.Meta.xattr(rec, name))
+
+
+def Host.meta.xattr(line: Maybe<&2, String>, +name: String) -> V.FsResult:
+  match line:
+    case None{}:
+      V.FsErr{61}
+    case Some{l}:
+      Host.meta.xattr.rec(Mt.Meta.line(l), name)
+
+
+# A directory's listing: its records, or the host's when it has none.
+def Host.meta.list.got(es: Maybe<&2, List<&2, V.FsEntry>>, +idx: U32, +host: String, +from: U32, +max: U32) -> IO(V.FsResult):
+  match es:
+    case None{}:
+      Host.fs.do(idx, V.FsList{host, from, max})
+    case Some{l}:
+      IO.pure(V.FsResult, Fs.paged(V.FsEntries{l}, from, max))
+
+def Host.meta.list(+sh: U32, +p: String, +host: String, +from: U32, +max: U32) -> IO(V.FsResult):
+  do IO<V.FsResult>:
+    _ : Mt.Found <- Host.meta.resolve(Host.meta.depth(p), sh, Mt.Meta.join(p, "."))
+    +ws : +List<U32> <- H.Hvf.meta_list(sh, p)
+    Host.meta.list.got(Mt.Meta.entries(p, ws), Ro.Ro.index(sh), host, from, max)
+
+def Host.meta.on(+idx: U32, +sh: U32, op: V.FsOp, +host: String, line: Maybe<&2, String>) -> IO(V.FsResult):
+  match op:
+    case V.FsStat{p}:
+      IO.bind(V.FsResult, V.FsResult, Host.fs.do(idx, V.FsStat{host}), a => IO.pure(V.FsResult, Host.meta.stat.got(a, line, p)))
+    case V.FsList{p, from, max}:
+      Host.meta.list(sh, p, host, from, max)
+    case V.FsRead{p, off, len}:
+      Host.fs.do(idx, V.FsRead{host, off, len})
+    case V.FsReadRam{p, off, iovs}:
+      Host.fs.do(idx, V.FsReadRam{host, off, iovs})
+    case V.FsReadlink{p}:
+      Host.fs.do(idx, V.FsReadlink{host})
+    case V.FsXattr{p, name}:
+      IO.pure(V.FsResult, Host.meta.xattr(line, name))
+    case V.FsStatfs{}:
+      Host.fs.do(idx, V.FsStatfs{})
+    case _:
+      IO.pure(V.FsResult, V.FsErr{Ro.Ro.erofs()})
+
+# One operation, once its path resolved.
+def Host.meta.op(+sh: U32, op: V.FsOp, r: Mt.Found) -> IO(V.FsResult):
+  match r:
+    case Mt.Missing{}:
+      IO.pure(V.FsResult, V.FsErr{2})
+    case Mt.NeedTable{k, h}:
+      IO.pure(V.FsResult, V.FsErr{5})
+    case Mt.Resolved{+host, line}:
+      Host.meta.on(Ro.Ro.index(sh), sh, op, host, line)
+
+def Host.meta.path(op: V.FsOp) -> String:
+  match op:
+    case V.FsStat{p}:
+      p
+    case V.FsList{p, f, m}:
+      p
+    case V.FsRead{p, o, l}:
+      p
+    case V.FsReadRam{p, o, i}:
+      p
+    case V.FsReadlink{p}:
+      p
+    case V.FsXattr{p, n}:
+      p
+    case _:
+      ""
+
+def Host.meta(+sh: U32, +op: V.FsOp) -> IO(V.FsResult):
+  +p : String = Host.meta.path(op)
+  IO.bind(Mt.Found, V.FsResult, Host.meta.resolve(Host.meta.depth(p), sh, p), r => Host.meta.op(sh, op, r))
+
+# A share's operation: on a read-only share (src/fs/readonly.bend) every
+# change is refused with EROFS before the host sees it; the host gets the
+# share's index.
+def Host.fs(+sh: U32, +op: V.FsOp) -> IO(V.FsResult):
+  Bool.pick(IO(V.FsResult), Ro.Ro.refuses(sh, op), IO.pure(V.FsResult, V.FsErr{Ro.Ro.erofs()}),
+    Bool.pick(IO(V.FsResult), Mt.Meta.is_meta(sh), Host.meta(sh, op), Host.fs.rw(Ro.Ro.index(sh), op)))

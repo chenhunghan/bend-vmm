@@ -132,6 +132,11 @@ type FsOp is Data:
   # Writes the pieces of guest memory, in order, to the file at offset
   # (FsCount).
   FsWriteRam{path: String, offset: U.U64, iovs: +List<Iov>}
+  # An extended attribute's value (FsBytes), or with name "" every name the
+  # path has, each followed by a 0 byte: on a share marked meta (its
+  # records, src/fs/meta.bend), ENODATA (61) for a name it lacks; on any
+  # other share EOPNOTSUPP (macOS 45, answered as Linux's 95).
+  FsXattr{path: String, name: String}
 
 # A file's attributes (lstat): mode is st_mode (type and permission bits).
 type FsAttr is Data:
@@ -147,6 +152,9 @@ type FsResult is Data:
   FsErr{errno: U32}
   FsOk{}
   FsGotAttr{attr: FsAttr}
+  # Attributes with what FsAttr cannot say: a device's numbers and the
+  # nanoseconds of mtime (src/fs/meta.bend: a share marked meta).
+  FsGotMeta{attr: FsAttr, major: U32, minor: U32, mnsec: U32}
   FsBytes{bytes: +List<U32>}
   FsCount{n: U32}
   FsEntries{entries: +List<FsEntry>}

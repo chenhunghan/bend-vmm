@@ -473,6 +473,8 @@ def SimFs.apply(fs: SimFs, op: V.FsOp) -> SimFs & V.FsResult:
       SimFs.ret(fs, V.FsErr{78})
     case V.FsWriteRam{p, off, iovs}:
       SimFs.ret(fs, V.FsErr{78})
+    case V.FsXattr{p, n}:
+      SimFs.ret(fs, V.FsErr{45})
 
 def SimFs.fst(r: SimFs & V.FsResult) -> SimFs:
   match r:

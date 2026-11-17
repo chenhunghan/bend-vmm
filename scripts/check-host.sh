@@ -108,10 +108,10 @@ if [ -f host/main.bend ]; then
   # the package's host file calls (main.bend's Fs), for programs that embed the VMM
   # (built here even under SKIP_BUILD when missing: CI's emulated run builds only bend-vmm and smoke ahead)
   if { [ "${SKIP_BUILD:-0}" = 1 ] && [ -x out/files_smoke ]; } || scripts/build.sh host/files_smoke.bend out/files_smoke >/dev/null; then
-    fd=$(mktemp -d); printf 0123456789 > "$fd/blob"; out=$(./out/files_smoke "$fd" 2>&1)
+    fd=$(cd "$(mktemp -d)" && pwd -P); printf 0123456789 > "$fd/blob"; ln -s x/y "$fd/link"; out=$(./out/files_smoke "$fd" 2>&1)
     grep -q "mkdir_p 0 again 0" <<<"$out" && grep -q "facts kind 2 size 10 mtime 1000000000" <<<"$out" && grep -q "missing kind 0" <<<"$out" \
-      && grep -q "rename 0, ls moved," <<<"$out" && grep -q "remove 0 rmdir 0, gone kind 0" <<<"$out" && grep -q "files: done" <<<"$out" \
-      && grn "ok: host file calls (Fs: mkdir_p, facts, set_mtime, rename, ls, remove, rmdir)" || { red "failed: host file calls"; echo "$out"; fail=1; }
+      && grep -q "fsync 0 dir 0, chmod 0 kind 2 size 10 mtime 1000000000, plain True through link False" <<<"$out" && grep -q "rename 0, ls moved," <<<"$out" && grep -q "remove 0 rmdir 0, gone kind 0" <<<"$out" && grep -q "files: done" <<<"$out" \
+      && grn "ok: host file calls (Fs: mkdir_p, facts, set_mtime, fsync, chmod, no_symlinks, rename, ls, remove, rmdir)" || { red "failed: host file calls"; echo "$out"; fail=1; }
     rm -rf "$fd"
   else
     red "files_smoke build failed"; fail=1
@@ -416,6 +416,43 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
     ./out/bend-vmm --mem 256 --kernel $GIMG --initrd $GI --share "$t/sh" --cmdline "$GCON quiet" 2>&1 | tr -d '\r')
   grep -aq "^FILES-40" <<<"$out" && grep -aq "^RENAMED-NEW-CONTENT" <<<"$out" && grn "ok: 20 files through 16 slots read back, a rename drops the old file" || { red "failed: share slots"; grep -a "FILES\|RENAMED\|mount" <<<"$out" | tail -3; fail=1; }
   [ "$(grep -ac '^DNS-OK' <<<"$out")" -ge 4 ] && grn "ok: DNS over the NAT's UDP flows ($(grep -ac '^DNS-OK' <<<"$out") of 5)" || { red "failed: UDP flows (DNS)"; grep -a "DNS\|nslookup" <<<"$out" | tail -3; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5n. two shares, one read-only (--share DIR,tag=NAME,ro)"
+  # The guest mounts the read-only share by its tag and tries every kind of
+  # change: each fails with EROFS (src/fs/readonly.bend), the host's files
+  # stay as they were, and the writable share beside it still takes writes.
+  t=$(mktemp -d); mkdir -p "$t/rw" "$t/ro/d"; echo LAYER-DATA > "$t/ro/d/f"
+  cmd='mkdir -p /mnt/l; mount -t 9p -o trans=virtio,version=9p2000.L layers /mnt/l; echo READ-$(cat /mnt/l/d/f); n=0; echo x > /mnt/l/d/f || n=$((n+1)); echo y > /mnt/l/new || n=$((n+1)); mkdir /mnt/l/nd || n=$((n+1)); rm /mnt/l/d/f || n=$((n+1)); mv /mnt/l/d/f /mnt/l/g || n=$((n+1)); chmod 777 /mnt/l/d/f || n=$((n+1)); ln -s /etc /mnt/l/s || n=$((n+1)); sh -c ": > /mnt/l/d/f" || n=$((n+1)); echo REFUSED-$n; echo ok > /mnt/share/rwfile && echo RW-OK; echo RO-""DONE\n'
+  out=$(drive 60 "busybox shell" "$cmd" "RO-DONE" 'poweroff -f\n' -- \
+    ./out/bend-vmm --mem 256 --kernel $GIMG --initrd $GI --share "$t/rw" --share "$t/ro,tag=layers,ro" --cmdline "$GCON quiet" 2>&1 | tr -d '\r')
+  grep -aq "^READ-LAYER-DATA" <<<"$out" && grep -aq "^REFUSED-8" <<<"$out" && grep -aq "^RW-OK" <<<"$out" && [ "$(cat "$t/ro/d/f")" = LAYER-DATA ] && [ "$(ls "$t/ro")" = d ] && [ "$(ls "$t/ro/d")" = f ] && [ "$(cat "$t/rw/rwfile")" = ok ] \
+    && grn "ok: a read-only share refuses every change (8 of 8, EROFS), a writable one beside it takes writes" \
+    || { red "failed: read-only share"; grep -a "READ-\|REFUSED-\|RW-\|Read-only" <<<"$out" | tail -6; ls -R "$t/ro"; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5o. Linux metadata on a share (--share DIR,meta): records, whiteouts, an opaque dir, overlayfs"
+  # l2's .bend-meta (src/fs/meta.bend) names its entries, owners, modes,
+  # a 0:0 char device (an overlayfs whiteout) and an opaque directory
+  # (trusted.overlay.opaque); host names differ from guest ones, and a host
+  # file without a record never shows. overlayfs over l2 and l1 then hides
+  # what the whiteout and the opaque directory say.
+  t=$(mktemp -d); mkdir -p "$t/l1/sub" "$t/l2/sub_h"
+  echo keep > "$t/l1/keep"; echo gone > "$t/l1/gone"; echo lower-sub > "$t/l1/sub/old"
+  echo UPPER-MAKE > "$t/l2/Makefile"; echo other-make > "$t/l2/makefile_2"; : > "$t/l2/wh1"; echo secret > "$t/l2/secret"; echo new-sub > "$t/l2/sub_h/new"
+  printf 'bend-meta 1\nname=Makefile type=f mode=4755 uid=0 gid=0 mtime=1700000000.5\nname=makefile host=makefile_2 type=f mode=644 uid=1000 gid=1000\nname=gone host=wh1 type=c rdev=0,0 mode=0\nname=sub host=sub_h type=d mode=755 xattr.trusted.overlay.opaque=79\n' > "$t/l2/.bend-meta"
+  cmd='mkdir -p /mnt/a /mnt/b /mnt/o /mnt/u; mount -t 9p -o trans=virtio,version=9p2000.L l1 /mnt/a; mount -t 9p -o trans=virtio,version=9p2000.L l2 /mnt/b; echo LS-$(ls /mnt/b | tr "\\n" " "); stat -c "ST-%n-%u:%g-%a-%F-%t,%T-%Y" /mnt/b/Makefile /mnt/b/makefile /mnt/b/gone; echo LOW-$(cat /mnt/b/makefile); cat /mnt/b/secret 2>/dev/null || echo NO-SECRET; mount -t tmpfs t /mnt/u; mkdir /mnt/u/up /mnt/u/wk; mount -t overlay ov -o lowerdir=/mnt/b:/mnt/a,upperdir=/mnt/u/up,workdir=/mnt/u/wk /mnt/o; echo OVLS-$(ls /mnt/o | tr "\\n" " "); echo SUB-$(ls /mnt/o/sub | tr "\\n" " "); echo MK-""DONE\n'
+  out=$(drive 60 "busybox shell" "$cmd" "MK-DONE" 'poweroff -f\n' -- \
+    ./out/bend-vmm --mem 256 --kernel $GIMG --initrd $GI --share "$t/l1,tag=l1,ro" --share "$t/l2,tag=l2,meta" --cmdline "$GCON quiet" 2>&1 | tr -d '\r')
+  grep -aq "^LS-Makefile gone makefile sub" <<<"$out" && grep -aq "^ST-/mnt/b/Makefile-0:0-4755-regular file-0,0-1700000000" <<<"$out" \
+    && grep -aq "^ST-/mnt/b/makefile-1000:1000-644-regular file" <<<"$out" && grep -aq "^ST-/mnt/b/gone-.*-character special file-0,0" <<<"$out" \
+    && grep -aq "^LOW-other-make" <<<"$out" && grep -aq "^NO-SECRET" <<<"$out" && grep -aq "^OVLS-Makefile keep makefile sub" <<<"$out" && grep -aqx "SUB-new *" <<<"$out" \
+    && grn "ok: a meta share shows its records (owners, modes, a whiteout, host names apart), and overlayfs honours the whiteout and the opaque dir" \
+    || { red "failed: meta share"; grep -a "^LS-\|^ST-\|^LOW-\|SECRET\|^OVLS-\|^SUB-\|overlay" <<<"$out" | tail -10; fail=1; }
   rm -rf "$t"
 fi
 

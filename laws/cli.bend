@@ -181,3 +181,37 @@ law cli.balloon_values:
 # free-page-reporting keeps reporting alone; auto is a value --balloon takes.
 law cli.balloon_auto:
   {C.Cli.balloon_auto("") && C.Cli.balloon_auto("auto") && Bool.not(C.Cli.balloon_auto("free-page-reporting")) && C.Cli.balloon_ok("auto") == True{} : Bool}
+
+# Proposed: --share DIR[,quota=SIZE][,tag=NAME][,ro][,meta], repeatable (asked by
+# bend-vk8s): each option at most once; a tag is 1 to 31 letters, digits,
+# "-", "_" or "."; untagged shares are "share", "share1", ...; at most 8,
+# and no two with one tag.
+law cli.share_opt_tag_ro:
+  {C.Cli.share_opt("/l,tag=layers,ro") == Some{C.ShareOpt{"/l", U.U64{0, 0}, "layers", True{}, False{}}} : Maybe<&2, C.ShareOpt>}
+
+law cli.share_opt_quota:
+  {C.Cli.share_opt("/l,ro,quota=1K") == Some{C.ShareOpt{"/l", U.U64{0, 1024}, "", True{}, False{}}} : Maybe<&2, C.ShareOpt>}
+
+law cli.share_opt_twice:
+  {C.Cli.share_opt("/l,ro,ro") == None{} : Maybe<&2, C.ShareOpt>}
+
+law cli.share_opt_bad_tag:
+  {C.Cli.share_opt("/l,tag=a b") == None{} : Maybe<&2, C.ShareOpt>}
+
+law cli.share_opt_empty_tag:
+  {C.Cli.share_opt("/l,tag=") == None{} : Maybe<&2, C.ShareOpt>}
+
+law cli.shares_tags:
+  {C.Cli.shares("/a\n/b,ro\n/c,tag=x") == [C.ShareOpt{"/a", U.U64{0, 0}, "share", False{}, False{}}, C.ShareOpt{"/b", U.U64{0, 0}, "share1", True{}, False{}}, C.ShareOpt{"/c", U.U64{0, 0}, "x", False{}, False{}}] : List<&2, C.ShareOpt>}
+
+law cli.shares_two:
+  {C.Cli.check(["--share", "/a", "--share", "/b,tag=layers,ro"]) == "" : String}
+
+law cli.shares_dup_tag:
+  {C.Cli.check(["--share", "/a", "--share", "/b,tag=share"]) == "two --share with one tag" : String}
+
+law cli.shares_nine:
+  {C.Cli.check(["--share", "/1", "--share", "/2", "--share", "/3", "--share", "/4", "--share", "/5", "--share", "/6", "--share", "/7", "--share", "/8", "--share", "/9"]) == "at most 8 --share" : String}
+
+law cli.share_opt_meta:
+  {C.Cli.shares("/l,tag=layers,meta") == [C.ShareOpt{"/l", U.U64{0, 0}, "layers", True{}, True{}}] : List<&2, C.ShareOpt>}

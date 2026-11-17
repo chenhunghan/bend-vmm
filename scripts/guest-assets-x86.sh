@@ -22,8 +22,8 @@ mods="net/packet/af_packet drivers/input/evdev drivers/char/hw_random/rng-core n
   drivers/char/virtio_console drivers/char/hw_random/virtio-rng drivers/virtio/virtio_balloon
   drivers/virtio/virtio_input fs/fscache/fscache fs/netfs/netfs net/9p/9pnet net/9p/9pnet_virtio fs/9p/9p
   net/vmw_vsock/vsock net/vmw_vsock/vmw_vsock_virtio_transport_common
-  net/vmw_vsock/vmw_vsock_virtio_transport"
-if [ ! -f out/x86/modules/evdev.ko ]; then
+  net/vmw_vsock/vmw_vsock_virtio_transport fs/overlayfs/overlay"
+if [ ! -f out/x86/modules/evdev.ko ] || [ ! -f out/x86/modules/overlay.ko ]; then
   curl -fsSL --retry 5 -o out/x86/modloop "$net/modloop-virt"
   rm -rf out/x86/ml && unsquashfs -q -d out/x86/ml out/x86/modloop >/dev/null
   mkdir -p out/x86/modules

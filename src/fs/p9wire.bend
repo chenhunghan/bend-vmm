@@ -85,6 +85,11 @@ type P9Resp is Data:
   Rsymlink{qid: Qid}
   Rreadlink{target: +List<U32>}
   Rgetattr{stat: P9Stat}
+  # Rgetattr with a device's number (Linux's new_encode_dev) and mtime's
+  # nanoseconds (src/fs/meta.bend: a share marked meta).
+  RgetattrX{stat: P9Stat, rdev: U.U64, mnsec: U32}
+  # Txattrwalk's answer: the attribute's size (its value is read on newfid).
+  Rxattrwalk{size: U.U64}
   Rsetattr{}
   Rreaddir{entries: +List<P9Dirent>}
   Rfsync{}
@@ -328,6 +333,15 @@ def P9.bstat(st: P9Stat) -> +List<U32>:
       times = P9.cat(B.Bytes.le64(atime), P9.cat(z, P9.cat(B.Bytes.le64(mtime), P9.cat(z, P9.cat(B.Bytes.le64(ctime), z)))))
       P9.cat(head, P9.cat(sizes, P9.cat(times, B.Bytes.zeros(32n))))
 
+def P9.bstat.x(st: P9Stat, +rdev: U.U64, +mnsec: U32) -> +List<U32>:
+  match st:
+    case P9Stat{qid, mode, uid, gid, nlink, size, blocks, atime, mtime, ctime}:
+      +z = P9.zero64()
+      head = P9.cat(B.Bytes.le64(U.U64{0, 2047}), P9.cat(P9.bqid(qid), P9.cat(B.Bytes.le32(mode), P9.cat(B.Bytes.le32(uid), B.Bytes.le32(gid)))))
+      sizes = P9.cat(B.Bytes.le64(nlink), P9.cat(B.Bytes.le64(rdev), P9.cat(B.Bytes.le64(size), P9.cat(B.Bytes.le64(U.U64{0, 4096}), B.Bytes.le64(blocks)))))
+      times = P9.cat(B.Bytes.le64(atime), P9.cat(z, P9.cat(B.Bytes.le64(mtime), P9.cat(B.Bytes.le64(U.U64{0, mnsec}), P9.cat(B.Bytes.le64(ctime), z)))))
+      P9.cat(head, P9.cat(sizes, P9.cat(times, B.Bytes.zeros(32n))))
+
 # A response's type and the bytes after its tag.
 type P9Out is Data:
   P9Out{kind: U32, body: +List<U32>}
@@ -351,6 +365,10 @@ def P9.out(r: P9Resp) -> P9Out:
       P9Out{23, P9.bstr(target)}
     case Rgetattr{stat}:
       P9Out{25, P9.bstat(stat)}
+    case RgetattrX{stat, rdev, mnsec}:
+      P9Out{25, P9.bstat.x(stat, rdev, mnsec)}
+    case Rxattrwalk{size}:
+      P9Out{31, B.Bytes.le64(size)}
     case Rsetattr{}:
       P9Out{27, []}
     case Rreaddir{entries}:

@@ -42,6 +42,9 @@ import ./p9wire.bend as W
 type Fid is Data:
   Fid{fid: U32, path: String, open: Bool}
 
+type P9XPath is Data:
+  P9XPath{name: String, path: String}
+
 type P9State is Data:
   P9State{msize: U32, fids: +List<Fid>}
 
@@ -250,6 +253,39 @@ def P9.name_ok(+bs: +List<U32>) -> Bool:
 def P9.join(+dir: String, +name: String) -> String:
   Bool.pick(String, String.is_empty(dir), name, dir ++ "/" ++ name)
 
+# A fid Txattrwalk binds reads an extended attribute: its path is a 0 byte,
+# the attribute's name, a 0 byte, then the file's path (no real path holds
+# a 0 byte: P9.name_ok refuses one).
+def P9.xpath(+name: String, +path: String) -> String:
+  SCon{Char.from_u32(0), name ++ SCon{Char.from_u32(0), path}}
+
+def P9.is_xpath(p: String) -> Bool:
+  match p:
+    case SNil{}:
+      False{}
+    case SCon{c, rest}:
+      U32.is_zero(Char.to_u32(c))
+
+def P9.xcut.add(+c: Char, k: P9XPath) -> P9XPath:
+  match k:
+    case P9XPath{n, p}:
+      P9XPath{SCon{c, n}, p}
+
+# An xattr fid's attribute name and file path.
+def P9.xcut(s: String) -> P9XPath:
+  match s:
+    case SNil{}:
+      P9XPath{"", ""}
+    case SCon{+c, +rest}:
+      Bool.pick(P9XPath, U32.is_zero(Char.to_u32(c)), P9XPath{"", rest}, P9.xcut.add(c, P9.xcut(rest)))
+
+def P9.xsplit(p: String) -> P9XPath:
+  match p:
+    case SNil{}:
+      P9XPath{"", ""}
+    case SCon{c, rest}:
+      P9.xcut(rest)
+
 # The qid of a file: QTDIR for a directory, QTSYMLINK for a symlink.
 def P9.qid_kind(+mode: U32) -> U32:
   +t = (mode .&. 61440 : U32)
@@ -341,6 +377,8 @@ def P9.on_attr(-R: Type, r: V.FsResult, s: P9State, +tag: U32, k: V.FsAttr -> V.
   match r:
     case V.FsGotAttr{a}:
       k(a)
+    case V.FsGotMeta{a, ma, mi, ns}:
+      k(a)
     case r:
       P9.err(R, s, tag, P9.fail(r))
 
@@ -395,11 +433,13 @@ def P9.walk.stop(+path: String, +qids: +List<W.Qid>, r: V.FsResult) -> P9Walk:
 # After stating the next path: continue the walk there with k, or stop at
 # path with the qids found so far (reversed).
 def P9.walk.after(
-  -R: Type, r: V.FsResult, +path: String, next: String, +qids: +List<W.Qid>,
+  -R: Type, r: V.FsResult, +path: String, +next: String, +qids: +List<W.Qid>,
   k: String -> +List<W.Qid> -> V.Op<R, P9Walk>
 ) -> V.Op<R, P9Walk>:
   match r:
     case V.FsGotAttr{a}:
+      k(next, P9.qid(a) <> qids)
+    case V.FsGotMeta{a, ma, mi, ns}:
       k(next, P9.qid(a) <> qids)
     case r:
       V.Op.pure(R, P9Walk, P9.walk.stop(path, qids, r))
@@ -434,10 +474,22 @@ def P9.walk.from(-R: Type, +share: U32, +s: P9State, +tag: U32, +fid: U32, +newf
 def P9.walk(-R: Type, +share: U32, +s: P9State, +tag: U32, +fid: U32, +newfid: U32, names: +List<+List<U32>>) -> V.Op<R, P9Answer>:
   P9.with_room(R, s, tag, newfid, s2 => P9.walk.from(R, share, s2, tag, fid, newfid, names))
 
+# A device's number as Linux packs it for 9p (new_encode_dev: the minor's
+# low 8 bits, the major above them, the minor's high bits above that).
+def P9.rdev(+major: U32, +minor: U32) -> U.U64:
+  U.U64{0, ((minor .&. 255 : U32) .|. (((major .&. 4095 : U32) << 8n : U32) .|. ((minor .&. 1048320 : U32) << 12n : U32) : U32) : U32)}
+
+def P9.getattr.got(-R: Type, r: V.FsResult, +s: P9State, +tag: U32) -> V.Op<R, P9Answer>:
+  match r:
+    case V.FsGotMeta{a, ma, mi, ns}:
+      P9.answer(R, s, tag, W.RgetattrX{P9.stat(a), P9.rdev(ma, mi), ns})
+    case r:
+      P9.on_attr(R, r, s, tag, a => P9.answer(R, s, tag, W.Rgetattr{P9.stat(a)}))
+
 def P9.getattr.go(-R: Type, +share: U32, +s: P9State, +tag: U32, path: String) -> V.Op<R, P9Answer>:
   do V.Op<R, P9Answer>:
     r : V.FsResult <- V.Op.fs(R, share, V.FsStat{path})
-    P9.on_attr(R, r, s, tag, a => P9.answer(R, s, tag, W.Rgetattr{P9.stat(a)}))
+    P9.getattr.got(R, r, s, tag)
 
 # Tgetattr.
 def P9.getattr(-R: Type, +share: U32, +s: P9State, +tag: U32, +fid: U32) -> V.Op<R, P9Answer>:
@@ -526,11 +578,31 @@ def P9.on_bytes(-R: Type, r: V.FsResult, s: P9State, +tag: U32) -> V.Op<R, P9Ans
     case r:
       P9.err(R, s, tag, P9.fail(r))
 
-def P9.read.go(-R: Type, +share: U32, +s: P9State, +tag: U32, path: String, offset: U.U64, +count: U32) -> V.Op<R, P9Answer>:
+def P9.read.file(-R: Type, +share: U32, +s: P9State, +tag: U32, path: String, offset: U.U64, +count: U32) -> V.Op<R, P9Answer>:
   +cap = P9.sub_sat(P9State.msize(s), 11)
   do V.Op<R, P9Answer>:
     r : V.FsResult <- V.Op.fs(R, share, V.FsRead{path, offset, Bool.pick(U32, U32.is_lt(count, cap), count, cap)})
     P9.on_bytes(R, r, s, tag)
+
+# A read on an xattr fid: the attribute's value from offset on, at most
+# count bytes (and what fits an Rread).
+def P9.xread.got(-R: Type, r: V.FsResult, +s: P9State, +tag: U32, +offset: U.U64, +count: U32) -> V.Op<R, P9Answer>:
+  match r:
+    case V.FsBytes{bs}:
+      +cap = U32.min(count, P9.sub_sat(P9State.msize(s), 11))
+      P9.answer(R, s, tag, W.Rread{List.take(&2, U32, List.drop(&2, U32, bs, U32.to_nat(U.U64.lo(offset))), U32.to_nat(cap))})
+    case r:
+      P9.err(R, s, tag, P9.fail(r))
+
+def P9.xread.of(-R: Type, +share: U32, +s: P9State, +tag: U32, x: P9XPath, +offset: U.U64, +count: U32) -> V.Op<R, P9Answer>:
+  match x:
+    case P9XPath{name, path}:
+      do V.Op<R, P9Answer>:
+        r : V.FsResult <- V.Op.fs(R, share, V.FsXattr{path, name})
+        P9.xread.got(R, r, s, tag, offset, count)
+
+def P9.read.go(-R: Type, +share: U32, +s: P9State, +tag: U32, +path: String, +offset: U.U64, +count: U32) -> V.Op<R, P9Answer>:
+  Bool.pick(V.Op<R, P9Answer>, P9.is_xpath(path), P9.xread.of(R, share, s, tag, P9.xsplit(path), offset, count), P9.read.file(R, share, s, tag, path, offset, count))
 
 # Tread: count capped to msize - 11 (the Rread header).
 def P9.read(-R: Type, +share: U32, +s: P9State, +tag: U32, +fid: U32, +offset: U.U64, +count: U32) -> V.Op<R, P9Answer>:
@@ -625,6 +697,23 @@ def P9.fsync(-R: Type, +s: P9State, +tag: U32, +fid: U32) -> V.Op<R, P9Answer>:
 def P9.clunk(-R: Type, +s: P9State, +tag: U32, +fid: U32) -> V.Op<R, P9Answer>:
   P9.with_fid(R, s, tag, fid, f => P9.answer(R, P9.unbind(s, fid), tag, W.Rclunk{}))
 
+# Txattrwalk: newfid reads the attribute name of fid's file (name "": the
+# list of its names); Rxattrwalk answers the value's size.
+def P9.xattrwalk.got(-R: Type, r: V.FsResult, +s: P9State, +tag: U32, +newfid: U32, +xp: String) -> V.Op<R, P9Answer>:
+  match r:
+    case V.FsBytes{bs}:
+      P9.answer(R, P9.bind(s, Fid{newfid, xp, True{}}), tag, W.Rxattrwalk{U.U64{0, U32.from_nat(List.length(&2, U32, bs))}})
+    case r:
+      P9.err(R, s, tag, P9.fail(r))
+
+def P9.xattrwalk.go(-R: Type, +share: U32, +s: P9State, +tag: U32, +newfid: U32, +path: String, +name: String) -> V.Op<R, P9Answer>:
+  do V.Op<R, P9Answer>:
+    r : V.FsResult <- V.Op.fs(R, share, V.FsXattr{path, name})
+    P9.xattrwalk.got(R, r, s, tag, newfid, P9.xpath(name, path))
+
+def P9.xattrwalk(-R: Type, +share: U32, +s: P9State, +tag: U32, +fid: U32, +newfid: U32, +name: +List<U32>) -> V.Op<R, P9Answer>:
+  P9.with_fid(R, s, tag, fid, f => P9.xattrwalk.go(R, share, s, tag, newfid, Fid.path(f), P9.chars(name)))
+
 # Serves one request on share `share`.
 def P9.serve(-R: Type, share: U32, s: P9State, m: W.P9Msg) -> V.Op<R, P9Answer>:
   match m:
@@ -669,7 +758,7 @@ def P9.serve(-R: Type, share: U32, s: P9State, m: W.P9Msg) -> V.Op<R, P9Answer>:
         case W.Tclunk{fid}:
           P9.clunk(R, s, tag, fid)
         case W.Txattrwalk{fid, newfid, name}:
-          P9.err(R, s, tag, P9.eopnotsupp())
+          P9.xattrwalk(R, share, s, tag, fid, newfid, name)
         case W.Tunknown{kind}:
           P9.err(R, s, tag, P9.eopnotsupp())
 
@@ -718,18 +807,24 @@ def P9.read_done(-R: Type, s: P9State, +tag: U32, r: V.FsResult, q: Q.Vq, +h: U3
     case r:
       P9.reply_err(R, s, tag, P9.fail(r), q, h, w)
 
+def P9.read_fast.ram(-R: Type, +share: U32, +s: P9State, +tag: U32, path: String, offset: U.U64, +count: U32, q: Q.Vq, +h: U32, +w: +List<Q.Desc>) -> V.Op<R, P9Pass>:
+  +room = V.Iov.total(Q.Vq.segs(w, 0, 4294967295))
+  +cap = U32.min(count, U32.min(P9.sub_sat(P9State.msize(s), 11), P9.sub_sat(room, 11)))
+  do V.Op<R, P9Pass>:
+    r : V.FsResult <- V.Op.fs(R, share, V.FsReadRam{path, offset, Q.Vq.segs(w, 11, cap)})
+    P9.read_done(R, s, tag, r, q, h, w)
+
 def P9.read_fast.go(
-  -R: Type, m: Maybe<&2, Fid>, +share: U32, +s: P9State, +tag: U32, offset: U.U64, +count: U32, q: Q.Vq, +h: U32, +w: +List<Q.Desc>
+  -R: Type, m: Maybe<&2, Fid>, +share: U32, +s: P9State, +tag: U32, +offset: U.U64, +count: U32, +q: Q.Vq, +h: U32, +w: +List<Q.Desc>
 ) -> V.Op<R, P9Pass>:
   match m:
     case None{}:
       P9.reply_err(R, s, tag, P9.ebadf(), q, h, w)
     case Some{f}:
-      +room = V.Iov.total(Q.Vq.segs(w, 0, 4294967295))
-      +cap = U32.min(count, U32.min(P9.sub_sat(P9State.msize(s), 11), P9.sub_sat(room, 11)))
-      do V.Op<R, P9Pass>:
-        r : V.FsResult <- V.Op.fs(R, share, V.FsReadRam{Fid.path(f), offset, Q.Vq.segs(w, 11, cap)})
-        P9.read_done(R, s, tag, r, q, h, w)
+      +p = Fid.path(f)
+      Bool.pick(V.Op<R, P9Pass>, P9.is_xpath(p),
+        V.Op.bind(R, P9Answer, P9Pass, P9.xread.of(R, share, s, tag, P9.xsplit(p), offset, count), a => P9.reply_chain(R, a, q, h, w)),
+        P9.read_fast.ram(R, share, s, tag, p, offset, count, q, h, w))
 
 # Tread: the data goes from the file straight into the chain's memory after
 # the Rread header (count capped to msize - 11 and to the room).
