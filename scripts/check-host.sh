@@ -92,6 +92,9 @@ fi
 if [ -f host/main.bend ]; then
   echo "== 2. machine"
   [ "${SKIP_BUILD:-0}" = 1 ] || scripts/build.sh host/main.bend out/bend-vmm >/dev/null || { red "bend-vmm build failed"; exit 1; }
+  if [ "$(uname -s)" = Linux ]; then   # libX11 is loaded by --display only (scripts/x11-lazy.sh)
+    if ldd out/bend-vmm | grep -q libX11; then red "bend-vmm links libX11"; fail=1; else grn "ok: no libX11 link"; fi
+  fi
   arm && expect "machine hello" 20 "hello from the guest" ./out/bend-vmm --payload out/guest/hello.bin
 fi
 

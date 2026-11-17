@@ -88,6 +88,7 @@ jobs:
           scripts/build.sh host/main.bend out/bend-vmm
           out/bend-vmm --version
           ldd out/bend-vmm
+          ! ldd out/bend-vmm | grep -q libX11   # loaded only by --display (scripts/x11-lazy.sh)
       - name: Package
         run: scripts/release/package.sh out/bend-vmm linux-arm64
       - uses: actions/upload-artifact@v4
