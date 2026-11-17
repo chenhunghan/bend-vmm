@@ -852,3 +852,30 @@ def Fs.set_mtime(+path: String, t: U.U64) -> IO(U32):
   match t:
     case U.U64{hi, lo}:
       H.Hvf.set_mtime(path, hi, lo)
+
+# Writes path's data to the disk (a file), or its entries (a directory, as
+# after a rename into it): a publish that survives a crash.
+def Fs.fsync(+path: String) -> IO(U32):
+  H.Hvf.fsync(path, 0)
+
+def Fs.fsync_dir(+path: String) -> IO(U32):
+  H.Hvf.fsync(path, 1)
+
+def Fs.chmod(+path: String, +mode: U32) -> IO(U32):
+  H.Hvf.chmod(path, mode)
+
+# True when no directory along path, nor path itself, is a symlink (each
+# looked at with lstat, outermost first; a part not there yet is no
+# symlink). A check before acting, so a path someone can change between
+# the check and the act is no stronger than its directories' permissions.
+def Fs.no_symlinks.go(dirs: List<&2, String>, +ok: Bool) -> IO(Bool):
+  match dirs:
+    case Nil{}:
+      IO.pure(Bool, ok)
+    case Con{d, rest}:
+      do IO<Bool>:
+        f : Hf.Facts <- Fs.facts(d)
+        Fs.no_symlinks.go(rest, ok && Bool.not(Hf.Files.is_link(f)))
+
+def Fs.no_symlinks(+path: String) -> IO(Bool):
+  Fs.no_symlinks.go(Hf.Files.prefixes(path), True{})

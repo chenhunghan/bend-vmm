@@ -4,7 +4,8 @@ import ../src/vmm/hostfiles.bend as Hf
 import ../src/lib/u64.bend as U
 
 # Host smoke test for the package's Fs calls (main.bend): usage
-# files_smoke <dir>, where dir holds only blob, a file of 10 bytes. Prints
+# files_smoke <dir>, where dir holds blob, a file of 10 bytes, and link, a
+# symlink to x/y. Prints
 # one line per step; the last is "files: done".
 
 def kind(f: Hf.Facts) -> String:
@@ -31,6 +32,13 @@ def run(+d: String) -> IO(U32):
     fd : Hf.Facts <- V.Fs.facts(d ++ "/x/y")
     fn : Hf.Facts <- V.Fs.facts(d ++ "/nothing")
     IO.print("files: dir " ++ kind(fd) ++ ", missing " ++ kind(fn))
+    +s1 : U32 <- V.Fs.fsync(d ++ "/x/y/z/blob")
+    +s2 : U32 <- V.Fs.fsync_dir(d ++ "/x/y/z")
+    +h : U32 <- V.Fs.chmod(d ++ "/x/y/z/blob", 384)
+    fh : Hf.Facts <- V.Fs.facts(d ++ "/x/y/z/blob")
+    +ok1 : Bool <- V.Fs.no_symlinks(d ++ "/x/y/z/blob")
+    +ok2 : Bool <- V.Fs.no_symlinks(d ++ "/link/z/blob")
+    IO.print("files: fsync " ++ U32.show(s1) ++ " dir " ++ U32.show(s2) ++ ", chmod " ++ U32.show(h) ++ " " ++ kind(fh) ++ ", plain " ++ Bool.show(ok1) ++ " through link " ++ Bool.show(ok2))
     +r : U32 <- V.Fs.rename(d ++ "/x/y/z/blob", d ++ "/x/y/z/moved")
     ls : List<String> <- V.Fs.ls(d ++ "/x/y/z")
     IO.print("files: rename " ++ U32.show(r) ++ ", ls " ++ show(ls))

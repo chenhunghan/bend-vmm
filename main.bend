@@ -101,3 +101,19 @@ def Fs.set_mtime(+path: String, t: U.U64) -> IO(U32):
 # The wall clock, in seconds since 1970.
 def Fs.now() -> IO(U.U64):
   Hv.Host.now()
+
+# Writes a file's data (fsync) or a directory's entries (fsync_dir) to the
+# disk, so a publish (write, fsync, rename, fsync_dir) survives a crash.
+def Fs.fsync(+path: String) -> IO(U32):
+  A.Fs.fsync(path)
+
+def Fs.fsync_dir(+path: String) -> IO(U32):
+  A.Fs.fsync_dir(path)
+
+# Sets path's permission bits (mode & 0o7777), never through a symlink.
+def Fs.chmod(+path: String, +mode: U32) -> IO(U32):
+  A.Fs.chmod(path, mode)
+
+# True when no directory along path, nor path itself, is a symlink.
+def Fs.no_symlinks(+path: String) -> IO(Bool):
+  A.Fs.no_symlinks(path)
