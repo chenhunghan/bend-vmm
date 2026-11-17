@@ -79,8 +79,8 @@ law hostfiles.lan_peers_alone:
 law hostfiles.lan_peers_none:
   {F.Files.lan_peers([]) == [] : List<String>}
 
-# Proposed: files for a program that embeds the VMM (main.bend's Fs):
-# `mkdir -p`'s directories, outermost first, and what a path is.
+# Files for a program that embeds the VMM (main.bend's Fs): `mkdir -p`'s
+# directories, outermost first, and what a path is (approved 2026-11-17).
 law hostfiles.prefixes_abs:
   {F.Files.prefixes("/a/b/c") == ["/a", "/a/b", "/a/b/c"] : List<&2, String>}
 
