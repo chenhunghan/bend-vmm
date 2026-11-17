@@ -9,7 +9,7 @@ carries out plans that Bend hands it.
 This file is the audit of that boundary. It covered all 113 effects in
 host/hvf.c as of 2026-11-09 and says, for each group, where the
 decisions are made; the migration ledger at the end lists every effect
-(144 as of 2026-11-17) with its target in the C-to-Bend plan. The
+(146 as of 2026-11-17) with its target in the C-to-Bend plan. The
 section before it lists every decision still in C, with the reason it
 stays.
 
@@ -25,7 +25,7 @@ stays.
 | NAT | `tcp_*` `udp_*` `nat_send` `net_copy` `net_holds` `net_limits` `stage` `stage_drop` `dns` `set_dns` | sockets, send buffers, parking, wakeups | the whole NAT (`src/net`), limits (`net/limits.bend`), flusher actions (`net/flush.bend`), UDP flows (`net/udpflow.bend`) |
 | Descriptors | `nofile` `set_nofile` `fd_room` | reads and sets rlimit; counts sockets | soft limit and flow budget (`net/fds.bend`) |
 | Sockets and listeners | `ctl_listen` `ctl_next` `ctl_reply` `vsock_listen` `vsock_accept` `vsock_base` `vsock_file` `unix_connect` `fwd_listen` `fwd_accept` `accept_retry` `sock_facts` `sock_remove` | binds, accepts, connects; reports what a path holds | protocol (`vmm/control.bend`), deadlines, backlogs, retry and CONNECT (`vmm/clients.bend`), forward specs (`vmm/cli.bend`), which paths may be listened on (`vmm/hostfiles.bend`) |
-| LAN | `lan_open` `lan_send` `lan_names` `lan_recv` `lan_to_ram` `lan_release` `mkdir` `dir_facts` | datagram sockets, one frame per datagram | where frames go (`virtio/lan.bend`), directory trust and socket replacement (`vmm/hostfiles.bend`) |
+| LAN | `lan_open` `lan_send` `lan_names` `lan_recv` `lan_to_ram` `lan_release` `mkdir` `dir_facts` `path_facts` `set_mtime` | datagram sockets, one frame per datagram | where frames go (`virtio/lan.bend`), directory trust and socket replacement (`vmm/hostfiles.bend`) |
 | Shares (9p) | `fs` `share_open` `share_quota` `share_usage` | walks paths with openat and O_NOFOLLOW; keeps a descriptor cache | valid names (`fs/contain.bend`), listing order and pages (`fs/listing.bend`), entries, types and modes (`fs/entry.bend`), quota (`fs/quota.bend`) |
 | Display | `fb_init` `fb_present` `fb_dump` | maps the framebuffer, draws it with Metal, writes PPM | display size (`Cli.display.fits`), pointer and keys (`dev/pointer.bend`), file mode |
 
@@ -129,6 +129,15 @@ change): `src/host/range.bend` (hvf_ptr, hvf_iov_io's resume),
 staging slots), and `src/lib/inflate.bend` (DEFLATE and gzip with the
 host's acceptance rules, checked against libz by tests/oracles/inflate.py).
 
+## Moved on 2026-11-17
+
+LAN socket names: Bend names this VM's socket and each destination
+(`Files.lan_sock`) and picks a broadcast's recipients (`Files.lan_peers`
+over `Hvf.lan_names`); exit 2.877 vs 2.880 us (equivalent), LAN TCP 39.8
+vs 39.7 MB/s. The 2026-11-09 attempt had cost +0.1 us an exit; this one
+did not. The ticker behind the automatic balloon is `IO.sleep` (it wakes
+an idle guest now). `Hvf.kick` and `Hvf.stdin` were unused and are gone.
+
 ## Decisions still in C, and why
 
 The project owner accepted this list on 2026-11-09 as the end state of
@@ -139,7 +148,7 @@ performance, or as defence beneath Bend's own checks.
 |---|---|---|
 | A share opens only regular files for reads and writes | `hvf_fs_run` | Moving it costs a round trip on every open that misses the descriptor cache, on the 9p hot path. `check-host` tests it. |
 | gzip and deflate decoding | `hvf_inflate` | Decoding a ~30 MB kernel in Bend would cost far more than the 0.55 s boot. Bend decides whether to inflate. |
-| Names of the LAN sockets a frame is sent to | `hvf_lan_send_run`, `hvf_lan_open_run` | Tried 2026-11-09: Bend naming each destination (and its own socket) cost +0.1 us on every exit (13 to 15 of 16 pairs slower in each variant), a code-layout effect, though LAN throughput was unchanged. C formats the names; Bend's `Files.lan_sock` (same format, with a law) names this VM's socket for the replace check. |
+| A held share file the host replaced or removed is let go | `hvf_fs_run` (stat), `hvf_fdc_stale` | Each guest lookup, open and getattr stats the path; a descriptor the cache holds for that path that is no longer the file there (another inode) is closed, so the next read opens the one there now (2026-11-17, bend-vk8s: a directory the host made again read as the old file's bytes under the new size). One `fstat` when the path is cached; done inside the stat for the same reason as the line above. `check-host` 5j tests it. |
 | Memory-safety caps (sizes, counts, path lengths) | throughout | Defence in depth beneath Bend's own checks; never the only check. |
 
 Moving any of these: A/B the exit path with 30 interleaved pairs before
@@ -288,6 +297,8 @@ row but the decisions listed as moved above.
 | `tcp_close_facts` | `hvf_tcp_close_facts_run` (2979) | host/net.bend | packed buffers, owned fds, direct socket IO | 4 | check-host NAT; tests/nat.bend; model: tests/transfer.bend | guest net-* | C; buffers blocked: toolchain |
 | `mkdir` | `hvf_mkdir_run` (4118) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
 | `dir_facts` | `hvf_dir_facts_run` (4129) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C; naming blocked: code layout |
+| `path_facts` | `hvf_path_facts_run` | main.bend's Fs (a program embedding the VMM) | none | 2 | host/files_smoke.bend (check-host) | none | C reports a fact (lstat: mode bits, size, mtime); Bend reads the kind (Files.kind) and decodes the rest (Files.facts) (2026-11-17) |
+| `set_mtime` | `hvf_set_mtime_run` | main.bend's Fs | none | 2 | host/files_smoke.bend (check-host) | none | C sets the time Bend chose (2026-11-17) |
 | `lan_open` | `hvf_lan_open_run` (4192) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C binds and sends; Bend names every socket (Files.lan_sock) and picks a broadcast's (Files.lan_peers) (2026-11-17) |
 | `lan_send` | `hvf_lan_send_run` (4251) | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C binds and sends; Bend names every socket (Files.lan_sock) and picks a broadcast's (Files.lan_peers) (2026-11-17) |
 | `lan_names` | `hvf_lan_names_run` | host/net.bend | packed buffers | 4 | check-host LAN | LAN throughput, exit | C reports a fact (the directory's names, this VM's first); Bend picks (Files.lan_peers) (2026-11-17) |

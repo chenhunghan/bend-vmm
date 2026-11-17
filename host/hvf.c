@@ -4223,6 +4223,27 @@ static void hvf_fdc_flush(u32 sh) {
   }
 }
 
+// A path looked at (stat: every guest lookup, open and getattr) whose held
+// file is no longer the one there (the host replaced or removed it) loses
+// that file, so the next read opens the one there now, as a reopen would; a
+// guest's open file keeps reading the file it opened until then. st: the
+// path now (NULL: nothing there).
+static void hvf_fdc_drop_one(HvfFdc* c, u32 sh, const char* rel, const struct stat* now) {
+  struct stat held;
+  if (c->used && c->sh == sh && !strcmp(c->rel, rel) &&
+      (!now || fstat(c->fd, &held) != 0 || held.st_ino != now->st_ino || held.st_dev != now->st_dev)) {
+    close(c->fd);
+    c->used = 0;
+  }
+}
+
+static void hvf_fdc_stale(u32 sh, const char* rel, const struct stat* now) {
+  hvf_fdc_drop_one(&hvf_fdc_new, sh, rel, now);
+  for (int i = 0; i < HVF_FDC; i++) {
+    hvf_fdc_drop_one(&hvf_fdc[i], sh, rel, now);
+  }
+}
+
 typedef struct {
   uint32_t* w;
   u64       n, cap;
@@ -4311,7 +4332,9 @@ Term hvf_fs_run(Env e, Term* f, IoWork* w) {
     struct stat st;
     if (fstatat(dfd, leaf, &st, AT_SYMLINK_NOFOLLOW) != 0) {
       res = hvf_fs_err(e, errno);
+      hvf_fdc_stale(sh, rel, NULL);
     } else {
+      hvf_fdc_stale(sh, rel, &st);
       hvf_w(&out, 2);
       hvf_w(&out, st.st_mode);
       hvf_w(&out, st.st_uid);
@@ -5129,6 +5152,39 @@ Term hvf_dir_facts_run(Env e, Term* f, IoWork* w) {
   }
   free(path);
   return hvf_words(e, ws, 3);
+}
+
+// Hvf.path_facts(path) -> List<U32>: what path is, not through a symlink
+// (lstat): [1 when it is there, its mode bits (st_mode: Files.kind reads
+// the type), size (hi, lo), mtime in seconds since 1970 (hi, lo)].
+Term hvf_path_facts_run(Env e, Term* f, IoWork* w) {
+  u64         n;
+  char*       path = io_cstr(e, f[0], &n);
+  struct stat st;
+  uint32_t    ws[6] = {0, 0, 0, 0, 0, 0};
+  if (lstat(path, &st) == 0) {
+    uint64_t sz = (uint64_t)st.st_size, mt = (uint64_t)HVF_MTIME(st);
+    ws[0] = 1;
+    ws[1] = (uint32_t)st.st_mode;
+    ws[2] = (uint32_t)(sz >> 32);
+    ws[3] = (uint32_t)sz;
+    ws[4] = (uint32_t)(mt >> 32);
+    ws[5] = (uint32_t)mt;
+  }
+  free(path);
+  return hvf_words(e, ws, 6);
+}
+
+// Hvf.set_mtime(path, hi, lo) -> U32: sets path's modification time to
+// (hi, lo) seconds since 1970, not through a symlink; its access time
+// stays. 0, or an errno.
+Term hvf_set_mtime_run(Env e, Term* f, IoWork* w) {
+  u64             n;
+  char*           path  = io_cstr(e, f[0], &n);
+  struct timespec ts[2] = {{0, UTIME_OMIT}, {(time_t)hvf_u64(f[1], f[2]), 0}};
+  int             err   = utimensat(AT_FDCWD, path, ts, AT_SYMLINK_NOFOLLOW) != 0 ? errno : 0;
+  free(path);
+  return (Term)(u32)err;
 }
 
 // The LAN NIC (--lan DIR; src/virtio/lan.bend decides where each frame
@@ -6859,6 +6915,12 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.sock_remove)
   io_eff(CID(Hvf.sock_remove), hvf_sock_remove_run);
+#endif
+#ifdef CID(Hvf.path_facts)
+  io_eff(CID(Hvf.path_facts), hvf_path_facts_run);
+#endif
+#ifdef CID(Hvf.set_mtime)
+  io_eff(CID(Hvf.set_mtime), hvf_set_mtime_run);
 #endif
 #ifdef CID(Hvf.mkdir)
   io_eff(CID(Hvf.mkdir), hvf_mkdir_run);

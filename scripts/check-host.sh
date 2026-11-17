@@ -96,6 +96,16 @@ if [ -f host/main.bend ]; then
     if ldd out/bend-vmm | grep -q libX11; then red "bend-vmm links libX11"; fail=1; else grn "ok: no libX11 link"; fi
   fi
   arm && expect "machine hello" 20 "hello from the guest" ./out/bend-vmm --payload out/guest/hello.bin
+  # the package's host file calls (main.bend's Fs), for programs that embed the VMM
+  if [ "${SKIP_BUILD:-0}" = 1 ] || scripts/build.sh host/files_smoke.bend out/files_smoke >/dev/null; then
+    fd=$(mktemp -d); printf 0123456789 > "$fd/blob"; out=$(./out/files_smoke "$fd" 2>&1)
+    grep -q "mkdir_p 0 again 0" <<<"$out" && grep -q "facts kind 2 size 10 mtime 1000000000" <<<"$out" && grep -q "missing kind 0" <<<"$out" \
+      && grep -q "rename 0, ls moved," <<<"$out" && grep -q "remove 0 rmdir 0, gone kind 0" <<<"$out" && grep -q "files: done" <<<"$out" \
+      && grn "ok: host file calls (Fs: mkdir_p, facts, set_mtime, rename, ls, remove, rmdir)" || { red "failed: host file calls"; echo "$out"; fail=1; }
+    rm -rf "$fd"
+  else
+    red "files_smoke build failed"; fail=1
+  fi
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_LINUX:-0}" != 1 ] && arm; then
@@ -396,6 +406,26 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
     ./out/bend-vmm --mem 256 --kernel $GIMG --initrd $GI --share "$t/sh" --cmdline "$GCON quiet" 2>&1 | tr -d '\r')
   grep -aq "^FILES-40" <<<"$out" && grep -aq "^RENAMED-NEW-CONTENT" <<<"$out" && grn "ok: 20 files through 16 slots read back, a rename drops the old file" || { red "failed: share slots"; grep -a "FILES\|RENAMED\|mount" <<<"$out" | tail -3; fail=1; }
   [ "$(grep -ac '^DNS-OK' <<<"$out")" -ge 4 ] && grn "ok: DNS over the NAT's UDP flows ($(grep -ac '^DNS-OK' <<<"$out") of 5)" || { red "failed: UDP flows (DNS)"; grep -a "DNS\|nslookup" <<<"$out" | tail -3; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5j. a shared file the host replaces reads as the new one"
+  # The guest reads d/f (the host keeps it open), then the host removes d
+  # and makes it again with a new, larger f: the guest's next read is the
+  # new file, not the old one's bytes under the new size (bend-vk8s's
+  # report). The guest changes nothing in the share (a guest create would
+  # empty the open files anyway): the host goes on its first answer.
+  t=$(mktemp -d); mkdir -p "$t/sh/d"; head -c 3000000 /dev/urandom > "$t/sh/d/f"
+  cmd='sleep 1; echo A-$(sha256sum /mnt/share/d/f | cut -c1-16); while [ ! -e /mnt/share/ready ]; do sleep 0.2; done; echo B-$(sha256sum /mnt/share/d/f | cut -c1-16)-$(wc -c < /mnt/share/d/f); echo R-DONE; poweroff -f'
+  ( (slp 6; echo "$cmd"; slp 60) | ./out/bend-vmm --mem 256 --kernel $GIMG --initrd $GI --share "$t/sh" --cmdline "$GCON quiet" > "$t/log" 2>&1 & )
+  for _ in $(seq $((60 * SLOW * 4))); do grep -aq "^A-[0-9a-f]" "$t/log" 2>/dev/null && break; sleep 0.25; done
+  rm -rf "$t/sh/d"; mkdir "$t/sh/d"; head -c 5000000 /dev/urandom > "$t/sh/d/f"
+  new=$(shasum -a 256 "$t/sh/d/f" 2>/dev/null || sha256sum "$t/sh/d/f"); new=${new:0:16}; touch "$t/sh/ready"
+  for _ in $(seq $((60 * SLOW * 4))); do grep -aq "^R-DONE" "$t/log" 2>/dev/null && break; sleep 0.25; done
+  grep -aq "^B-$new-5000000" "$t/log" && grn "ok: a file the host replaced reads as the new one" \
+    || { red "failed: a replaced shared file (want B-$new-5000000)"; tr -d '\r' < "$t/log" | grep -a "^A-\|^B-" | tail -3; fail=1; }
+  for _ in $(seq $((30 * SLOW))); do grep -aq "stopped\|power" "$t/log" 2>/dev/null && break; sleep 1; done
   rm -rf "$t"
 fi
 
