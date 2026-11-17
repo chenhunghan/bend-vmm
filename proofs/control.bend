@@ -105,3 +105,30 @@ def L.control.status_json_kept():
 
 def L.control.with_ram():
   {==}
+
+def L.control.exit_name_vtimer():
+  {==}
+
+def L.control.exit_name_wfi():
+  {==}
+
+def L.control.exit_name_mmio_hvf():
+  {==}
+
+def L.control.exit_name_mmio_kvm():
+  {==}
+
+def L.control.exit_name_ec():
+  {==}
+
+def L.control.exit_name_kvm():
+  {==}
+
+def L.control.exit_name_other():
+  {==}
+
+def L.control.with_exits():
+  {==}
+
+def L.control.with_exits_none():
+  {==}

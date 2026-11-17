@@ -92,6 +92,45 @@ def Ctl.ram_json(+resident_kib: U32, +compressed_kib: U32) -> String:
 def Ctl.with_ram(+json: String, +resident_kib: U32, +compressed_kib: U32) -> String:
   String.take(json, Nat.sub(String.length(json), 1n)) ++ Ctl.ram_json(resident_kib, compressed_kib)
 
+# An exit bucket's name (host/hvf.c's hvf_exit_bucket): 0..63 an
+# exception's class on Hypervisor.framework, 64 a vtimer, 65 canceled (a
+# kick), 66 + a KVM exit reason, 127 anything else.
+def Ctl.exit_name(+b: U32) -> String:
+  Bool.pick(String, U32.is_eq(b, 1), "wfi",
+  Bool.pick(String, U32.is_eq(b, 22), "hvc",
+  Bool.pick(String, U32.is_eq(b, 23), "smc",
+  Bool.pick(String, U32.is_eq(b, 24), "sysreg",
+  Bool.pick(String, U32.is_eq(b, 36), "mmio",
+  Bool.pick(String, U32.is_eq(b, 64), "vtimer",
+  Bool.pick(String, U32.is_eq(b, 65), "canceled",
+  Bool.pick(String, U32.is_eq(b, 68), "io",
+  Bool.pick(String, U32.is_eq(b, 69), "hypercall",
+  Bool.pick(String, U32.is_eq(b, 71), "hlt",
+  Bool.pick(String, U32.is_eq(b, 72), "mmio",
+  Bool.pick(String, U32.is_eq(b, 74), "shutdown",
+  Bool.pick(String, U32.is_eq(b, 90), "system_event",
+  Bool.pick(String, U32.is_lt(b, 64), "ec_" ++ U32.show(b),
+  Bool.pick(String, U32.is_lt(b, 127), "kvm_" ++ U32.show((b - 66 : U32)), "other")))))))))))))))
+
+# Hvf.exit_counts' words ([cpu, n, n pairs of (bucket, count)] per vCPU)
+# as JSON: each vCPU opens with "},{" (Ctl.exits_json trims the first).
+def Ctl.exits_go(ws: +List<U32>, left: Nat) -> String:
+  match ws left:
+    case Con{cpu, Con{n, rest}} 0n:
+      "},{\"cpu\":" ++ U32.show(cpu) ++ Ctl.exits_go(rest, U32.to_nat(n))
+    case Con{b, Con{k, rest}} 1n+p:
+      ",\"" ++ Ctl.exit_name(b) ++ "\":" ++ U32.show(k) ++ Ctl.exits_go(rest, p)
+    case _ _:
+      ""
+
+def Ctl.exits_json(ws: +List<U32>) -> String:
+  +body : String = Ctl.exits_go(ws, 0n)
+  Bool.pick(String, String.is_empty(body), "[]", "[" ++ String.drop(body, 2n) ++ "}]")
+
+# status json's exits by vCPU, spliced before the object's closing brace.
+def Ctl.with_exits(+json: String, ws: +List<U32>) -> String:
+  String.take(json, Nat.sub(String.length(json), 1n)) ++ ",\"exits\":" ++ Ctl.exits_json(ws) ++ "}"
+
 # A command that takes an argument, given none: its usage.
 def Ctl.needs(+arg: String, c: Cmd, why: String) -> Cmd:
   Bool.pick(Cmd, String.is_empty(arg), CBad{why}, c)

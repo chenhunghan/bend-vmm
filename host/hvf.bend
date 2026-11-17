@@ -450,6 +450,12 @@ def Hvf.resume() -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+# Exits so far, per vCPU: [cpu, n, n pairs of (bucket, count)]
+# (Ctl.exit_name names a bucket).
+def Hvf.exit_counts() -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.pause_state() -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"

@@ -119,3 +119,32 @@ law control.status_json_kept:
 # Proposed: status json also says what of guest RAM the host holds.
 law control.with_ram:
   {C.Ctl.with_ram("{\"state\":\"running\"}", 2048, 0) == "{\"state\":\"running\",\"ram\":{\"resident_mib\":2,\"compressed_mib\":0}}" : String}
+
+# Proposed: status json also counts each vCPU's exits by kind (bend-vk8s,
+# for idle cost): host/hvf.c's buckets, named here.
+law control.exit_name_vtimer:
+  {C.Ctl.exit_name(64) == "vtimer" : String}
+
+law control.exit_name_wfi:
+  {C.Ctl.exit_name(1) == "wfi" : String}
+
+law control.exit_name_mmio_hvf:
+  {C.Ctl.exit_name(36) == "mmio" : String}
+
+law control.exit_name_mmio_kvm:
+  {C.Ctl.exit_name(72) == "mmio" : String}
+
+law control.exit_name_ec:
+  {C.Ctl.exit_name(5) == "ec_5" : String}
+
+law control.exit_name_kvm:
+  {C.Ctl.exit_name(80) == "kvm_14" : String}
+
+law control.exit_name_other:
+  {C.Ctl.exit_name(127) == "other" : String}
+
+law control.with_exits:
+  {C.Ctl.with_exits("{\"state\":\"running\"}", [0, 2, 64, 120, 36, 7, 1, 1, 65, 3]) == "{\"state\":\"running\",\"exits\":[{\"cpu\":0,\"vtimer\":120,\"mmio\":7},{\"cpu\":1,\"canceled\":3}]}" : String}
+
+law control.with_exits_none:
+  {C.Ctl.with_exits("{\"state\":\"running\"}", []) == "{\"state\":\"running\",\"exits\":[]}" : String}

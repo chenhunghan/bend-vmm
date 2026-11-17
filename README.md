@@ -62,8 +62,9 @@ Hosts: macOS 15+ on Apple Silicon, or Linux on arm64 with `/dev/kvm`
 (kernel 6.7+). Tagged releases publish binaries for both (see Releases below).
 
 To build: Bend 2.0.40 (`curl -fsSL https://bend-lang.com/install.sh | sh`),
-and Xcode Command Line Tools on macOS or clang (plus `libx11-dev` for
-`--display`) on Linux.
+and Xcode Command Line Tools on macOS or clang and `libx11-dev` (headers
+only) on Linux. A Linux binary loads libX11 only when `--display` opens a
+window, so it runs on headless servers without it.
 
 ```sh
 scripts/build.sh host/main.bend out/bend-vmm          # build (and sign, on macOS)
@@ -101,8 +102,8 @@ Options:
 | `--control SOCK` | a Unix socket for management commands (below) |
 | `--restore FILE` | start from a snapshot; pass the same `--disk`, `--share`, `--vsock`, `--firmware` and `--vars` it was taken with (a snapshot cannot choose host files by itself); `--forward` comes from this command line, not the snapshot |
 
-Linux (KVM): the same binary builds on Linux arm64 (clang, `libx11-dev` for
-`--display`) with `scripts/build.sh`, and runs with `/dev/kvm`; snapshots
+Linux (KVM): the same binary builds on Linux arm64 (clang, `libx11-dev`)
+with `scripts/build.sh`, and runs with `/dev/kvm`; snapshots
 included (a snapshot restores on the hypervisor that took it).
 
 x86_64 (KVM on Linux x86_64): the same sources build on an x86_64 Linux
@@ -252,7 +253,11 @@ the VMM releases each 16 KiB block once all of its pages are in the
 balloon. `status json` then reads
 `{"state":"running","balloon":{"target_mib":1024,"actual_mib":1024,"kept_mib":0}}`:
 `status json` also reports `"ram":{"resident_mib":…,"compressed_mib":…}`:
-what of guest RAM the host holds (resident, and in macOS's compressor);
+what of guest RAM the host holds (resident, and in macOS's compressor),
+and `"exits":[{"cpu":0,"vtimer":…,"mmio":…},…]`: each vCPU's exits so far
+by kind (`wfi`, `hvc`, `sysreg`, `mmio`, `vtimer`, `canceled` for a kick,
+`io`, `hlt`, …; `ec_N` or `kvm_N` for the rest; counts wrap at 2^32), to
+see what an idle guest costs;
 the VMM's footprint is that plus its own memory (a few MiB). On macOS a
 page of guest RAM the VMM itself writes (a disk read, a received packet,
 a shared-folder read, the kernel it loads) is charged to it twice, once

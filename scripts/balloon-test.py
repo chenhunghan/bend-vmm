@@ -159,6 +159,8 @@ else:
         if '"actual_mib":1024' in st:
             break
     check("the guest puts 1024 MiB in the balloon (status json)", '"actual_mib":1024' in st and '"target_mib":1024' in st, st)
+    ex = re.search(r'"exits":\[(.*)\]', st)
+    check("status json counts each vCPU's exits", ex is not None and '{"cpu":0,' in ex.group(1) and '{"cpu":1,' in ex.group(1) and '"mmio":' in ex.group(1), st)
     low = vm.rss()
     check("inflating gives the host its memory (%d -> %d MiB)" % (full, low), full - low >= 500, "%d -> %d" % (full, low))
     ctl("balloon 0")

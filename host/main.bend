@@ -881,7 +881,8 @@ def balloon_reply(has: Bool, info: Maybe<&2, Bl.Bal>) -> String:
         put(mc, m)
         +res : U32 <- H.Hvf.ram_kib(0)
         +comp : U32 <- H.Hvf.ram_kib(1)
-        return Ctl.Ctl.with_ram(status_json(Bool.not(U32.is_zero(H.Host.first(st))), info), res, comp)
+        ex : +List<U32> <- H.Hvf.exit_counts()
+        return Ctl.Ctl.with_exits(Ctl.Ctl.with_ram(status_json(Bool.not(U32.is_zero(H.Host.first(st))), info), res, comp), ex)
     case Ctl.CBalloon{mib}:
       do IO<String>:
         +m0 : M.Machine <- take(mc)

@@ -9,7 +9,7 @@ carries out plans that Bend hands it.
 This file is the audit of that boundary. It covered all 113 effects in
 host/hvf.c as of 2026-11-09 and says, for each group, where the
 decisions are made; the migration ledger at the end lists every effect
-(145 as of 2026-11-16) with its target in the C-to-Bend plan. The
+(146 as of 2026-11-17) with its target in the C-to-Bend plan. The
 section before it lists every decision still in C, with the reason it
 stays.
 
@@ -17,7 +17,7 @@ stays.
 
 | Group | Effects | C does | Bend decides (src/) |
 |---|---|---|---|
-| Hypervisor | `init` `vcpu` `vcpu_queue` `irq` `kick` `pause` `resume` `pause_state` `arch` `x86_setup` `x86_boot` `x86_pio_put` `x86_pio_get` | creates the VM and vCPUs, runs them, reports exits as facts (KVM's raw, kind 2000 + reason); on x86_64 applies the machine Bend describes (interrupt pins, CPUID rules, the boot registers) | everything about the machine; KVM exits become the machine's terms in `arm64/kvmexit.bend` and `x86/xexit.bend`; the x86_64 machine (memory map, boot structures, ACPI, port IO, CPUID, interrupt pins) in `src/x86/` |
+| Hypervisor | `init` `vcpu` `vcpu_queue` `irq` `kick` `pause` `resume` `pause_state` `exit_counts` `arch` `x86_setup` `x86_boot` `x86_pio_put` `x86_pio_get` | creates the VM and vCPUs, runs them, reports exits as facts (KVM's raw, kind 2000 + reason); on x86_64 applies the machine Bend describes (interrupt pins, CPUID rules, the boot registers) | everything about the machine; KVM exits become the machine's terms in `arm64/kvmexit.bend` and `x86/xexit.bend`; the x86_64 machine (memory map, boot structures, ACPI, port IO, CPUID, interrupt pins) in `src/x86/` |
 | Snapshots | `snap_save` `snap_commit` `snap_rebase` `snap_drop` `snap_open` `snap_peek` `snap_load` `snap_info` `snap_args` `snap_machine` `snap_gic` `snap_plans` `rename` | reads and writes the registers and the vGIC that a plan names, and moves byte ranges | file layout, placement and format version (`vmm/snapfile.bend`), vGIC replay order (`arm64/gicplan.bend`), registers kept (`arm64/regplan.bend`), file mode (`vmm/hostfiles.bend`) |
 | Memory and images | `load` `read` `write` `file_size` `zero_ram` `inflate_ram` `inflate_disk` `flash` `fw_load` | copies files into guest RAM; inflates gzip and deflate | whether to inflate (`boot/image.bend`), where things go (`vmm/layout.bend`), whether firmware fits (`Layout.flash_fits`) |
 | Disks | `disk_open_with` `disk_err` `disk_read` `disk_write` `disk_copy` `disk_short` `disk_mark` `disk_xcopy` `disk_alloc` `disk_flush` `disk_size` `disk_status` | moves bytes between images and guest memory; opens and locks images | how each use opens and locks (`disk/access.bend`), read-only fallback, qcow2 (`src/disk`) |
@@ -254,6 +254,7 @@ row but the decisions listed as moved above.
 | `x86_boot` | `hvf_x86_boot_run` | host/platform/kvm.bend | ABI bindings | 5 | x86 workflow | none | Bend decides every register (Boot.regs); C sets them (2026-11-16) |
 | `x86_pio_put` | `hvf_x86_pio_put_run` | host/platform/kvm.bend | none | 5 | check-host snapshots (x86) | none | Bend encodes the port machine (Pio.saved) and says when it changed; C keeps the words for the snapshot (2026-11-16) |
 | `x86_pio_get` | `hvf_x86_pio_get_run` | host/platform/kvm.bend | none | 5 | check-host snapshots (x86) | none | C hands back what a restore read; Bend decodes it (Pio.restored) (2026-11-16) |
+| `exit_counts` | `hvf_exit_counts_run` | host/vcpu.bend | dedicated workers | 1, 5 | control law control.with_exits; check-host status json | none (one counter per exit) | C counts each vCPU's exits by their raw identity (exception class, KVM reason); Bend names them and builds status json (Ctl.exit_name) (2026-11-17) |
 | `size_kib` | `hvf_size_kib_run` (5362) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C reports a fact (2026-11-11) |
 | `vsock_base` | `hvf_vsock_base_run` (4502) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
 | `unix_connect` | `hvf_unix_connect_run` (4517) | host/main.bend over thin OS calls | OS-call bindings, owned fds | 2 | check-host control, vsock, forwards | exit (layout) | C acts; Bend decides (Clients, Files) |
