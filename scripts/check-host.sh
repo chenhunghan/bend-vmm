@@ -456,7 +456,7 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   out=$(drive 60 "busybox shell" "$cmd\n" "FL-DONE" 'poweroff -f\n' -- \
     ./out/bend-vmm --mem 256 --kernel $GIMG --initrd $GI --share "$t/sh" --cmdline "$GCON quiet" 2>&1 | tr -d '\r')
   fifo=$(grep -ao "^FIFO-WAITED\|^FIFO-FAILED.*" <<<"$out" | head -1); ftype=$(grep -ao "^FIFO-TYPE-." <<<"$out" | head -1)
-  [ -n "$ftype" ] && [ -n "$fifo" ] && grep -aq "^FIFO-AFTER-REG-WRONG" <<<"$out" \
+  [ -n "$ftype" ] && [ -n "$fifo" ] && grep -aq "^FIFO-AFTER-REG-OK" <<<"$out" \
     && grn "ok: a FIFO in the share (ls: ${ftype#FIFO-TYPE-}; $fifo) leaves the share serving: a regular file reads after it" \
     || { red "failed: a FIFO in the share"; grep -a "FIFO" <<<"$out" | tail -4; fail=1; }
   grep -aq "^LINK-AFTER-REG-OK" <<<"$out" && grep -aq "^FL-DONE" <<<"$out" && ! grep -aq "$secret" <<<"$out" \
@@ -500,7 +500,7 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   fi
   touch "$t/sh/go2"; wait $vm; out=$(tr -d '\r' < "$t/log")
   dns=$(grep -ac '^UDP-DNS-OK' <<<"$out")
-  [ "$dns" -ge 2 ] && [ "$open" -gt "$base" ] && [ "$gone" -ge 500 ] && [ "$first" -ge 50 ] \
+  [ "$dns" -ge 2 ] && [ "$open" -gt "$base" ] && [ "$gone" -ge 50 ] && [ "$first" -ge 50 ] \
     && grn "ok: $((open - base)) idle UDP flows close their host sockets after ${first}-${gone} s (udp_idle 60 s)" \
     || { red "failed: UDP flow expiry (pid ${p:-none}, sockets: before $base, open $open, last $now; first closed at $first s, all at $gone s; $dns lookups)"; grep -a "UDP-\|nslookup" <<<"$out" | tail -4; fail=1; }
   grep -aq "^UDP-AGAIN-OK" <<<"$out" && grep -aq "^UDP-DONE" <<<"$out" \
@@ -528,7 +528,7 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   kill $sink 2>/dev/null; wait $sink 2>/dev/null
   src=$(grep -ao '^SRC-[0-9a-f]\{16\}' <<<"$out" | head -1); src=${src#SRC-}
   img=$(head -c 67108864 "$t/scratch.img" | { shasum -a 256 2>/dev/null || sha256sum; }); img=${img:0:16}
-  [ "$(cat "$t/net" 2>/dev/null)" = 67108865 ] && grep -aq "^NET-EXIT-" <<<"$out" \
+  [ "$(cat "$t/net" 2>/dev/null)" = 67108864 ] && grep -aq "^NET-EXIT-" <<<"$out" \
     && [ -n "$src" ] && grep -aq "^DISK-$src" <<<"$out" && [ "$img" = "$src" ] && grep -aq "^LOAD-DONE" <<<"$out" \
     && grn "ok: 64 MiB over the NAT and 64 MiB to a disk and back at once, every byte ($((SECONDS - s0)) s)" \
     || { red "failed: network and disk at once (host got $(cat "$t/net" 2>/dev/null), src $src, image $img)"; grep -a "SRC-\|DISK-\|NET-\|nc:\|LOAD-" <<<"$out" | tail -5; fail=1; }
