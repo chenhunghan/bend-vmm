@@ -14,7 +14,9 @@
 #   2. (when host/main.bend exists) the same payloads on the full machine.
 #   3. Linux (scripts/linux-assets.sh) boots to its init marker and powers off.
 #   4. the guest suite (tests/guest/rootfs/tests.sh), net, 9p, vsock, port
-#      forwarding (--forward), console.
+#      forwarding (--forward), console; 5b-5m the NAT, the share and the
+#      disk under faults and load (a FIFO and symlinks in a share, UDP
+#      flow expiry, network and disk at once).
 #   5. lifecycle: pause, resume, snapshot, restore; SIGTERM and powerdown
 #      press the guest's power button.
 #   6. display: screendump, and the virtio keyboard and tablet driven through
@@ -68,6 +70,13 @@ expect() {
   name=$1 secs=$2 pat=$3; shift 3
   out=$( (alarm "$secs" "$@") 2>&1 )
   if grep -q -- "$pat" <<<"$out"; then grn "ok: $name"; else red "failed: $name"; echo "$out" | tail -20; fail=1; fi
+}
+
+# waitlog <file> <pattern> <timeout-s>: waits until pattern shows in file
+# (the timeout stretched by CHECK_SLOW); fails when it does not.
+waitlog() {
+  for _ in $(seq $(( $3 * SLOW * 5 ))); do grep -aq -- "$2" "$1" 2>/dev/null && return 0; sleep 0.2; done
+  return 1
 }
 
 if [ "${SKIP_NATIVE:-0}" != 1 ]; then
@@ -428,6 +437,103 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
     || { red "failed: a replaced shared file (want B-$new-5000000)"; tr -d '\r' < "$t/log" | grep -a "^A-\|^B-" | tail -3; fail=1; }
   for _ in $(seq $((30 * SLOW))); do grep -aq "stopped\|power" "$t/log" 2>/dev/null && break; sleep 1; done
   rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5k. a FIFO and a symlink out of the share: no hang, no host file"
+  # host/hvf.c's hvf_fs_run opens only regular files (O_NOFOLLOW |
+  # O_NONBLOCK, then S_ISREG). The guest's kernel opens a FIFO it sees in
+  # the share as its own pipe, so a cat of it waits for a writer in the
+  # guest: it is killed after 2 s, and the share must keep serving. Two
+  # symlinks to a host file outside the share (absolute, ../) resolve in
+  # the guest's namespace, never to the host file: its marker never shows.
+  # (Each marker the host waits for is typed split, "A-""B", so the echoed
+  # command line does not match it.)
+  t=$(mktemp -d); mkdir "$t/sh"; echo REG-OK > "$t/sh/reg"; mkfifo "$t/sh/fifo"
+  secret="HOST-SECRET-$RANDOM$RANDOM"; echo "$secret" > "$t/secret"; ln -s "$t/secret" "$t/sh/out"; ln -s ../secret "$t/sh/up"
+  cmd='cd /mnt/share; echo FIFO-TYPE-$(ls -l fifo | cut -c1); cat fifo > /tmp/f 2>&1 & p=$!; sleep 2; if kill $p 2>/dev/null; then echo FIFO-WAITED; else echo FIFO-FAILED $(cat /tmp/f); fi; echo FIFO-AFTER-$(cat reg); readlink out; readlink up; cat out up 2>&1; dd if=out bs=1 count=64 2>&1; ls /mnt/share; echo LINK-AFTER-$(cat reg); echo FL-""DONE'
+  s0=$SECONDS
+  out=$(drive 60 "busybox shell" "$cmd\n" "FL-DONE" 'poweroff -f\n' -- \
+    ./out/bend-vmm --mem 256 --kernel $GIMG --initrd $GI --share "$t/sh" --cmdline "$GCON quiet" 2>&1 | tr -d '\r')
+  fifo=$(grep -ao "^FIFO-WAITED\|^FIFO-FAILED.*" <<<"$out" | head -1); ftype=$(grep -ao "^FIFO-TYPE-." <<<"$out" | head -1)
+  [ -n "$ftype" ] && [ -n "$fifo" ] && grep -aq "^FIFO-AFTER-REG-OK" <<<"$out" \
+    && grn "ok: a FIFO in the share (ls: ${ftype#FIFO-TYPE-}; $fifo) leaves the share serving: a regular file reads after it" \
+    || { red "failed: a FIFO in the share"; grep -a "FIFO" <<<"$out" | tail -4; fail=1; }
+  grep -aq "^LINK-AFTER-REG-OK" <<<"$out" && grep -aq "^FL-DONE" <<<"$out" && ! grep -aq "$secret" <<<"$out" \
+    && grn "ok: symlinks out of the share never read the host file ($((SECONDS - s0)) s for the step)" \
+    || { red "failed: symlinks out of the share"; grep -a "SECRET\|LINK\|out\|up" <<<"$out" | tail -6; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5l. UDP flow expiry: a flow idle past udp_idle closes its host socket"
+  # src/net/limits.bend: udp_idle is 60 s (Lim.default; there is no knob),
+  # Udp.idle (src/net/udpflow.bend) closes the flow. Three DNS lookups open
+  # three flows, one host socket each; the guest then sends nothing until
+  # the VMM's UDP sockets are back to where they were before (counted in
+  # /proc on Linux, by lsof on macOS), and a lookup after that still works.
+  if [ "$SLOW" -ge 4 ]; then echo "skipped: a 60 s idle wait (an emulated CPU, CHECK_SLOW=$SLOW)"; else
+  t=$(mktemp -d); mkdir "$t/sh"
+  # udpsocks <pid>: the number of UDP sockets the process holds
+  udpsocks() {
+    if [ -d "/proc/$1/fd" ]; then
+      awk 'FNR > 1 {print $10}' "/proc/$1/net/udp" "/proc/$1/net/udp6" 2>/dev/null | sort -u > "$t/udpino"
+      ls -l "/proc/$1/fd" 2>/dev/null | sed -n 's/.*socket:\[\([0-9]*\)\].*/\1/p' | grep -cxFf "$t/udpino"
+    else
+      lsof -a -n -P -p "$1" -i UDP 2>/dev/null | tail -n +2 | wc -l | tr -d ' '
+    fi
+  }
+  cmd='echo UDP-""READY; while [ ! -e /mnt/share/go1 ]; do sleep 0.2; done; for i in 1 2 3; do nslookup example.com >/dev/null 2>&1 && echo UDP-DNS-OK; done; echo UDP-""OPEN; while [ ! -e /mnt/share/go2 ]; do sleep 0.5; done; nslookup example.com >/dev/null 2>&1 && echo UDP-AGAIN-OK; echo UDP-""DONE'
+  s0=$SECONDS
+  drive 150 "busybox shell" "$cmd\n" "UDP-DONE" 'poweroff -f\n' -- \
+    ./out/bend-vmm --mem 256 --kernel $GIMG --initrd $GI --share "$t/sh" --cmdline "$GCON quiet bendudpidle" > "$t/log" 2>&1 & vm=$!
+  waitlog "$t/log" "UDP-READY" 60; p=$(pgrep -f '^./out/bend-vmm .*bendudpidle' | head -1)
+  base=-1; open=-1; now=-1; first=-1; gone=-1
+  if [ -n "$p" ]; then
+    base=$(udpsocks "$p"); touch "$t/sh/go1"
+    waitlog "$t/log" "UDP-OPEN" 60; t0=$SECONDS; open=$(udpsocks "$p")
+    while [ $((SECONDS - t0)) -lt 90 ]; do
+      now=$(udpsocks "$p"); [ "$first" = -1 ] && [ "$now" -lt "$open" ] && first=$((SECONDS - t0))
+      [ "$now" -le "$base" ] && { gone=$((SECONDS - t0)); break; }
+      sleep 1
+    done
+  fi
+  touch "$t/sh/go2"; wait $vm; out=$(tr -d '\r' < "$t/log")
+  dns=$(grep -ac '^UDP-DNS-OK' <<<"$out")
+  [ "$dns" -ge 2 ] && [ "$open" -gt "$base" ] && [ "$gone" -ge 50 ] && [ "$first" -ge 50 ] \
+    && grn "ok: $((open - base)) idle UDP flows close their host sockets after ${first}-${gone} s (udp_idle 60 s)" \
+    || { red "failed: UDP flow expiry (pid ${p:-none}, sockets: before $base, open $open, last $now; first closed at $first s, all at $gone s; $dns lookups)"; grep -a "UDP-\|nslookup" <<<"$out" | tail -4; fail=1; }
+  grep -aq "^UDP-AGAIN-OK" <<<"$out" && grep -aq "^UDP-DONE" <<<"$out" \
+    && grn "ok: a lookup after the flows closed opens a new one ($((SECONDS - s0)) s for the step)" \
+    || { red "failed: a lookup after UDP flow expiry"; grep -a "UDP-" <<<"$out" | tail -4; fail=1; }
+  rm -rf "$t"
+  fi
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5m. network and disk at once: 64 MiB over the NAT while 64 MiB goes to a disk and back"
+  # The guest sends 64 MiB to a host listener (nc through the NAT, as 5d)
+  # and, at the same time, writes 64 MiB of random bytes to a scratch
+  # --disk (virtio-blk) and reads them back past its page cache. The host
+  # counts the bytes it got, and the image holds what the guest wrote.
+  if [ "$SLOW" -ge 4 ]; then echo "skipped: 128 MiB through an emulated CPU (CHECK_SLOW=$SLOW)"; else
+  t=$(mktemp -d); port=$((20000 + RANDOM % 20000))
+  dd if=/dev/zero of="$t/scratch.img" bs=1048576 count=0 seek=80 2>/dev/null
+  python3 scripts/netfault.py sink "$port" 67108864 "$t/net" & sink=$!
+  slp 1
+  cmd='head -c 67108864 /dev/urandom > /tmp/src; echo SRC-$(sha256sum < /tmp/src | cut -c1-16); (head -c 67108864 /dev/zero | nc 10.0.2.2 '$port'; echo NET-EXIT-$?) > /tmp/net 2>&1 & dd if=/tmp/src of=/dev/vda bs=1M conv=fsync 2>/dev/null; echo 3 > /proc/sys/vm/drop_caches; echo DISK-$(head -c 67108864 /dev/vda | sha256sum | cut -c1-16); wait; cat /tmp/net; echo LOAD-""DONE'
+  s0=$SECONDS
+  out=$(drive 120 "busybox shell" "$cmd\n" "LOAD-DONE" 'poweroff -f\n' -- \
+    ./out/bend-vmm --mem 512 --cpus 2 --kernel $GIMG --initrd $GI --disk "$t/scratch.img" --cmdline "$GCON quiet" 2>&1 | tr -d '\r')
+  kill $sink 2>/dev/null; wait $sink 2>/dev/null
+  src=$(grep -ao '^SRC-[0-9a-f]\{16\}' <<<"$out" | head -1); src=${src#SRC-}
+  img=$(head -c 67108864 "$t/scratch.img" | { shasum -a 256 2>/dev/null || sha256sum; }); img=${img:0:16}
+  [ "$(cat "$t/net" 2>/dev/null)" = 67108864 ] && grep -aq "^NET-EXIT-" <<<"$out" \
+    && [ -n "$src" ] && grep -aq "^DISK-$src" <<<"$out" && [ "$img" = "$src" ] && grep -aq "^LOAD-DONE" <<<"$out" \
+    && grn "ok: 64 MiB over the NAT and 64 MiB to a disk and back at once, every byte ($((SECONDS - s0)) s)" \
+    || { red "failed: network and disk at once (host got $(cat "$t/net" 2>/dev/null), src $src, image $img)"; grep -a "SRC-\|DISK-\|NET-\|nc:\|LOAD-" <<<"$out" | tail -5; fail=1; }
+  rm -rf "$t"
+  fi
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && arm; then

@@ -8,6 +8,9 @@ usage: netfault.py slow PORT N OUT    one connection read slowly (16 KiB
                                       after AFTER bytes; the second is read
                                       for 1 MiB; writes "dropped COUNT" to
                                       OUT
+       netfault.py sink PORT N OUT    one connection read at full speed
+                                      until N bytes (section 5m); writes
+                                      the count to OUT, then closes
 """
 import socket, struct, sys, time
 
@@ -35,6 +38,16 @@ def main(argv):
                 break
             got += len(b)
             time.sleep(0.01)
+        open(out, "w").write(str(got))
+        c.close()
+    elif mode == "sink":
+        c, _ = s.accept()
+        got = 0
+        while got < n:
+            b = c.recv(1 << 20)
+            if not b:
+                break
+            got += len(b)
         open(out, "w").write(str(got))
         c.close()
     elif mode == "drop":
