@@ -69,8 +69,8 @@ def Files.dir_trusted(+kind: U32, mine: Bool, +perm: U32) -> Bool:
   U32.is_eq(kind, 1) && mine && U32.is_zero((perm .&. 63 : U32))
 
 # A VM's socket in the LAN directory: its MAC, two lowercase hex digits a
-# byte joined by "-", then ".sock" (host/hvf.c names the sockets it sends to
-# the same way).
+# byte joined by "-", then ".sock" (host/hvf.c binds and sends to the names
+# Bend gives it).
 def Files.hex2(+b: U32) -> String:
   SCon{U.U64.hex_digit(((b >> 4n : U32) .&. 15 : U32)), SCon{U.U64.hex_digit((b .&. 15 : U32)), ""}}
 
@@ -85,6 +85,32 @@ def Files.mac.go(bs: +List<U32>) -> String:
 
 def Files.lan_sock(+mac: +List<U32>) -> String:
   Files.mac.go(mac) ++ ".sock"
+
+# A broadcast's recipients: of Hvf.lan_names' answer (this VM's socket,
+# then the names in the LAN directory), every VM's socket but this one's.
+def Files.lan_peer(+self: String, +name: String) -> Bool:
+  String.ends_with(name, ".sock") && Bool.not(String.eq(name, self))
+
+def Files.lan_peers.keep(keep: Bool, n: String, rest: List<String>) -> List<String>:
+  match keep:
+    case True{}:
+      Con{n, rest}
+    case False{}:
+      rest
+
+def Files.lan_peers.go(+self: String, names: List<String>) -> List<String>:
+  match names:
+    case Nil{}:
+      []
+    case Con{+n, rest}:
+      Files.lan_peers.keep(Files.lan_peer(self, n), n, Files.lan_peers.go(self, rest))
+
+def Files.lan_peers(names: List<String>) -> List<String>:
+  match names:
+    case Nil{}:
+      []
+    case Con{self, rest}:
+      Files.lan_peers.go(self, rest)
 
 # The program a guest reset starts again (Hvf.reexec): this executable as
 # the system names it (Hvf.exe_path; "" when it cannot), else the first

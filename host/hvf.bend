@@ -45,10 +45,6 @@ def Hvf.irq(intid: U32, level: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.kick(cpu: U32) -> IO(U32):
-  import "./hvf.c"
-  import "./hvf.js"
-
 # 0 arm64 guests (Hypervisor.framework, KVM on arm64), 1 x86_64 (KVM on x86_64).
 def Hvf.arch() -> IO(U32):
   import "./hvf.c"
@@ -179,10 +175,6 @@ def Hvf.log_gate() -> IO(U32):
   do IO<U32>:
     +ws : +List<U32> <- Hvf.log_state()
     Hvf.log_gate.put(Lg.Gate.step(Lg.Gate.wire(ws), Lg.Gate.now(ws)))
-
-def Hvf.stdin(max: U32) -> IO(+List<U32>):
-  import "./hvf.c"
-  import "./hvf.js"
 
 def Hvf.stdin_tty() -> IO(U32):
   import "./hvf.c"
@@ -472,15 +464,15 @@ def Hvf.snap_rebase(path: String, off_hi: U32, off_lo: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.tick_wait(ms: U32) -> IO(U32):
+def Hvf.lan_open(dir: String, name: String, mode: U32, replace: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.lan_open(dir: String, mac: +List<U32>, mode: U32, replace: U32) -> IO(U32):
+def Hvf.lan_send(name: String, iovs: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.lan_send(dst: +List<U32>, iovs: +List<U32>) -> IO(U32):
+def Hvf.lan_names() -> IO(List<String>):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -1039,9 +1031,9 @@ def Host.lan_dir.ok(+dir: String) -> IO(Bool):
 def Host.lan_open.go(l: Hf.Listen, +dir: String, mac: +List<U32>) -> IO(U32):
   match l:
     case Hf.LBind{}:
-      Hvf.lan_open(dir, mac, Hf.Files.private(), 0)
+      Hvf.lan_open(dir, Hf.Files.lan_sock(mac), Hf.Files.private(), 0)
     case Hf.LReplace{}:
-      Hvf.lan_open(dir, mac, Hf.Files.private(), 1)
+      Hvf.lan_open(dir, Hf.Files.lan_sock(mac), Hf.Files.private(), 1)
     case Hf.LInUse{}:
       IO.pure(U32, 48)  # EADDRINUSE (macOS) / Linux 98: only shown
     case Hf.LNotSocket{}:

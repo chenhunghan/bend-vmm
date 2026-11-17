@@ -144,6 +144,28 @@ def flash_cmd(cmd: V.FlashCmd) -> IO(U32):
 def vkey(+conn: U32) -> U32:
   (conn .^. 1073741824 : U32)
 
+# A frame onto the LAN: to the VM of MAC dst, or ([]) to every other VM
+# there (src/vmm/hostfiles.bend names their sockets).
+@unsafe def lan_send.each(names: List<String>, +ws: +List<U32>) -> IO(Unit):
+  match names:
+    case Nil{}:
+      IO.pure(Unit, Unit{})
+    case Con{n, rest}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.lan_send(n, ws)
+        lan_send.each(rest, ws)
+
+@unsafe def lan_send(all: Bool, +dst: +List<U32>, +ws: +List<U32>) -> IO(Unit):
+  match all:
+    case False{}:
+      do IO<Unit>:
+        _ : U32 <- H.Hvf.lan_send(Hf.Files.lan_sock(dst), ws)
+        return Unit{}
+    case True{}:
+      do IO<Unit>:
+        names : List<String> <- H.Hvf.lan_names()
+        lan_send.each(Hf.Files.lan_peers(names), ws)
+
 # Runs the Vm program of an exit of vCPU cpu. VmCpuOn starts that vCPU's loop,
 # which is defined below (hence @unsafe: the two recurse into each other).
 @unsafe def interp(+cpu: U32, +mc: Chan(M.Machine), +done: Chan(U32), -A: Type, m: V.Vm<A>) -> IO(A):
@@ -593,10 +615,8 @@ def nat_dns(+ip: U32) -> IO(U32):
         return Unit{}
     case V.TcpAccepted{+conn}:
       IO.spawn(Unit, tcp_reader(mc, done, conn))
-    case V.LanSend{dst, iovs}:
-      do IO<Unit>:
-        _ : U32 <- H.Hvf.lan_send(dst, H.Host.iovs(iovs))
-        return Unit{}
+    case V.LanSend{+dst, iovs}:
+      lan_send(List.is_empty(&2, U32, dst), dst, H.Host.iovs(iovs))
     case V.LanRelease{}:
       do IO<Unit>:
         _ : U32 <- H.Hvf.lan_release()
@@ -1839,9 +1859,7 @@ def shutdown_ms() -> U32:
       IO.pure(Unit, Unit{})
     case True{}:
       do IO<Unit>:
-        # (a pipe the host's ticker writes: IO.sleep alone does not wake the
-        # event loop while nothing else happens, an idle guest)
-        _ : U32 <- H.Hvf.tick_wait(Au.Auto.period_ms())
+        IO.sleep(Au.Auto.period_ms())
         +settled : U32 <- H.Hvf.ram_settle()
         +now : U32 = Au.Auto.later(elapsed)
         balloon_poll.tick(Au.Auto.polls(auto, now), mc, done)
