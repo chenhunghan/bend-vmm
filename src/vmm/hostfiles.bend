@@ -137,3 +137,50 @@ def Files.sock_path_fits(+path: String, +max: U32) -> Bool:
 
 def Files.sock_path_why(+path: String, +max: U32) -> String:
   "the path is too long for a socket (" ++ U32.show(Files.utf8_len(path)) ++ " bytes; at most " ++ U32.show(max) ++ ")"
+
+# Files for a program that embeds the VMM (main.bend's Fs, asked by
+# bend-vk8s): what a path is (Hvf.path_facts' words, decoded) and the
+# directories `mkdir -p` makes, in order.
+type Facts is Data:
+  Facts{kind: U32, size: U.U64, mtime: U.U64}
+
+def Files.facts.at(+ws: +List<U32>, +i: Nat) -> U32:
+  Maybe.default(&2, U32, List.get(&2, U32, ws, i), 0)
+
+# kind: 0 nothing, 1 a directory, 2 a regular file, 3 a symlink, 4 else;
+# from the mode's file type (st_mode & 0o170000, the same on macOS and
+# Linux: 0o040000 a directory, 0o100000 a regular file, 0o120000 a symlink).
+def Files.kind(+there: U32, +mode: U32) -> U32:
+  +t : U32 = (mode .&. 61440 : U32)
+  Bool.pick(U32, U32.is_zero(there), 0,
+  Bool.pick(U32, U32.is_eq(t, 16384), 1,
+  Bool.pick(U32, U32.is_eq(t, 32768), 2,
+  Bool.pick(U32, U32.is_eq(t, 40960), 3, 4))))
+
+# Hvf.path_facts' words: [there, mode, size (hi, lo), mtime (hi, lo)].
+def Files.facts(+ws: +List<U32>) -> Facts:
+  Facts{Files.kind(Files.facts.at(ws, 0n), Files.facts.at(ws, 1n)), U.U64{Files.facts.at(ws, 2n), Files.facts.at(ws, 3n)}, U.U64{Files.facts.at(ws, 4n), Files.facts.at(ws, 5n)}}
+
+# acc then the directories under it that parts name (empty parts skipped).
+def Files.prefixes.with(+acc: String, +p: String) -> String:
+  Bool.pick(String, String.is_empty(p), acc, acc ++ "/" ++ p)
+
+def Files.prefixes.go(parts: List<&2, String>, +acc: String) -> List<&2, String>:
+  match parts:
+    case Nil{}:
+      []
+    case Con{+p, rest}:
+      +next : String = Files.prefixes.with(acc, p)
+      List.append(&2, String, Bool.pick(List<&2, String>, String.is_empty(p), [], [next]), Files.prefixes.go(rest, next))
+
+def Files.prefixes.first(parts: List<&2, String>) -> List<&2, String>:
+  match parts:
+    case Nil{}:
+      []
+    case Con{+first, rest}:
+      List.append(&2, String, Bool.pick(List<&2, String>, String.is_empty(first), [], [first]), Files.prefixes.go(rest, first))
+
+# The directories `mkdir -p path` makes, outermost first: "/a/b" is "/a"
+# then "/a/b", "a//b/" is "a" then "a/b".
+def Files.prefixes(path: String) -> List<&2, String>:
+  Files.prefixes.first(String.split(path, '/'))

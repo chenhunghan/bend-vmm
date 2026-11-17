@@ -102,6 +102,14 @@ def Hvf.ctl_call(path: String, line: String, ms: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.path_facts(path: String) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.set_mtime(path: String, hi: U32, lo: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.ls(dir: String) -> IO(List<String>):
   import "./hvf.c"
   import "./hvf.js"

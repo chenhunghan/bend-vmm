@@ -822,3 +822,33 @@ def cli.sparsified(t: String) -> IO(Unit):
     case Cm.SubRaw{sock, line}:
       IO.bind(Result<&1, &1, Err, String>, Unit, Vmm.ctl(sock, line), r => cli.text(r, ""))
 
+
+# Files for a program that embeds the VMM (main.bend's Fs, asked by
+# bend-vk8s): the host's own calls, each answering 0 or an errno.
+
+# mkdir -p: each directory of path that is not there yet (17, EEXIST, is
+# no error); the first other errno stops it.
+def Fs.mkdir_p.ok(+rc: U32) -> Bool:
+  U32.is_zero(rc) || U32.is_eq(rc, 17)
+
+def Fs.mkdir_p.go(dirs: List<&2, String>, +mode: U32, +prev: U32) -> IO(U32):
+  match dirs:
+    case Nil{}:
+      IO.pure(U32, Bool.pick(U32, Fs.mkdir_p.ok(prev), 0, prev))
+    case Con{d, rest}:
+      do IO<U32>:
+        +rc : U32 <- Bool.pick(IO(U32), Fs.mkdir_p.ok(prev), H.Hvf.mkdir(d, mode), IO.pure(U32, prev))
+        Fs.mkdir_p.go(rest, mode, rc)
+
+def Fs.mkdir_p(+path: String, +mode: U32) -> IO(U32):
+  Fs.mkdir_p.go(Hf.Files.prefixes(path), mode, 0)
+
+def Fs.facts(+path: String) -> IO(Hf.Facts):
+  do IO<Hf.Facts>:
+    +ws : +List<U32> <- H.Hvf.path_facts(path)
+    return Hf.Files.facts(ws)
+
+def Fs.set_mtime(+path: String, t: U.U64) -> IO(U32):
+  match t:
+    case U.U64{hi, lo}:
+      H.Hvf.set_mtime(path, hi, lo)
