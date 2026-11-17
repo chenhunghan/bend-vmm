@@ -268,6 +268,7 @@ typedef struct {
   size_t          nsaved;
   const uint8_t*  icc;      // GIC CPU registers to restore before the first run
   size_t          nicc;
+  _Atomic uint32_t exits[128]; // exits by hvf_exit_bucket, for Hvf.exit_counts
 #ifdef __APPLE__
   hv_vcpu_t       vcpu;
   hv_vcpu_exit_t* exit;
@@ -292,6 +293,14 @@ static int hvf_trace;
 static void hvf_put64(HvfCpu* c, uint64_t v) {
   c->out[c->nout++] = (uint32_t)(v >> 32);
   c->out[c->nout++] = (uint32_t)v;
+}
+
+// An exit's raw identity, as an index for the vCPU's exit counts (the
+// names are Bend's: Ctl.exit_name): 0..63 an exception's class (ESR.EC),
+// 64 a vtimer, 65 canceled, 66 + KVM's exit reason, 127 anything else.
+static unsigned hvf_exit_bucket(const uint32_t* o) {
+  uint32_t k = o[0];
+  return k == 0 ? (o[2] >> 26) & 63 : k < 3 ? 63 + k : k >= 2000 && k < 2061 ? 66 + (k - 2000) : 127;
 }
 
 // Backends
@@ -1712,9 +1721,12 @@ static void hvf_do(HvfCpu* c, int cpu) {
       c->out[c->nout++] = (uint32_t)r;
       break;
     }
-    case OP_RUN:
+    case OP_RUN: {
       hvf_run(c);
+      _Atomic uint32_t* n = &c->exits[hvf_exit_bucket(c->out)];
+      atomic_store_explicit(n, atomic_load_explicit(n, memory_order_relaxed) + 1, memory_order_relaxed);
       break;
+    }
     case OP_SET_REG:
       // a: our register number (0..30 Xn, 31 PC, 32 CPSR), b: value
       c->out[c->nout++] = vmb_set(c, c->a, c->b) == 0 ? 0 : HVF_ERR;
@@ -4538,6 +4550,36 @@ Term hvf_resume_run(Env e, Term* f, IoWork* w) {
   return (Term)0;
 }
 
+// Hvf.exit_counts() -> List<U32>: for each vCPU that exists, [cpu, n, then
+// n pairs of (bucket, count)] for its nonzero hvf_exit_bucket counts (each
+// count wraps at 2^32).
+Term hvf_exit_counts_run(Env e, Term* f, IoWork* w) {
+  static uint32_t ws[HVF_MAX_CPUS * (2 + 2 * 128)];
+  static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_lock(&mu);
+  u64 n = 0;
+  for (uint32_t i = 0; i < HVF_MAX_CPUS; i++) {
+    HvfCpu* c = &hvf_cpus[i];
+    if (!c->live) {
+      continue;
+    }
+    ws[n++] = i;
+    u64 at = n++;
+    ws[at] = 0;
+    for (uint32_t b = 0; b < 128; b++) {
+      uint32_t k = atomic_load_explicit(&c->exits[b], memory_order_relaxed);
+      if (k) {
+        ws[n++] = b;
+        ws[n++] = k;
+        ws[at]++;
+      }
+    }
+  }
+  Term t = hvf_words(e, ws, n);
+  pthread_mutex_unlock(&mu);
+  return t;
+}
+
 // Hvf.pause_state() -> List<U32>: [paused, vCPUs still inside the guest].
 Term hvf_pause_state_run(Env e, Term* f, IoWork* w) {
   pthread_mutex_lock(&hvf_gate_mu);
@@ -7032,6 +7074,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.resume)
   io_eff(CID(Hvf.resume), hvf_resume_run);
+#endif
+#ifdef CID(Hvf.exit_counts)
+  io_eff(CID(Hvf.exit_counts), hvf_exit_counts_run);
 #endif
 #ifdef CID(Hvf.pause_state)
   io_eff(CID(Hvf.pause_state), hvf_pause_state_run);

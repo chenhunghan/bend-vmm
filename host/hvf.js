@@ -98,6 +98,7 @@ io_eff(CID(Hvf.share_open), hvf_unavailable);
 io_eff(CID(Hvf.fs), () => ({ $: CID(Con), head: 1, tail: { $: CID(Con), head: 78, tail: { $: CID(Nil) } } }));
 io_eff(CID(Hvf.pause), hvf_unavailable);
 io_eff(CID(Hvf.resume), hvf_unavailable);
+io_eff(CID(Hvf.exit_counts), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.pause_state), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.snap_save), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.snap_commit), hvf_unavailable);
