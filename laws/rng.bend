@@ -6,7 +6,7 @@ import ../src/virtio/queue.bend as Q
 # src/virtio/rng.bend has no laws yet: tests/rng.bend pins its behaviour on
 # the simulator. Importing it keeps its TODOs visible to the gate.
 
-# Proposed: one chain gets at most 65536 bytes of entropy, however large its
+# One chain gets at most 65536 bytes of entropy, however large its
 # writable room (even when the lengths would wrap a U32 sum); a smaller room
 # gets exactly its size.
 law rng.want_capped:

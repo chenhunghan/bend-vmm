@@ -68,7 +68,7 @@ law qcow2.ref_rti:
 law qcow2.ref_slot:
   {Q.Qcow.ref_slot(q(), U.U64{1, 292552704}) == 4464 : U32}
 
-# Proposed: a raw image never takes a qcow2 header at its start
+# A raw image never takes a qcow2 header at its start
 # (Store.raw.at0): the check that refuses it.
 law qcow2.magic_seen:
   {St.Store.qcow_magic(header()) == True{} : Bool}
@@ -79,7 +79,7 @@ law qcow2.magic_other:
 law qcow2.magic_short:
   {St.Store.qcow_magic([81, 70, 73]) == False{} : Bool}
 
-# Proposed: cluster reuse (Store.alloc) takes the first count of 0 in a
+# Cluster reuse (Store.alloc) takes the first count of 0 in a
 # window of Store.window() counts; none in it is the window's length.
 law qcow2.first_free:
   {St.Store.first_free([0, 1, 0, 2, 0, 0, 0, 1], 0, 4) == 2 : U32}
@@ -90,7 +90,7 @@ law qcow2.first_free_none:
 law qcow2.window:
   {St.Store.window() == 256 : U32}
 
-# Proposed: an image that lists an internal snapshot (header byte 60) is
+# An image that lists an internal snapshot (header byte 60) is
 # not written (its L2 tables are the snapshot's too).
 law qcow2.writable:
   {Q.Qcow.writable(header()) == True{} : Bool}

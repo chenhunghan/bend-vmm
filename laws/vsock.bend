@@ -66,7 +66,7 @@ law vsock.unknown_rst:
 law vsock.incoming:
   {out(S.Vsock.host_event(S.Vsock.new(cid()), V.VsIncoming{2147483648, 5000})) == [[2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 136, 19, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0]] : +List<+List<U32>>}
 
-# Proposed: guest-driven state is capped. At most 256 packets that answer the
+# Guest-driven state is capped. At most 256 packets that answer the
 # guest wait for it (an RST past that is dropped), and at most 128
 # connections are open (a REQUEST past that gets an RST, no host connect).
 def empties(n: Nat) -> +List<+List<U32>>:

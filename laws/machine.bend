@@ -17,7 +17,7 @@ law machine.bus:
 law machine.bus_no_virtio:
   {M.Machine.bus(M.Machine.new(1n, [])) == [L.Region{w(150994944), w(4096), 0}] : +List<L.Region>}
 
-# Proposed: a timer or a forced exit changes nothing and lets the vCPU run.
+# A timer or a forced exit changes nothing and lets the vCPU run.
 law machine.vtimer_runs:
   for cpu: U32
   for m: M.Machine

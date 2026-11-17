@@ -56,7 +56,7 @@ law cli.display_zero:
 law cli.display_none:
   {C.Cli.display("") == None{} : Maybe<&2, T.Display>}
 
-# Proposed: --lan DIR[,ip=A.B.C.D/N][,mac=xx:xx:xx:xx:xx:xx].
+# --lan DIR[,ip=A.B.C.D/N][,mac=xx:xx:xx:xx:xx:xx].
 
 law cli.lan_ip:
   {C.Cli.lan("/tmp/k8s-lan,ip=10.0.3.11/24") == Some{C.LanSpec{"/tmp/k8s-lan", [82, 84, 1, 0, 3, 11], 167772939, 24}} : Maybe<&2, C.LanSpec>}
@@ -88,7 +88,7 @@ law cli.lan_no_dir:
 law cli.lan_checked:
   {C.Cli.check(["--lan", "lan"]) == "--lan takes DIR,ip=A.B.C.D/N and/or mac=xx:xx:xx:xx:xx:xx (not lan)" : String}
 
-# Proposed: sizes, --share DIR[,quota=SIZE], --console-log PATH,max=SIZE[,keep=N],
+# Sizes, --share DIR[,quota=SIZE], --console-log PATH,max=SIZE[,keep=N],
 # and finding a flag's value (bend-vk8s F6).
 
 law cli.size_bytes:
@@ -133,7 +133,7 @@ law cli.find_last:
 law cli.find_none:
   {C.Cli.find(["--kernel", "a"], "--console-log") == "" : String}
 
-# Proposed: --forward [ADDR:]HOSTPORT:GUESTPORT[,...].
+# --forward [ADDR:]HOSTPORT:GUESTPORT[,...].
 
 law cli.fwd_default_addr:
   {C.Fwd.parse("2222:22") == Some{C.Fwd{"127.0.0.1", 2222, 22}} : Maybe<&2, C.Fwd>}
@@ -153,7 +153,7 @@ law cli.fwd_specs:
 law cli.fwd_checked:
   {C.Cli.check(["--forward", "2222:22,80"]) == "--forward takes [ADDR:]HOSTPORT:GUESTPORT[,...] (ports 1 to 65535) (not 2222:22,80)" : String}
 
-# Proposed: a display must fit the 16 MiB framebuffer (4 bytes a pixel):
+# A display must fit the 16 MiB framebuffer (4 bytes a pixel):
 # 2048x2048 does, 2048x2049 does not, and a size whose product overflows 32
 # bits is refused rather than wrapped.
 law cli.display_fits:
@@ -165,11 +165,11 @@ law cli.display_too_big:
 law cli.display_overflow:
   {C.Cli.display("65536x65537") == None{} : Maybe<&2, T.Display>}
 
-# Proposed: --balloon takes free-page-reporting, and nothing else.
+# --balloon takes free-page-reporting, and nothing else.
 law cli.balloon:
   {C.Cli.balloon("free-page-reporting") && Bool.not(C.Cli.balloon("on")) == True{} : Bool}
 
-# Proposed: the balloon is on unless --balloon off; free-page-reporting is
+# The balloon is on unless --balloon off; free-page-reporting is
 # accepted and changes nothing; other values are refused.
 law cli.balloon_default:
   {C.Cli.balloon_on("") && C.Cli.balloon_on("free-page-reporting") && Bool.not(C.Cli.balloon_on("off")) == True{} : Bool}
@@ -177,7 +177,7 @@ law cli.balloon_default:
 law cli.balloon_values:
   {C.Cli.balloon_ok("off") && C.Cli.balloon_ok("free-page-reporting") && Bool.not(C.Cli.balloon_ok("on")) == True{} : Bool}
 
-# Proposed: the automatic balloon is the default and --balloon auto;
+# The automatic balloon is the default and --balloon auto;
 # free-page-reporting keeps reporting alone; auto is a value --balloon takes.
 law cli.balloon_auto:
   {C.Cli.balloon_auto("") && C.Cli.balloon_auto("auto") && Bool.not(C.Cli.balloon_auto("free-page-reporting")) && C.Cli.balloon_ok("auto") == True{} : Bool}

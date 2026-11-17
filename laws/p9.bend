@@ -17,7 +17,7 @@ law p9.config:
   # tag "share": tag_len 5 (le16) then the bytes
   {P.P9.config("share") == [5, 0, 115, 104, 97, 114, 101] : +List<U32>}
 
-# Proposed: guest numbers are bounded. A guest sets only the permission bits
+# Guest numbers are bounded. A guest sets only the permission bits
 # 0777 on host files (no setuid, setgid or sticky); Treaddir's count is at
 # most msize - 24; the fid table holds at most 4096 fids (a new one past that
 # is EMFILE 24, a bound one may be rebound); dropping a fid removes every

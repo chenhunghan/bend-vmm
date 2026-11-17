@@ -8,7 +8,7 @@ import ../src/virtio/blk.bend as K
 law blk.config:
   {K.Blk.config(U.U64{1, 2}) == [2, 0, 0, 0, 1, 0, 0, 0] : +List<U32>}
 
-# Proposed: the offered feature words (VERSION_1, FLUSH, and RO when
+# The offered feature words (VERSION_1, FLUSH, and RO when
 # read-only) and the request kind of FLUSH (type 4).
 law blk.features_rw:
   {K.Blk.features(False{}) == U.U64{1, 512} : U.U64}
@@ -19,7 +19,7 @@ law blk.features_ro:
 law blk.kind_flush:
   {K.Blk.kind(4) == 3n : Nat}
 
-# Proposed: one request moves at most 16 MiB (a longer one is IOERR, the disk
+# One request moves at most 16 MiB (a longer one is IOERR, the disk
 # untouched), and the device offers SIZE_MAX (bit 1) and SEG_MAX (bit 2) with
 # size_max 128 KiB and seg_max 128, whose product is that cap, so Linux never
 # builds a longer request.
@@ -41,7 +41,7 @@ law blk.offered_ro:
 law blk.config_limits:
   {K.Blk.config_limits(U.U64{1, 2}) == [2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 128, 0, 0, 0] : +List<U32>}
 
-# Proposed: DISCARD (type 11) on a writable disk; whole 4 KiB blocks inside a
+# DISCARD (type 11) on a writable disk; whole 4 KiB blocks inside a
 # segment are freed: sectors 1..16 free [4096, 8192); a segment inside one
 # block frees nothing; read-only disks do not offer it.
 law blk.kind_discard:
@@ -64,7 +64,7 @@ law blk.offered_discard_ro:
 law blk.config_discard:
   {List.drop(&2, U32, K.Blk.config_dis(U.U64{0, 16}), 36n) == [0, 0, 64, 0, 32, 0, 0, 0, 8, 0, 0, 0] : +List<U32>}
 
-# Proposed: WRITE_ZEROES (type 13) is request kind 6; a writable raw disk
+# WRITE_ZEROES (type 13) is request kind 6; a writable raw disk
 # offers it (bit 14) beside DISCARD, a read-only one neither; its config
 # ends with max_write_zeroes_sectors, max_write_zeroes_seg and
 # write_zeroes_may_unmap.

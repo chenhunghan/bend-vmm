@@ -63,7 +63,7 @@ law esr.other:
   # EC 0x07 (FP access): 0x1E000000
   {E.Trap.decode(U.U64{0, 503316480}, z(), z()) == E.Other{7} : E.Trap}
 
-# Proposed: general laws added by the esr implementation.
+# General laws added by the esr implementation.
 
 law esr.decode_ignores_high_word:
   # ESR_EL2[63:32] (ISS2 and RES0) never changes the decode.

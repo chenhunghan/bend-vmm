@@ -26,7 +26,7 @@ law dhcp.short_ignored:
 law dhcp.reply_op_ignored:
   {D.Dhcp.reply(List.set(&2, U32, discover(), 0n, 2)) == None{} : Maybe<&2, +List<U32>>}
 
-# Proposed: a message with more than 576 bytes of options is ignored (the
+# A message with more than 576 bytes of options is ignored (the
 # option walk stays linear and bounded).
 def zeros(n: Nat) -> +List<U32>:
   match n:

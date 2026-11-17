@@ -93,7 +93,7 @@ law nat.guest_fin:
 law nat.unknown_rst:
   {frames(N.Slirp.guest_frame(N.Slirp.new(), guest_tcp(16, 5, 77, []))) == [host_tcp(4, 77, 0, 0, [])] : +List<+List<U32>>}
 
-# Proposed: flow control. The guest's window (its ACK plus its window
+# Flow control. The guest's window (its ACK plus its window
 # field) bounds the host data the NAT sends; the rest waits for an ACK, and
 # the FIN waits for the data.
 def guest_ack(ack: U32, win: U32) -> +List<U32>:
@@ -111,7 +111,7 @@ law nat.ack_opens_window:
 law nat.fin_waits_for_data:
   {frames(N.Slirp.host_event(net(N.Slirp.host_event(narrow(), V.TcpData{0, [1, 2, 3]})), V.TcpEof{0})) == [] : +List<+List<U32>>}
 
-# Proposed: hardening against a malicious guest.
+# Hardening against a malicious guest.
 
 # Before the host connected (SynSent), a data segment sends nothing and
 # changes nothing.
@@ -161,7 +161,7 @@ law nat.blocked_holds_data:
 law nat.guest_rst_aborts:
   {(cmds(N.Slirp.guest_frame(established(), guest_tcp(20, 1000, 2, []))), net(N.Slirp.guest_frame(established(), guest_tcp(20, 1000, 2, [])))) == ([V.TcpAbort{0}], N.Slirp{[], 1}) : +List<V.NetCmd> & N.Slirp}
 
-# Proposed: port forwarding (--forward). The host accepted connection 7 for
+# Port forwarding (--forward). The host accepted connection 7 for
 # guest port 8080: the guest gets a SYN from the gateway 10.0.2.2, port
 # 49152 + 7 = 49159 (N.Tcp.fwd_port), seq 1, with MSS 1460 and window scale
 # 7 (the SYN|ACK's options).
@@ -214,7 +214,7 @@ law nat.fwd_syn_again:
 law nat.fwd_limit:
   {(frames(N.Slirp.host_event(N.Slirp{busy(256n), 256}, V.TcpIncoming{7, 8080})), cmds(N.Slirp.host_event(N.Slirp{busy(256n), 256}, V.TcpIncoming{7, 8080}))) == ([], [V.TcpAbort{7}]) : +List<+List<U32>> & +List<V.NetCmd>}
 
-# Proposed: the guest's MSS. A guest that forwards into a smaller MTU (a pod
+# The guest's MSS. A guest that forwards into a smaller MTU (a pod
 # network behind a VXLAN, MTU 1450) says so in its SYN's MSS (1410): every
 # segment of the host's data toward it carries at most that many bytes, on
 # the byte path (TcpData) and on the held one (TcpReady: the host frame's
