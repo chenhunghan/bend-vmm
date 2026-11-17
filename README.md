@@ -345,7 +345,7 @@ comments); `bend-vmm --help` lists the commands.
 ## As a library
 
 `main.bend` at the repository's root is a BendHub package (MIT):
-`import 0xd0e7b290a9710a97d85853bd4c530f3f/main.bend as V` (bend-vmm as of
+`import 0x67452e7bc6132b3fa11a687623945b86/main.bend as V` (bend-vmm as of
 adf9dcc, x86_64 guests and their snapshots on KVM; each publish of a change has a new hash), then `V.Vmm.run(prog, flags)` runs the VMM inside another Bend
 program: `prog` is how that program starts the VMM again (on a guest reset,
 and in a snapshot's saved command line), e.g. `["vk8s", "vmm"]`, and `flags`
