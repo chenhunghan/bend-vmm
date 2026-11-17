@@ -48,16 +48,16 @@ law hostfiles.lan_symlink:
 law hostfiles.lan_sock:
   {F.Files.lan_sock([2, 0, 0, 171, 205, 239]) == "02-00-00-ab-cd-ef.sock" : String}
 
-# Proposed: the program a reset starts again: the system's name for this
-# executable, else the first argument.
+# The program a reset starts again: the system's name for this executable,
+# else the first argument (approved 2026-11-17).
 law hostfiles.exec_system:
   {F.Files.exec_path("/usr/local/bin/bend-vmm", "bend-vmm") == "/usr/local/bin/bend-vmm" : String}
 
 law hostfiles.exec_argv0:
   {F.Files.exec_path("", "./out/bend-vmm") == "./out/bend-vmm" : String}
 
-# Proposed: a socket path fits the address when its UTF-8 bytes are at most
-# the field's room (a 2-byte character counts 2).
+# A socket path fits the address when its UTF-8 bytes are at most the
+# field's room (a 2-byte character counts 2; approved 2026-11-17).
 law hostfiles.sock_fits:
   {F.Files.sock_path_fits("/tmp/vm.sock", 103) == True{} : Bool}
 
