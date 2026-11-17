@@ -182,7 +182,7 @@ law cli.balloon_values:
 law cli.balloon_auto:
   {C.Cli.balloon_auto("") && C.Cli.balloon_auto("auto") && Bool.not(C.Cli.balloon_auto("free-page-reporting")) && C.Cli.balloon_ok("auto") == True{} : Bool}
 
-# Proposed: --share DIR[,quota=SIZE][,tag=NAME][,ro][,meta], repeatable (asked by
+# --share DIR[,quota=SIZE][,tag=NAME][,ro][,meta], repeatable (asked by
 # bend-vk8s): each option at most once; a tag is 1 to 31 letters, digits,
 # "-", "_" or "."; untagged shares are "share", "share1", ...; at most 8,
 # and no two with one tag.

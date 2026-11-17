@@ -44,6 +44,6 @@ law opts.restore_lan:
 law opts.with_size:
   {O.Opts.with_size(base(), 256, 2) == O.Opts{"", "", "", "console=ttyAMA0 earlycon=pl011,0x9000000", 256, 2, "", "", "", "", "", "", "", "", "", ""} : O.Opts}
 
-# Proposed: --share is repeatable; Opts.share keeps every value, one a line.
+# --share is repeatable; Opts.share keeps every value, one a line.
 law opts.share_twice:
   {O.Opts.share(O.Opts.parse(["--share", "/a", "--share", "/b,ro"], base())) == "/a\n/b,ro" : String}

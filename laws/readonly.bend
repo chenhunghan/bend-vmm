@@ -5,7 +5,7 @@ import ../src/lib/u64.bend as U
 
 # Spec for src/fs/readonly.bend: a read-only share refuses every change.
 
-# Proposed: read-only shares (--share DIR,ro), asked by bend-vk8s for image
+# Read-only shares (--share DIR,ro), asked by bend-vk8s for image
 # layers shared by many VMs.
 law readonly.mark:
   {R.Ro.mark(2, True{}) == 258 : U32}
