@@ -150,14 +150,16 @@ def SimFs.children(nodes: +List<Node>, +dir: String) -> +List<Node>:
     case Nil{}:
       []
     case +n <> +t:
-      Bool.pick(+List<Node>, Node.in_dir(n, dir), n <> SimFs.children(t, dir), SimFs.children(t, dir))
+      +rest : +List<Node> = SimFs.children(t, dir)
+      Bool.pick(+List<Node>, Node.in_dir(n, dir), n <> rest, rest)
 
 def SimFs.without(nodes: +List<Node>, +path: String) -> +List<Node>:
   match nodes:
     case Nil{}:
       []
     case +n <> +t:
-      Bool.pick(+List<Node>, String.eq(Node.path(n), path), SimFs.without(t, path), n <> SimFs.without(t, path))
+      +rest : +List<Node> = SimFs.without(t, path)
+      Bool.pick(+List<Node>, String.eq(Node.path(n), path), rest, n <> rest)
 
 # Replaces the node at new's path with new.
 def SimFs.replace(nodes: +List<Node>, +new: Node) -> +List<Node>:

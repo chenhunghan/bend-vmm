@@ -54,19 +54,63 @@ def Meta.hex(s: String) -> +List<U32>:
     case SCon{a, SCon{b, rest}}:
       Con{((Meta.hexval(Char.to_u32(a)) << 4n : U32) .|. Meta.hexval(Char.to_u32(b)) : U32), Meta.hex(rest)}
 
+# A string split at its first c: the part before and the part after ("",
+# when there is no c: then the whole is before).
+type Cut is Data:
+  Cut{before: String, after: String}
+
+def Cut.before(k: Cut) -> String:
+  match k:
+    case Cut{b, a}:
+      b
+
+def Cut.after(k: Cut) -> String:
+  match k:
+    case Cut{b, a}:
+      a
+
 # "%41" is "A"; any other character is itself (a name's bytes as chars).
-def Meta.pct(s: String) -> String:
-  match s:
-    case SNil{}:
-      ""
-    case SCon{+c, rest}:
-      match rest:
-        case SCon{+a, SCon{+b, +more}}:
-          Bool.pick(String, U32.is_eq(Char.to_u32(c), 37) && U32.is_lt(Meta.hexval(Char.to_u32(a)), 16) && U32.is_lt(Meta.hexval(Char.to_u32(b)), 16),
-            SCon{Char.from_u32(((Meta.hexval(Char.to_u32(a)) << 4n : U32) .|. Meta.hexval(Char.to_u32(b)) : U32)), Meta.pct(more)},
-            SCon{c, Meta.pct(SCon{a, SCon{b, more}})})
-        case _:
-          SCon{c, Meta.pct(rest)}
+# One step at a time, each decided by a match (Bool.pick would build both
+# of its arguments: two recursions a character, exponential in the length).
+def Meta.pct.hex2(+a: Char, +b: Char) -> Bool:
+  U32.is_lt(Meta.hexval(Char.to_u32(a)), 16) && U32.is_lt(Meta.hexval(Char.to_u32(b)), 16)
+
+def Meta.pct.ok(+c: Char, rest: String) -> Bool:
+  match rest:
+    case SCon{+a, SCon{+b, more}}:
+      U32.is_eq(Char.to_u32(c), 37) && Meta.pct.hex2(a, b)
+    case _:
+      False{}
+
+def Meta.pct.byte(rest: String) -> Char:
+  match rest:
+    case SCon{a, SCon{b, more}}:
+      Char.from_u32(((Meta.hexval(Char.to_u32(a)) << 4n : U32) .|. Meta.hexval(Char.to_u32(b)) : U32))
+    case _:
+      Char.from_u32(0)
+
+# The next character out, and what is left after it.
+def Meta.pct.next(ok: Bool, +c: Char, +rest: String) -> Cut:
+  match ok:
+    case True{}:
+      Cut{SCon{Meta.pct.byte(rest), ""}, String.drop(rest, 2n)}
+    case False{}:
+      Cut{SCon{c, ""}, rest}
+
+def Meta.pct.go(fuel: Nat, s: String) -> String:
+  match fuel:
+    case 0n:
+      s
+    case 1n+f:
+      match s:
+        case SNil{}:
+          ""
+        case SCon{+c, +rest}:
+          +k : Cut = Meta.pct.next(Meta.pct.ok(c, rest), c, rest)
+          Cut.before(k) ++ Meta.pct.go(f, Cut.after(k))
+
+def Meta.pct(+s: String) -> String:
+  Meta.pct.go(String.length(s), s)
 
 # Numbers: decimal (U32 and U64) and octal.
 def Meta.dec.go(s: String, +acc: U32, +ok: Bool) -> Maybe<&2, U32>:
@@ -105,21 +149,6 @@ def Meta.dec64.go(s: String, +acc: U.U64, +ok: Bool) -> Maybe<&2, U.U64>:
 
 def Meta.dec64(s: String) -> Maybe<&2, U.U64>:
   Meta.dec64.go(s, U.U64.zero(), False{})
-
-# A string split at its first c: the part before and the part after ("",
-# when there is no c: then the whole is before).
-type Cut is Data:
-  Cut{before: String, after: String}
-
-def Cut.before(k: Cut) -> String:
-  match k:
-    case Cut{b, a}:
-      b
-
-def Cut.after(k: Cut) -> String:
-  match k:
-    case Cut{b, a}:
-      a
 
 def Meta.cut.add(+c: Char, k: Cut) -> Cut:
   match k:
@@ -161,24 +190,118 @@ def Meta.got64(m: Maybe<&2, U.U64>, +bit: U32) -> U32:
 def Meta.num64(m: Maybe<&2, U.U64>) -> U.U64:
   Maybe.default(&2, U.U64, m, U.U64.zero())
 
-# One key=value token on a record.
+# One key=value token on a record: each key a def of its own, chosen by a
+# match, so a token costs only its own key's work.
+def Meta.token.xattr(yes: Bool, r: Rec, +k: String, +v: String) -> Rec:
+  match yes:
+    case False{}:
+      r
+    case True{}:
+      match r:
+        case Rec{n, h, t, m, u, g, ma, mi, mt, ns, ino, nl, has, xs}:
+          Rec{n, h, t, m, u, g, ma, mi, mt, ns, ino, nl, has, List.append(&2, Xattr, xs, [Xattr{Meta.pct(String.drop(k, 6n)), Meta.hex(v)}])}
+
+def Meta.token.nlink(yes: Bool, r: Rec, +k: String, +v: String) -> Rec:
+  match yes:
+    case False{}:
+      Meta.token.xattr(String.starts_with(k, "xattr."), r, k, v)
+    case True{}:
+      match r:
+        case Rec{n, h, t, m, u, g, ma, mi, mt, ns, ino, nl, +has, xs}:
+          +d : Maybe<&2, U32> = Meta.dec(v)
+          Rec{n, h, t, m, u, g, ma, mi, mt, ns, ino, Meta.num(d), (has .|. Meta.got(d, 128) : U32), xs}
+
+def Meta.token.ino(yes: Bool, r: Rec, +k: String, +v: String) -> Rec:
+  match yes:
+    case False{}:
+      Meta.token.nlink(String.eq(k, "nlink"), r, k, v)
+    case True{}:
+      match r:
+        case Rec{n, h, t, m, u, g, ma, mi, mt, ns, ino, nl, +has, xs}:
+          +d : Maybe<&2, U.U64> = Meta.dec64(v)
+          Rec{n, h, t, m, u, g, ma, mi, mt, ns, Meta.num64(d), nl, (has .|. Meta.got64(d, 64) : U32), xs}
+
+def Meta.token.mtime(yes: Bool, r: Rec, +k: String, +v: String) -> Rec:
+  match yes:
+    case False{}:
+      Meta.token.ino(String.eq(k, "ino"), r, k, v)
+    case True{}:
+      match r:
+        case Rec{n, h, t, m, u, g, ma, mi, mt, ns, ino, nl, +has, xs}:
+          +ts : Cut = Meta.cut(v, '.')
+          +d : Maybe<&2, U.U64> = Meta.dec64(Cut.before(ts))
+          Rec{n, h, t, m, u, g, ma, mi, Meta.num64(d), Meta.num(Meta.dec(Cut.after(ts))), ino, nl, (has .|. Meta.got64(d, 32) : U32), xs}
+
+def Meta.token.rdev(yes: Bool, r: Rec, +k: String, +v: String) -> Rec:
+  match yes:
+    case False{}:
+      Meta.token.mtime(String.eq(k, "mtime"), r, k, v)
+    case True{}:
+      match r:
+        case Rec{n, h, t, m, u, g, ma, mi, mt, ns, ino, nl, +has, xs}:
+          +rd : Cut = Meta.cut(v, ',')
+          Rec{n, h, t, m, u, g, Meta.num(Meta.dec(Cut.before(rd))), Meta.num(Meta.dec(Cut.after(rd))), mt, ns, ino, nl, (has .|. 16 : U32), xs}
+
+def Meta.token.gid(yes: Bool, r: Rec, +k: String, +v: String) -> Rec:
+  match yes:
+    case False{}:
+      Meta.token.rdev(String.eq(k, "rdev"), r, k, v)
+    case True{}:
+      match r:
+        case Rec{n, h, t, m, u, g, ma, mi, mt, ns, ino, nl, +has, xs}:
+          +d : Maybe<&2, U32> = Meta.dec(v)
+          Rec{n, h, t, m, u, Meta.num(d), ma, mi, mt, ns, ino, nl, (has .|. Meta.got(d, 8) : U32), xs}
+
+def Meta.token.uid(yes: Bool, r: Rec, +k: String, +v: String) -> Rec:
+  match yes:
+    case False{}:
+      Meta.token.gid(String.eq(k, "gid"), r, k, v)
+    case True{}:
+      match r:
+        case Rec{n, h, t, m, u, g, ma, mi, mt, ns, ino, nl, +has, xs}:
+          +d : Maybe<&2, U32> = Meta.dec(v)
+          Rec{n, h, t, m, Meta.num(d), g, ma, mi, mt, ns, ino, nl, (has .|. Meta.got(d, 4) : U32), xs}
+
+def Meta.token.mode(yes: Bool, r: Rec, +k: String, +v: String) -> Rec:
+  match yes:
+    case False{}:
+      Meta.token.uid(String.eq(k, "uid"), r, k, v)
+    case True{}:
+      match r:
+        case Rec{n, h, t, m, u, g, ma, mi, mt, ns, ino, nl, +has, xs}:
+          +d : Maybe<&2, U32> = Meta.oct(v)
+          Rec{n, h, t, (Meta.num(d) .&. 4095 : U32), u, g, ma, mi, mt, ns, ino, nl, (has .|. Meta.got(d, 2) : U32), xs}
+
+def Meta.token.type(yes: Bool, r: Rec, +k: String, +v: String) -> Rec:
+  match yes:
+    case False{}:
+      Meta.token.mode(String.eq(k, "mode"), r, k, v)
+    case True{}:
+      match r:
+        case Rec{n, h, t, m, u, g, ma, mi, mt, ns, ino, nl, +has, xs}:
+          +kd : U32 = Meta.kind(v)
+          Rec{n, h, kd, m, u, g, ma, mi, mt, ns, ino, nl, (has .|. Bool.pick(U32, U32.is_zero(kd), 0, 1) : U32), xs}
+
+def Meta.token.host(yes: Bool, r: Rec, +k: String, +v: String) -> Rec:
+  match yes:
+    case False{}:
+      Meta.token.type(String.eq(k, "type"), r, k, v)
+    case True{}:
+      match r:
+        case Rec{n, h, t, m, u, g, ma, mi, mt, ns, ino, nl, +has, xs}:
+          Rec{n, Meta.pct(v), t, m, u, g, ma, mi, mt, ns, ino, nl, (has .|. 256 : U32), xs}
+
+def Meta.token.name(yes: Bool, r: Rec, +k: String, +v: String) -> Rec:
+  match yes:
+    case False{}:
+      Meta.token.host(String.eq(k, "host"), r, k, v)
+    case True{}:
+      match r:
+        case Rec{n, h, t, m, u, g, ma, mi, mt, ns, ino, nl, has, xs}:
+          Rec{Meta.pct(v), h, t, m, u, g, ma, mi, mt, ns, ino, nl, has, xs}
+
 def Meta.token.kv(r: Rec, +k: String, +v: String) -> Rec:
-  match r:
-    case Rec{+n, +h, +t, +m, +u, +g, +ma, +mi, +mt, +ns, +ino, +nl, +has, +xs}:
-      +rd : Cut = Meta.cut(v, ',')
-      +ts : Cut = Meta.cut(v, '.')
-      Bool.pick(Rec, String.eq(k, "name"), Rec{Meta.pct(v), h, t, m, u, g, ma, mi, mt, ns, ino, nl, has, xs},
-      Bool.pick(Rec, String.eq(k, "host"), Rec{n, Meta.pct(v), t, m, u, g, ma, mi, mt, ns, ino, nl, (has .|. 256 : U32), xs},
-      Bool.pick(Rec, String.eq(k, "type"), Rec{n, h, Meta.kind(v), m, u, g, ma, mi, mt, ns, ino, nl, (has .|. Bool.pick(U32, U32.is_zero(Meta.kind(v)), 0, 1) : U32), xs},
-      Bool.pick(Rec, String.eq(k, "mode"), Rec{n, h, t, (Meta.num(Meta.oct(v)) .&. 4095 : U32), u, g, ma, mi, mt, ns, ino, nl, (has .|. Meta.got(Meta.oct(v), 2) : U32), xs},
-      Bool.pick(Rec, String.eq(k, "uid"), Rec{n, h, t, m, Meta.num(Meta.dec(v)), g, ma, mi, mt, ns, ino, nl, (has .|. Meta.got(Meta.dec(v), 4) : U32), xs},
-      Bool.pick(Rec, String.eq(k, "gid"), Rec{n, h, t, m, u, Meta.num(Meta.dec(v)), ma, mi, mt, ns, ino, nl, (has .|. Meta.got(Meta.dec(v), 8) : U32), xs},
-      Bool.pick(Rec, String.eq(k, "rdev"), Rec{n, h, t, m, u, g, Meta.num(Meta.dec(Cut.before(rd))), Meta.num(Meta.dec(Cut.after(rd))), mt, ns, ino, nl, (has .|. 16 : U32), xs},
-      Bool.pick(Rec, String.eq(k, "mtime"), Rec{n, h, t, m, u, g, ma, mi, Meta.num64(Meta.dec64(Cut.before(ts))), Meta.num(Meta.dec(Cut.after(ts))), ino, nl, (has .|. Meta.got64(Meta.dec64(Cut.before(ts)), 32) : U32), xs},
-      Bool.pick(Rec, String.eq(k, "ino"), Rec{n, h, t, m, u, g, ma, mi, mt, ns, Meta.num64(Meta.dec64(v)), nl, (has .|. Meta.got64(Meta.dec64(v), 64) : U32), xs},
-      Bool.pick(Rec, String.eq(k, "nlink"), Rec{n, h, t, m, u, g, ma, mi, mt, ns, ino, Meta.num(Meta.dec(v)), (has .|. Meta.got(Meta.dec(v), 128) : U32), xs},
-      Bool.pick(Rec, String.starts_with(k, "xattr."), Rec{n, h, t, m, u, g, ma, mi, mt, ns, ino, nl, has, List.append(&2, Xattr, xs, [Xattr{Meta.pct(String.drop(k, 6n)), Meta.hex(v)}])},
-        Rec{n, h, t, m, u, g, ma, mi, mt, ns, ino, nl, has, xs})))))))))))
+  Meta.token.name(String.eq(k, "name"), r, k, v)
 
 def Meta.token.cut(r: Rec, k: Cut) -> Rec:
   match k:
