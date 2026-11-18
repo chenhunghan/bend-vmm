@@ -2050,6 +2050,16 @@ Term hvf_file_size_run(Env e, Term* f, IoWork* w) {
   return (Term)(ok ? (u32)st.st_size : HVF_ERR);
 }
 
+// Guest RAM is shared with vCPUs on other cores, and arm64 may make two
+// stores (a used element, then the used idx) or two loads (the avail idx,
+// then the ring slot it announces) visible out of order. A full fence
+// before every Hvf.read and Hvf.write orders each guest-memory access
+// after everything the VMM did before it, as virtio asks of a device (the
+// Linux driver's virtio_rmb/virtio_wmb on the other side).
+static inline void hvf_guest_fence(void) {
+  atomic_thread_fence(memory_order_seq_cst);
+}
+
 // Hvf.write(gpa_hi, gpa_lo, bytes) -> U32: 0, or 0xFFFFFFFF outside RAM.
 Term hvf_write_run(Env e, Term* f, IoWork* w) {
   u64   n;
@@ -2059,6 +2069,7 @@ Term hvf_write_run(Env e, Term* f, IoWork* w) {
   }
   uint8_t* dst = hvf_ptr(hvf_u64(f[0], f[1]), n);
   if (dst) {
+    hvf_guest_fence();
     memcpy(dst, buf, n);
     hvf_wrote(dst, n);
   }
@@ -2070,6 +2081,9 @@ Term hvf_write_run(Env e, Term* f, IoWork* w) {
 Term hvf_read_run(Env e, Term* f, IoWork* w) {
   u64      n   = (u32)f[2];
   uint8_t* src = hvf_ptr(hvf_u64(f[0], f[1]), n);
+  if (src) {
+    hvf_guest_fence();
+  }
   return src ? io_list(e, (const char*)src, n) : term_pak(CID(Nil), 0);
 }
 
