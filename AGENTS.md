@@ -79,6 +79,12 @@ reference only: we do not follow its design or API.
   argument of a parallel call to a variable first (`+st = status(s)`, then
   `a b = f(s, st) g(st)`), and run `scripts/check-native.sh` (macOS or Linux
   with clang) before pushing a parallel let.
+- `Bool.pick(T, c, a, b)` is an ordinary def: Bend computes both `a` and
+  `b` before it picks. A def that recurses in both is exponential (a
+  `.bend-meta` with long names once held the VMM at 200% CPU); one that
+  recurses in one always runs to the end. Branch on a computed Bool through
+  a helper def that `match`es on it, or bind the recursion once with a let.
+  The gate's lint (scripts/lint/pick-recursion.py) catches the first case.
 - Code that touches guest memory is written in `V.Op<R, A>` (src/vmm/abi.bend)
   with `do V.Op<R, A>:` blocks; tests run it on the simulator (src/vmm/sim.bend).
 

@@ -10,6 +10,8 @@
 #   3. Tests: every tests/<name>.bend runs (in parallel) and prints only PASS
 #      lines. A test whose imports still hold TODOs is PENDING, which is an
 #      error once its module (same name) is done.
+#   4. Lint: no def recurses in two arguments of one Bool.pick (both are
+#      computed, so that is exponential: scripts/lint/pick-recursion.py).
 #
 # Usage: scripts/check.sh [--strict]   (--strict: no TODO may remain anywhere)
 # With VERDICT=1, each done module is also re-checked by the BendTT kernel
@@ -65,6 +67,13 @@ for t in $tests; do
     grn "ok: $t ($(grep -c '^PASS' <<<"$out") passed)"
   fi
 done
+
+echo "== 4. lint (Bool.pick recursion)"
+if out=$(python3 scripts/lint/pick-recursion.py $(git ls-files '*.bend' 2>/dev/null || ls src/*/*.bend host/*.bend tests/*.bend) 2>&1); then
+  grn "ok: no def recurses in two arguments of one Bool.pick"
+else
+  red "Bool.pick recursion (both arguments are computed: write a helper that matches on the Bool, or bind the recursion once):"; echo "$out"; fail=1
+fi
 
 if [ $fail = 0 ]; then grn "CHECK OK"; else red "CHECK FAILED"; fi
 exit $fail

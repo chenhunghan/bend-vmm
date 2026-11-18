@@ -58,14 +58,18 @@ type Spec is Data:
 def Access.strip(+s: String, +suffix: String) -> String:
   String.take(s, Nat.sub(String.length(s), String.length(suffix)))
 
+# One suffix taken off per step (:ro or :nocache); with neither, the next
+# step finds the same and the spec stands. One recursion a step: both
+# arguments of a Bool.pick are computed.
 def Access.spec.go(fuel: Nat, +s: String, +ro: Bool, +nc: Bool) -> Spec:
   match fuel:
     case 0n:
       Spec{s, ro, nc}
     case 1n+(+f):
-      Bool.pick(Spec, Bool.not(ro) && String.ends_with(s, ":ro"), Access.spec.go(f, Access.strip(s, ":ro"), True{}, nc),
-        Bool.pick(Spec, Bool.not(nc) && String.ends_with(s, ":nocache"), Access.spec.go(f, Access.strip(s, ":nocache"), ro, True{}),
-          Spec{s, ro, nc}))
+      +is_ro : Bool = Bool.not(ro) && String.ends_with(s, ":ro")
+      +is_nc : Bool = Bool.not(is_ro) && Bool.not(nc) && String.ends_with(s, ":nocache")
+      +s2 : String = Bool.pick(String, is_ro, Access.strip(s, ":ro"), Bool.pick(String, is_nc, Access.strip(s, ":nocache"), s))
+      Access.spec.go(f, s2, ro || is_ro, nc || is_nc)
 
 def Access.spec(+s: String) -> Spec:
   Access.spec.go(2n, s, False{}, False{})
