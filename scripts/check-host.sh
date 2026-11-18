@@ -457,6 +457,23 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5p. more than 4096 files cached at once (cache=loose): no EMFILE"
+  # With cache=loose the guest's 9p client keeps a fid for every cached
+  # dentry; a share's fid table holds 65536 (src/fs/p9.bend P9.max_fids,
+  # once 4096: bend-vk8s's overlayfs layers got EMFILE). 6000 files read
+  # in one go, then a new open still works.
+  t=$(mktemp -d); mkdir -p "$t/sh/d"
+  ( cd "$t/sh/d" && for i in $(seq 6000); do echo "$i" > "f$i"; done ); echo LAST-OK > "$t/sh/last"
+  cmd='mkdir -p /mnt/s; mount -t 9p -o trans=virtio,version=9p2000.L,cache=loose sh /mnt/s; cd /mnt/s/d; echo N-$(cat f* | wc -l); echo E-$(cat f1 f6000 2>&1 | tr "\\n" " "); cat /mnt/s/last; echo FD-""DONE\n'
+  out=$(drive 120 "busybox shell" "$cmd" "FD-DONE" 'poweroff -f\n' -- \
+    ./out/bend-vmm --mem 512 --kernel $GIMG --initrd $GI --share "$t/sh,tag=sh" --cmdline "$GCON quiet" 2>&1 | tr -d '\r')
+  grep -aq "^N-6000" <<<"$out" && grep -aq "^E-1 6000" <<<"$out" && grep -aq "^LAST-OK" <<<"$out" \
+    && grn "ok: 6000 files cached at once over 9p (cache=loose), and a new open after them" \
+    || { red "failed: many cached files on a share"; grep -a "^N-\|^E-\|LAST\|rror" <<<"$out" | tail -6; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 5j. a shared file the host replaces reads as the new one"
   # The guest reads d/f (the host keeps it open), then the host removes d
   # and makes it again with a new, larger f: the guest's next read is the

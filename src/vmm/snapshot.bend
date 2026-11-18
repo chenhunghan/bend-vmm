@@ -150,6 +150,10 @@ def Enc.fids(fs: +List<F.Fid>) -> +List<U32>:
     case Con{F.Fid{fid, path, open}, rest}:
       List.append(&2, U32, fid <> X.Enc.string(path), List.append(&2, U32, [Bool.to_u32(open)], Enc.fids(rest)))
 
+# A fid table in a snapshot: a trie is written as its list.
+def Enc.p9(+ms: U32, +fids: +List<F.Fid>) -> +List<U32>:
+  List.append(&2, U32, [3, ms, Enc.len(F.Fid, fids)], Enc.fids(fids))
+
 def Enc.vconns(cs: +List<Vs.VConn>) -> +List<U32>:
   match cs:
     case Nil{}:
@@ -189,6 +193,8 @@ def Enc.state(s: D.DevState) -> +List<U32>:
       List.append(&2, U32, [2, Enc.len(+List<U32>, fs)], Enc.frames(fs))
     case D.P9Dev{F.P9State{ms, +fids}}:
       List.append(&2, U32, [3, ms, Enc.len(F.Fid, fids)], Enc.fids(fids))
+    case D.P9Dev{F.P9Map{ms, n, m}}:
+      Enc.p9(ms, F.FidMap.list(m))
     case D.VsState{v}:
       4 <> Enc.vsock(v)
     case D.InDev{In.InputState{sel, sub, +evs}}:
