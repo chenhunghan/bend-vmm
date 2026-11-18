@@ -268,19 +268,23 @@ def Cli.share_ok(m: Maybe<&2, ShareSpec>) -> Bool:
     case Some{x}:
       True{}
 
-# --share DIR[,quota=SIZE][,tag=NAME][,ro][,meta], repeatable: each share
+# --share DIR[,quota=SIZE][,inodes=N][,tag=NAME][,ro][,meta], repeatable: each share
 # is its own virtio-9p device, mounted by its tag (mount -t 9p -o
 # trans=virtio TAG /mnt); a share given no tag is "share", the next
 # "share1", and so on. ro makes it read-only: the host refuses every change
 # (src/fs/readonly.bend). meta presents Linux metadata from each
-# directory's .bend-meta (src/fs/meta.bend), and is read-only too. Each
-# option at most once, in any order.
+# directory's .bend-meta (src/fs/meta.bend), and is read-only too.
+# inodes=N caps the entries (files, directories, symlinks) the share may
+# hold, as quota= caps its bytes (src/fs/quota.bend): a share given it is a
+# ShareOptN. Each option at most once, in any order.
 type ShareOpt is Data:
   ShareOpt{dir: String, quota: U.U64, tag: String, ro: Bool, meta: Bool}
+  ShareOptN{dir: String, quota: U.U64, tag: String, ro: Bool, meta: Bool, inodes: U32}
 
-# The options so far and the ones seen (1 quota, 2 tag, 4 ro, 8 meta).
+# The options so far, the ones seen (1 quota, 2 tag, 4 ro, 8 meta, 16
+# inodes) and the inode cap.
 type ShareAcc is Data:
-  ShareAcc{opt: ShareOpt, seen: U32}
+  ShareAcc{opt: ShareOpt, seen: U32, inodes: U32}
 
 # A tag: 1 to 31 bytes of letters, digits, "-", "_" and ".".
 def Cli.tag_char(+c: U32) -> Bool:
@@ -297,26 +301,36 @@ def Cli.tag_ok(+t: String) -> Bool:
   +n : U32 = U32.from_nat(String.length(t))
   U32.is_ge(n, 1) && U32.is_le(n, 31) && Cli.tag_chars(t)
 
-def Cli.share_acc.set(+bit: U32, +seen: U32, ok: Bool, +next: ShareOpt) -> Maybe<&2, ShareAcc>:
-  Bool.pick(Maybe<&2, ShareAcc>, ok && U32.is_zero((seen .&. bit : U32)), Some{ShareAcc{next, (seen .|. bit : U32)}}, None{})
+def Cli.share_acc.set(+bit: U32, +seen: U32, ok: Bool, +next: ShareOpt, +n: U32) -> Maybe<&2, ShareAcc>:
+  Bool.pick(Maybe<&2, ShareAcc>, ok && U32.is_zero((seen .&. bit : U32)), Some{ShareAcc{next, (seen .|. bit : U32), n}}, None{})
 
-def Cli.share_acc.quota(+seen: U32, +d: String, m: Maybe<&2, U.U64>, +t: String, +r: Bool, +mt: Bool) -> Maybe<&2, ShareAcc>:
+def Cli.share_acc.quota(+seen: U32, +d: String, m: Maybe<&2, U.U64>, +t: String, +r: Bool, +mt: Bool, +n: U32) -> Maybe<&2, ShareAcc>:
   match m:
     case None{}:
       None{}
     case Some{q}:
-      Cli.share_acc.set(1, seen, True{}, ShareOpt{d, q, t, r, mt})
+      Cli.share_acc.set(1, seen, True{}, ShareOpt{d, q, t, r, mt}, n)
+
+# inodes=N: a count from 1 to 2^32 - 1 (K, M and G scale it by 1024s, as a
+# size).
+def Cli.share_acc.inodes(+seen: U32, +o: ShareOpt, m: Maybe<&2, U.U64>) -> Maybe<&2, ShareAcc>:
+  match m:
+    case None{}:
+      None{}
+    case Some{U.U64{+hi, +lo}}:
+      Cli.share_acc.set(16, seen, U32.is_zero(hi) && U32.is_ne(lo, 0), o, lo)
 
 def Cli.share_acc.step(a: Maybe<&2, ShareAcc>, +o: String) -> Maybe<&2, ShareAcc>:
   match a:
-    case None{}:
+    case Some{ShareAcc{ShareOpt{+d, +q, +t, +r, +mt}, +seen, +n}}:
+      Bool.pick(Maybe<&2, ShareAcc>, String.eq(o, "ro"), Cli.share_acc.set(4, seen, True{}, ShareOpt{d, q, t, True{}, mt}, n),
+      Bool.pick(Maybe<&2, ShareAcc>, String.eq(o, "meta"), Cli.share_acc.set(8, seen, True{}, ShareOpt{d, q, t, r, True{}}, n),
+      Bool.pick(Maybe<&2, ShareAcc>, String.starts_with(o, "tag="), Cli.share_acc.set(2, seen, Cli.tag_ok(String.drop(o, 4n)), ShareOpt{d, q, String.drop(o, 4n), r, mt}, n),
+      Bool.pick(Maybe<&2, ShareAcc>, String.starts_with(o, "quota="), Cli.share_acc.quota(seen, d, Cli.size(String.drop(o, 6n)), t, r, mt, n),
+      Bool.pick(Maybe<&2, ShareAcc>, String.starts_with(o, "inodes="), Cli.share_acc.inodes(seen, ShareOpt{d, q, t, r, mt}, Cli.size(String.drop(o, 7n))),
+        None{})))))
+    case _:
       None{}
-    case Some{ShareAcc{ShareOpt{+d, +q, +t, +r, +mt}, +seen}}:
-      Bool.pick(Maybe<&2, ShareAcc>, String.eq(o, "ro"), Cli.share_acc.set(4, seen, True{}, ShareOpt{d, q, t, True{}, mt}),
-      Bool.pick(Maybe<&2, ShareAcc>, String.eq(o, "meta"), Cli.share_acc.set(8, seen, True{}, ShareOpt{d, q, t, r, True{}}),
-      Bool.pick(Maybe<&2, ShareAcc>, String.starts_with(o, "tag="), Cli.share_acc.set(2, seen, Cli.tag_ok(String.drop(o, 4n)), ShareOpt{d, q, String.drop(o, 4n), r, mt}),
-      Bool.pick(Maybe<&2, ShareAcc>, String.starts_with(o, "quota="), Cli.share_acc.quota(seen, d, Cli.size(String.drop(o, 6n)), t, r, mt),
-        None{}))))
 
 def Cli.share_acc.all(os: List<&2, String>, a: Maybe<&2, ShareAcc>) -> Maybe<&2, ShareAcc>:
   match os:
@@ -325,12 +339,20 @@ def Cli.share_acc.all(os: List<&2, String>, a: Maybe<&2, ShareAcc>) -> Maybe<&2,
     case Con{o, rest}:
       Cli.share_acc.all(rest, Cli.share_acc.step(a, o))
 
+# The options, as a ShareOptN when inodes= was given.
+def Cli.share_opt.with(o: ShareOpt, +n: U32) -> ShareOpt:
+  match o:
+    case ShareOpt{+d, +q, +t, +r, +mt}:
+      Bool.pick(ShareOpt, U32.is_zero(n), ShareOpt{d, q, t, r, mt}, ShareOptN{d, q, t, r, mt, n})
+    case o:
+      o
+
 def Cli.share_opt.of(a: Maybe<&2, ShareAcc>) -> Maybe<&2, ShareOpt>:
   match a:
     case None{}:
       None{}
-    case Some{ShareAcc{o, seen}}:
-      Some{o}
+    case Some{ShareAcc{o, seen, n}}:
+      Some{Cli.share_opt.with(o, n)}
 
 def Cli.share_opt.parts(ps: List<&2, String>) -> Maybe<&2, ShareOpt>:
   match ps:
@@ -338,7 +360,7 @@ def Cli.share_opt.parts(ps: List<&2, String>) -> Maybe<&2, ShareOpt>:
       None{}
     case Con{+dir, rest}:
       Bool.pick(Maybe<&2, ShareOpt>, String.is_empty(dir), None{},
-        Cli.share_opt.of(Cli.share_acc.all(rest, Some{ShareAcc{ShareOpt{dir, U.U64.zero(), "", False{}, False{}}, 0}})))
+        Cli.share_opt.of(Cli.share_acc.all(rest, Some{ShareAcc{ShareOpt{dir, U.U64.zero(), "", False{}, False{}}, 0, 0}})))
 
 # One --share value (tag "" when it names none).
 def Cli.share_opt(+spec: String) -> Maybe<&2, ShareOpt>:
@@ -371,6 +393,8 @@ def Cli.share_named(m: Maybe<&2, ShareOpt>, +i: U32) -> Maybe<&2, ShareOpt>:
       None{}
     case Some{ShareOpt{d, q, t, +r, +mt}}:
       Some{ShareOpt{d, q, Cli.share_tag(t, i), r || mt, mt}}
+    case Some{ShareOptN{d, q, t, +r, +mt, n}}:
+      Some{ShareOptN{d, q, Cli.share_tag(t, i), r || mt, mt, n}}
 
 def Cli.shares.one(m: Maybe<&2, ShareOpt>, rest: List<&2, ShareOpt>) -> List<&2, ShareOpt>:
   match m:
@@ -393,6 +417,8 @@ def Cli.shares(+all: String) -> List<&2, ShareOpt>:
 def Cli.share_tag_of(o: ShareOpt) -> String:
   match o:
     case ShareOpt{d, q, t, r, mt}:
+      t
+    case ShareOptN{d, q, t, r, mt, n}:
       t
 
 def Cli.tag_in(+t: String, ts: List<&2, String>) -> Bool:

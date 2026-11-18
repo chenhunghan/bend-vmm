@@ -156,9 +156,28 @@ def Host.fs.grows(none: Bool, +growth: U.U64, +sh: U32, op: V.FsOp) -> IO(V.FsRe
         +ws : +List<U32> <- H.Hvf.share_usage(sh)
         Host.fs.quota(Qt.Quota.allows(Fs.w64(ws, 0n), growth, Fs.w64(ws, 2n)), sh, op)
 
+# A create or remove on a share with an inode cap (src/fs/quota.bend): a
+# create past the cap fails with ENOSPC before it happens; what succeeded
+# moves the host's count.
+def Host.fs.counted(ok: Bool, +sh: U32, +op: V.FsOp) -> IO(V.FsResult):
+  match ok:
+    case False{}:
+      IO.pure(V.FsResult, V.FsErr{Qt.Quota.enospc()})
+    case True{}:
+      do IO<V.FsResult>:
+        +r : V.FsResult <- Host.fs.do(sh, op)
+        +mv : +List<U32> = Qt.Quota.moved(op, r)
+        _ : U32 <- H.Hvf.share_inodes_add(sh, Fs.w(mv, 0n), Fs.w(mv, 1n))
+        return r
+
+def Host.fs.entries(+sh: U32, +op: V.FsOp) -> IO(V.FsResult):
+  do IO<V.FsResult>:
+    +ws : +List<U32> <- H.Hvf.share_usage(sh)
+    Host.fs.counted(Qt.Quota.inodes_allow(Fs.w(ws, 4n), Qt.Quota.makes(op), Fs.w(ws, 5n)), sh, op)
+
 def Host.fs.rw(+sh: U32, +op: V.FsOp) -> IO(V.FsResult):
   +g = Qt.Quota.growth(op)
-  Host.fs.grows(U.U64.is_zero(g), g, sh, op)
+  Bool.pick(IO(V.FsResult), Qt.Quota.counts(op), Host.fs.entries(sh, op), Host.fs.grows(U.U64.is_zero(g), g, sh, op))
 
 # A share marked meta (src/fs/meta.bend): every guest path goes to its host
 # path through the directories' records, loaded from their .bend-meta the

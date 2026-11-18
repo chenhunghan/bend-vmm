@@ -474,6 +474,22 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5q. an inode cap on a share (--share DIR,inodes=N): no host inode exhaustion"
+  # src/fs/quota.bend: the share holds 3 entries (a, d, d/b); with
+  # inodes=20 the guest makes 17 more (files, a directory, a symlink), the
+  # next fails with ENOSPC, a remove frees one, and one more create fits.
+  t=$(mktemp -d); mkdir -p "$t/sh/d"; echo a > "$t/sh/a"; echo b > "$t/sh/d/b"
+  cmd='mkdir -p /mnt/s; mount -t 9p -o trans=virtio,version=9p2000.L sh /mnt/s; cd /mnt/s; mkdir x; ln -s a l; i=0; while [ $i -lt 40 ] && touch f$i 2>/tmp/e; do i=$((i + 1)); done; echo MADE-$i; cat /tmp/e; touch g 2>/dev/null && echo G-YES || echo G-NO; rm f0; touch h && echo H-YES; touch k 2>/dev/null && echo K-YES || echo K-NO; echo IN-""DONE\n'
+  out=$(drive 60 "busybox shell" "$cmd" "IN-DONE" 'poweroff -f\n' -- \
+    ./out/bend-vmm --mem 256 --kernel $GIMG --initrd $GI --share "$t/sh,tag=sh,inodes=20" --cmdline "$GCON quiet" 2>&1 | tr -d '\r')
+  n=$(find "$t/sh" -mindepth 1 | wc -l | tr -d ' ')
+  grep -aq "^MADE-15" <<<"$out" && grep -aq "No space left on device" <<<"$out" && grep -aq "^G-NO" <<<"$out" && grep -aq "^H-YES" <<<"$out" && grep -aq "^K-NO" <<<"$out" && [ "$n" = 20 ] \
+    && grn "ok: an inode cap: 20 entries (files, a directory, a symlink), the next create ENOSPC, a remove frees one" \
+    || { red "failed: inode cap (host holds $n entries, want 20)"; grep -a "^MADE-\|space\|^G-\|^H-\|^K-" <<<"$out" | tail -6; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 5j. a shared file the host replaces reads as the new one"
   # The guest reads d/f (the host keeps it open), then the host removes d
   # and makes it again with a new, larger f: the guest's next read is the

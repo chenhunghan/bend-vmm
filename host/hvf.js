@@ -89,6 +89,8 @@ io_eff(CID(Hvf.console_log), hvf_unavailable);
 io_eff(CID(Hvf.console_size), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.console_reopen), () => 0);
 io_eff(CID(Hvf.share_usage), () => ({ $: CID(Nil) }));
+io_eff(CID(Hvf.share_inodes), () => 0);
+io_eff(CID(Hvf.share_inodes_add), () => 0);
 io_eff(CID(Hvf.tcp_close), hvf_unavailable);
 io_eff(CID(Hvf.tcp_abort), hvf_unavailable);
 io_eff(CID(Hvf.udp_send), hvf_unavailable);
