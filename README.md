@@ -346,7 +346,7 @@ comments); `bend-vmm --help` lists the commands.
 
 `main.bend` at the repository's root is a BendHub package (MIT):
 `import 0x79c2f5323029fcb91b9cbd02db6800f6/main.bend as V` (bend-vmm as of
-6951844, x86_64 guests on KVM, per-vCPU exit counts in status json, host file calls (Fs), tagged read-only and meta shares, LAN TSO; each publish of a change has a new hash), then `V.Vmm.run(prog, flags)` runs the VMM inside another Bend
+a8ffcd6, x86_64 guests on KVM, per-vCPU exit counts in status json, host file calls (Fs), tagged read-only and meta shares, LAN TSO; each publish of a change has a new hash), then `V.Vmm.run(prog, flags)` runs the VMM inside another Bend
 program: `prog` is how that program starts the VMM again (on a guest reset,
 and in a snapshot's saved command line), e.g. `["vk8s", "vmm"]`, and `flags`
 are the options above. One VM per process (the host layer's state is the
