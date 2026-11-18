@@ -29,9 +29,9 @@ law quota.growth_truncate:
 law quota.growth_create:
   {Q.Quota.growth(V.FsCreate{"log", 420}) == w(0) : U.U64}
 
-# Proposed: an inode cap per share (--share DIR,inodes=N; asked by
-# bend-vk8s, security review F4): creates count, removes free, a create
-# past the cap is refused.
+# An inode cap per share (--share DIR,inodes=N; asked by bend-vk8s,
+# security review F4; approved by the owner 2026-11-18): creates count,
+# removes free, a create past the cap is refused.
 law quota.makes_create:
   {Q.Quota.makes(V.FsCreate{"f", 420}) == 1 : U32}
 
