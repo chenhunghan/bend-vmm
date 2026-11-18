@@ -216,8 +216,9 @@ law cli.shares_nine:
 law cli.share_opt_meta:
   {C.Cli.shares("/l,tag=layers,meta") == [C.ShareOpt{"/l", U.U64{0, 0}, "layers", True{}, True{}}] : List<&2, C.ShareOpt>}
 
-# Proposed: --share DIR,inodes=N (an inode cap: src/fs/quota.bend), a
-# count from 1 up, K/M/G in 1024s; given, the share is a ShareOptN.
+# --share DIR,inodes=N (an inode cap: src/fs/quota.bend; approved by the
+# owner 2026-11-18), a count from 1 up, K/M/G in 1024s; given, the share
+# is a ShareOptN.
 law cli.share_opt_inodes:
   {C.Cli.share_opt("/c,quota=1G,inodes=100K") == Some{C.ShareOptN{"/c", U.U64{0, 1073741824}, "", False{}, False{}, 102400}} : Maybe<&2, C.ShareOpt>}
 
