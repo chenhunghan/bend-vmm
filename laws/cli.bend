@@ -215,3 +215,23 @@ law cli.shares_nine:
 
 law cli.share_opt_meta:
   {C.Cli.shares("/l,tag=layers,meta") == [C.ShareOpt{"/l", U.U64{0, 0}, "layers", True{}, True{}}] : List<&2, C.ShareOpt>}
+
+# Proposed: --share DIR,inodes=N (an inode cap: src/fs/quota.bend), a
+# count from 1 up, K/M/G in 1024s; given, the share is a ShareOptN.
+law cli.share_opt_inodes:
+  {C.Cli.share_opt("/c,quota=1G,inodes=100K") == Some{C.ShareOptN{"/c", U.U64{0, 1073741824}, "", False{}, False{}, 102400}} : Maybe<&2, C.ShareOpt>}
+
+law cli.share_opt_inodes_zero:
+  {C.Cli.share_opt("/c,inodes=0") == None{} : Maybe<&2, C.ShareOpt>}
+
+law cli.share_opt_inodes_twice:
+  {C.Cli.share_opt("/c,inodes=5,inodes=6") == None{} : Maybe<&2, C.ShareOpt>}
+
+law cli.share_opt_inodes_huge:
+  {C.Cli.share_opt("/c,inodes=4G") == None{} : Maybe<&2, C.ShareOpt>}
+
+law cli.shares_inodes_tag:
+  {C.Cli.shares("/a,inodes=7\n/b") == [C.ShareOptN{"/a", U.U64{0, 0}, "share", False{}, False{}, 7}, C.ShareOpt{"/b", U.U64{0, 0}, "share1", False{}, False{}}] : List<&2, C.ShareOpt>}
+
+law cli.shares_inodes_check:
+  {C.Cli.check(["--share", "/c,quota=1G,inodes=100000"]) == "" : String}

@@ -193,3 +193,21 @@ def L.cli.shares_nine():
 
 def L.cli.share_opt_meta():
   {==}
+
+def L.cli.share_opt_inodes():
+  {==}
+
+def L.cli.share_opt_inodes_zero():
+  {==}
+
+def L.cli.share_opt_inodes_twice():
+  {==}
+
+def L.cli.share_opt_inodes_huge():
+  {==}
+
+def L.cli.shares_inodes_tag():
+  {==}
+
+def L.cli.shares_inodes_check():
+  {==}

@@ -28,3 +28,48 @@ law quota.growth_truncate:
 
 law quota.growth_create:
   {Q.Quota.growth(V.FsCreate{"log", 420}) == w(0) : U.U64}
+
+# Proposed: an inode cap per share (--share DIR,inodes=N; asked by
+# bend-vk8s, security review F4): creates count, removes free, a create
+# past the cap is refused.
+law quota.makes_create:
+  {Q.Quota.makes(V.FsCreate{"f", 420}) == 1 : U32}
+
+law quota.makes_mkdir:
+  {Q.Quota.makes(V.FsMkdir{"d", 493}) == 1 : U32}
+
+law quota.makes_symlink:
+  {Q.Quota.makes(V.FsSymlink{"l", "f"}) == 1 : U32}
+
+law quota.makes_write:
+  {Q.Quota.makes(V.FsWrite{"f", w(0), [1, 2]}) == 0 : U32}
+
+law quota.frees_remove:
+  {Q.Quota.frees(V.FsRemove{"f", False{}}) == 1 : U32}
+
+law quota.counts_rename:
+  {Q.Quota.counts(V.FsRename{"a", "b"}) == False{} : Bool}
+
+law quota.moved_ok:
+  {Q.Quota.moved(V.FsMkdir{"d", 493}, V.FsOk{}) == [1, 0] : +List<U32>}
+
+law quota.moved_failed:
+  {Q.Quota.moved(V.FsCreate{"f", 420}, V.FsErr{17}) == [0, 0] : +List<U32>}
+
+law quota.moved_remove:
+  {Q.Quota.moved(V.FsRemove{"d", True{}}, V.FsOk{}) == [0, 1] : +List<U32>}
+
+law quota.inodes_none:
+  {Q.Quota.inodes_allow(4294967295, 1, 0) == True{} : Bool}
+
+law quota.inodes_fits:
+  {Q.Quota.inodes_allow(19, 1, 20) == True{} : Bool}
+
+law quota.inodes_full:
+  {Q.Quota.inodes_allow(20, 1, 20) == False{} : Bool}
+
+law quota.inodes_over:
+  {Q.Quota.inodes_allow(25, 1, 20) == False{} : Bool}
+
+law quota.inodes_remove_when_full:
+  {Q.Quota.inodes_allow(25, 0, 20) == True{} : Bool}

@@ -398,6 +398,14 @@ def Hvf.share_usage(share: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.share_inodes(share: U32, cap: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.share_inodes_add(share: U32, made: U32, freed: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.udp_ages() -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"

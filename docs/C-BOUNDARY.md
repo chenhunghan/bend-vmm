@@ -9,7 +9,7 @@ carries out plans that Bend hands it.
 This file is the audit of that boundary. It covered all 113 effects in
 host/hvf.c as of 2026-11-09 and says, for each group, where the
 decisions are made; the migration ledger at the end lists every effect
-(152 as of 2026-11-17) with its target in the C-to-Bend plan. The
+(154 as of 2026-11-18) with its target in the C-to-Bend plan. The
 section before it lists every decision still in C, with the reason it
 stays.
 
@@ -26,7 +26,7 @@ stays.
 | Descriptors | `nofile` `set_nofile` `fd_room` | reads and sets rlimit; counts sockets | soft limit and flow budget (`net/fds.bend`) |
 | Sockets and listeners | `ctl_listen` `ctl_next` `ctl_reply` `vsock_listen` `vsock_accept` `vsock_base` `vsock_file` `unix_connect` `fwd_listen` `fwd_accept` `accept_retry` `sock_facts` `sock_remove` | binds, accepts, connects; reports what a path holds | protocol (`vmm/control.bend`), deadlines, backlogs, retry and CONNECT (`vmm/clients.bend`), forward specs (`vmm/cli.bend`), which paths may be listened on (`vmm/hostfiles.bend`) |
 | LAN | `lan_open` `lan_send` `lan_names` `lan_recv` `lan_to_ram` `lan_release` `mkdir` `dir_facts` `path_facts` `set_mtime` `fsync` `chmod` | datagram sockets, one frame per datagram | where frames go (`virtio/lan.bend`), directory trust and socket replacement (`vmm/hostfiles.bend`) |
-| Shares (9p) | `fs` `share_open` `share_ro` `meta_load` `meta_resolve` `meta_list` `share_quota` `share_usage` | walks paths with openat and O_NOFOLLOW; keeps a descriptor cache | valid names (`fs/contain.bend`), listing order and pages (`fs/listing.bend`), entries, types and modes (`fs/entry.bend`), quota (`fs/quota.bend`) |
+| Shares (9p) | `fs` `share_open` `share_ro` `meta_load` `meta_resolve` `meta_list` `share_quota` `share_usage` `share_inodes` `share_inodes_add` | walks paths with openat and O_NOFOLLOW; keeps a descriptor cache | valid names (`fs/contain.bend`), listing order and pages (`fs/listing.bend`), entries, types and modes (`fs/entry.bend`), quota and inode cap (`fs/quota.bend`) |
 | Display | `fb_init` `fb_present` `fb_dump` | maps the framebuffer, draws it with Metal, writes PPM | display size (`Cli.display.fits`), pointer and keys (`dev/pointer.bend`), file mode |
 
 ## Moved on 2026-11-09, after the first version of this audit
@@ -314,6 +314,8 @@ row but the decisions listed as moved above.
 | `meta_resolve` | `hvf_meta_resolve_run` | host/fs.bend (Host.meta.resolve) | none | 4 | check-host 5o | none | C finds a guest path's names in the tables Bend loaded, as hvf_fdc finds descriptors; Bend decides every attribute from the record line it gets back (Meta.attr) (2026-11-17) |
 | `meta_list` | `hvf_meta_list_run` | host/fs.bend (Host.meta.list) | none | 4 | check-host 5o | none | C hands back a loaded table; Bend makes the listing (Meta.entries) (2026-11-17) |
 | `share_usage` | `hvf_share_usage_run` (5578) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
+| `share_inodes` | `hvf_share_inodes_run` (5578) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
+| `share_inodes_add` | `hvf_share_inodes_add_run` (5578) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
 | `share_open` | `hvf_share_open_run` (3219) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
 | `fs` | `hvf_fs_run` (3413) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | C finds and keeps; Bend decides invalidation and eviction (2026-11-11) |
 | `fdc_stamps` | `hvf_fdc_stamps_run` (3333) | host/fs.bend over src/host/fdcache.bend | owned fds | 4 | check-host share; model: tests/fdcache.bend | guest 9p-* | Bend decides eviction (2026-11-11) |

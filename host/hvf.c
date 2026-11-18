@@ -4081,11 +4081,20 @@ Term hvf_share_ro_run(Env e, Term* f, IoWork* w) {
 static uint64_t hvf_share_quota_b[HVF_MAX_SHARES];
 static int64_t  hvf_share_used_b[HVF_MAX_SHARES];
 static int64_t  hvf_walk_sum;
+// A share's inode cap (0: none) and the entries it holds: counted once by
+// Hvf.share_inodes, then moved by Hvf.share_inodes_add, which Bend calls
+// with what each create or remove made or freed (src/fs/quota.bend).
+static uint32_t hvf_share_inodes_cap[HVF_MAX_SHARES];
+static int64_t  hvf_share_inodes_used[HVF_MAX_SHARES];
+static int64_t  hvf_walk_count;
 
 #include <ftw.h>
 static int hvf_walk_one(const char* p, const struct stat* st, int flag, struct FTW* ftw) {
   if (flag == FTW_F && S_ISREG(st->st_mode)) {
     hvf_walk_sum += st->st_size;
+  }
+  if (ftw->level > 0) {
+    hvf_walk_count++;
   }
   return 0;
 }
@@ -7263,13 +7272,45 @@ Term hvf_share_quota_run(Env e, Term* f, IoWork* w) {
 }
 
 // Hvf.share_usage(share) -> List<U32>: [bytes its files hold, its quota]
-// (each hi, lo).
+// (each hi, lo), then [entries it holds, its inode cap].
 Term hvf_share_usage_run(Env e, Term* f, IoWork* w) {
   u32      sh = (u32)f[0];
   uint64_t u  = sh < HVF_MAX_SHARES ? (uint64_t)hvf_share_used_b[sh] : 0;
   uint64_t q  = sh < HVF_MAX_SHARES ? hvf_share_quota_b[sh] : 0;
-  uint32_t ws[4] = {(uint32_t)(u >> 32), (uint32_t)u, (uint32_t)(q >> 32), (uint32_t)q};
-  return hvf_words(e, ws, 4);
+  int64_t  n  = sh < HVF_MAX_SHARES ? hvf_share_inodes_used[sh] : 0;
+  uint32_t c  = sh < HVF_MAX_SHARES ? hvf_share_inodes_cap[sh] : 0;
+  uint32_t ws[6] = {(uint32_t)(u >> 32), (uint32_t)u, (uint32_t)(q >> 32), (uint32_t)q,
+                    n > 0xFFFFFFFFll ? 0xFFFFFFFFu : (uint32_t)n, c};
+  return hvf_words(e, ws, 6);
+}
+
+// Hvf.share_inodes(share, cap) -> U32: the share's inode cap (0: none);
+// with one, the entries under it now are counted. 0.
+Term hvf_share_inodes_run(Env e, Term* f, IoWork* w) {
+  u32 sh = (u32)f[0];
+  if (sh >= (u32)hvf_nshares) {
+    return (Term)HVF_ERR;
+  }
+  hvf_share_inodes_cap[sh] = (u32)f[1];
+  hvf_walk_count           = 0;
+  if (hvf_share_inodes_cap[sh]) {
+    nftw(hvf_shares[sh], hvf_walk_one, 32, FTW_PHYS);
+  }
+  hvf_share_inodes_used[sh] = hvf_walk_count;
+  return (Term)0;
+}
+
+// Hvf.share_inodes_add(share, made, freed) -> U32: moves the count (never
+// below 0) when the share has a cap. 0.
+Term hvf_share_inodes_add_run(Env e, Term* f, IoWork* w) {
+  u32 sh = (u32)f[0];
+  if (sh < HVF_MAX_SHARES && hvf_share_inodes_cap[sh]) {
+    hvf_share_inodes_used[sh] += (int64_t)(u32)f[1] - (int64_t)(u32)f[2];
+    if (hvf_share_inodes_used[sh] < 0) {
+      hvf_share_inodes_used[sh] = 0;
+    }
+  }
+  return (Term)0;
 }
 
 // Effects the program never calls have no id; register only the used ones.
@@ -7393,6 +7434,12 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.share_usage)
   io_eff(CID(Hvf.share_usage), hvf_share_usage_run);
+#endif
+#ifdef CID(Hvf.share_inodes)
+  io_eff(CID(Hvf.share_inodes), hvf_share_inodes_run);
+#endif
+#ifdef CID(Hvf.share_inodes_add)
+  io_eff(CID(Hvf.share_inodes_add), hvf_share_inodes_add_run);
 #endif
 #ifdef CID(Hvf.udp_ages)
   io_eff(CID(Hvf.udp_ages), hvf_udp_ages_run);

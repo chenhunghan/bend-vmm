@@ -1512,9 +1512,10 @@ def path_under(+dir: String, +name: String) -> String:
     case False{}:
       devices.disks(String.split(disk, ','))
 
-# --share DIR[,quota=SIZE][,tag=NAME][,ro], repeatable (src/vmm/cli.bend;
+# --share DIR[,quota=SIZE][,inodes=N][,tag=NAME][,ro], repeatable (src/vmm/cli.bend;
 # Cli.check refused a malformed one): each share its own 9p device, by
-# its tag; writes past a quota fail (src/fs/quota.bend); a read-only
+# its tag; writes past a quota, and creates past an inode cap, fail
+# (src/fs/quota.bend); a read-only
 # share's number carries Ro.bit() (src/fs/readonly.bend), and the host
 # refuses its changes too.
 def devices.share.ro(ro: Bool, +sh: U32) -> IO(U32):
@@ -1524,15 +1525,23 @@ def devices.share.ro(ro: Bool, +sh: U32) -> IO(U32):
     case False{}:
       IO.pure(U32, 0)
 
-def devices.share.one(o: Cli.ShareOpt) -> IO(D.DevKind):
-  match o:
-    case Cli.ShareOpt{+dir, U.U64{qh, ql}, tag, +ro, +meta}:
+def devices.share.with(+dir: String, q: U.U64, +tag: String, +ro: Bool, +meta: Bool, +inodes: U32) -> IO(D.DevKind):
+  match q:
+    case U.U64{qh, ql}:
       do IO<D.DevKind>:
         +sh : U32 <- H.Hvf.share_open(dir)
         die_if(U32.is_eq(sh, err()), "cannot open the shared directory " ++ dir)
         _ : U32 <- H.Hvf.share_quota(sh, qh, ql)
+        _ : U32 <- H.Hvf.share_inodes(sh, inodes)
         _ : U32 <- devices.share.ro(ro, sh)
         return D.P9Kind{(Ro.Ro.mark(sh, ro) .|. Bool.pick(U32, meta, Mt.Meta.bit_meta(), 0) : U32), tag}
+
+def devices.share.one(o: Cli.ShareOpt) -> IO(D.DevKind):
+  match o:
+    case Cli.ShareOpt{dir, q, tag, ro, meta}:
+      devices.share.with(dir, q, tag, ro, meta, 0)
+    case Cli.ShareOptN{dir, q, tag, ro, meta, n}:
+      devices.share.with(dir, q, tag, ro, meta, n)
 
 def devices.share.go(os: List<&2, Cli.ShareOpt>) -> IO(+List<D.DevKind>):
   match os:
@@ -2499,7 +2508,7 @@ def usage() -> String:
     "usage: bend-vmm --kernel Image [--initrd FILE] [--cmdline \"...\"] [--mem MiB] [--cpus N]",
     "                [--disk IMG[:ro][:nocache],...] [--share DIR] [--vsock PATH] [--control PATH]",
     "                [--display WxH[,headless]] [--forward [ADDR:]HOSTPORT:GUESTPORT,...]",
-    "                [--lan DIR,ip=A.B.C.D/N[,mac=xx:xx:xx:xx:xx:xx]] [--share DIR,quota=SIZE]",
+    "                [--lan DIR,ip=A.B.C.D/N[,mac=xx:xx:xx:xx:xx:xx]] [--share DIR,quota=SIZE,inodes=N]",
     "                [--console-log PATH,max=SIZE[,keep=N]] [--balloon auto|free-page-reporting|off]",
     "       bend-vmm --firmware CODE.fd --vars VARS.fd [--disk IMG] ...   (UEFI)",
     "       bend-vmm --restore SNAPSHOT [--disk, --share, ... as taken] [--control PATH] [--forward ...]",

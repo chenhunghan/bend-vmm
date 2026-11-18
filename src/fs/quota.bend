@@ -25,3 +25,52 @@ def Quota.growth(op: V.FsOp) -> U.U64:
 # plus growth within it.
 def Quota.allows(+usage: U.U64, +growth: U.U64, +quota: U.U64) -> Bool:
   U.U64.is_zero(quota) || U.U64.is_le(U.U64.add(usage, growth), quota)
+
+# A share's inode cap (--share DIR,inodes=N): the entries (files,
+# directories, symlinks) it may hold. The host counts them (summed at
+# start, moved by each create and remove that succeeds); a create past the
+# cap fails with ENOSPC before it happens, so a guest cannot fill the
+# host's inodes with empty files. A rename onto an existing name frees one
+# the count keeps (it errs high, never low).
+
+# The entries an operation would make: 1 for a file, directory or symlink.
+def Quota.makes(op: V.FsOp) -> U32:
+  match op:
+    case V.FsCreate{p, m}:
+      1
+    case V.FsMkdir{p, m}:
+      1
+    case V.FsSymlink{p, t}:
+      1
+    case _:
+      0
+
+# The entries an operation would free: 1 for a remove.
+def Quota.frees(op: V.FsOp) -> U32:
+  match op:
+    case V.FsRemove{p, d}:
+      1
+    case _:
+      0
+
+# Whether an operation changes the count at all (the rest skip it).
+def Quota.counts(+op: V.FsOp) -> Bool:
+  U32.is_ne((Quota.makes(op) + Quota.frees(op) : U32), 0)
+
+def Quota.done(r: V.FsResult) -> Bool:
+  match r:
+    case V.FsOk{}:
+      True{}
+    case _:
+      False{}
+
+# What the count moves by once the host answered r: [made, freed], each
+# only when the operation succeeded.
+def Quota.moved(+op: V.FsOp, r: V.FsResult) -> +List<U32>:
+  +ok : Bool = Quota.done(r)
+  [Bool.pick(U32, ok, Quota.makes(op), 0), Bool.pick(U32, ok, Quota.frees(op), 0)]
+
+# Whether making n more entries fits: no cap (0), or the count plus n
+# within it.
+def Quota.inodes_allow(+used: U32, +n: U32, +cap: U32) -> Bool:
+  U32.is_zero(cap) || U32.is_zero(n) || (U32.is_le(n, cap) && U32.is_le(used, (cap - n : U32)))
