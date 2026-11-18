@@ -45,8 +45,23 @@ type Fid is Data:
 type P9XPath is Data:
   P9XPath{name: String, path: String}
 
+# The fid table as a binary trie on a fid's bits, low bit first, a fid kept
+# where its remaining bits run out (Linux numbers fids from 0 up, so 65536
+# fids sit at most 17 nodes deep).
+type FidMap is Data:
+  FTip{}
+  FNode{here: Maybe<&2, Fid>, zero: FidMap, one: FidMap}
+
+# A server's state: the msize, and its fid table, either a list (as laws,
+# tests and snapshots write it) or a trie with its count (P9Map, what the first
+# bind makes: a lookup costs the fid's bits, not the table's length).
+# A trie and how many fids it holds.
+type FidTable is Data:
+  FidTable{n: U32, map: FidMap}
+
 type P9State is Data:
   P9State{msize: U32, fids: +List<Fid>}
+  P9Map{msize: U32, n: U32, map: FidMap}
 
 def P9State.new() -> P9State:
   P9State{8192, []}
@@ -89,7 +104,7 @@ def P9.emfile() -> U32:
 
 # The most fids the table holds: a new fid past it is EMFILE.
 def P9.max_fids() -> Nat:
-  4096n
+  65536n
 
 # The permission bits a guest may set on a host file (0777): never setuid,
 # setgid or sticky.
@@ -109,11 +124,30 @@ def P9State.msize(s: P9State) -> U32:
   match s:
     case P9State{m, fs}:
       m
+    case P9Map{m, n, fm}:
+      m
+
+def FidMap.here(m: Maybe<&2, Fid>) -> +List<Fid>:
+  match m:
+    case None{}:
+      []
+    case Some{f}:
+      [f]
+
+# Every fid of a trie.
+def FidMap.list(m: FidMap) -> +List<Fid>:
+  match m:
+    case FTip{}:
+      []
+    case FNode{h, z, o}:
+      List.append(&2, Fid, FidMap.here(h), List.append(&2, Fid, FidMap.list(z), FidMap.list(o)))
 
 def P9State.fids(s: P9State) -> +List<Fid>:
   match s:
     case P9State{m, fs}:
       fs
+    case P9Map{m, n, fm}:
+      FidMap.list(fm)
 
 # The I/O unit Rlopen and Rlcreate answer: msize less the Rread header.
 def P9.iounit(s: P9State) -> U32:
@@ -135,6 +169,130 @@ def P9.fid_find(fids: +List<Fid>, +fid: U32) -> Maybe<&2, Fid>:
       None{}
     case +f <> t:
       Bool.pick(Maybe<&2, Fid>, U32.is_eq(Fid.id(f), fid), Some{f}, P9.fid_find(t, fid))
+
+# The trie's node for a key's low bit (b: the bit is 1).
+def FidMap.side(b: Bool, +z: FidMap, +o: FidMap) -> FidMap:
+  match b:
+    case False{}:
+      z
+    case True{}:
+      o
+
+def FidMap.bit(+key: U32) -> Bool:
+  U32.is_ne((key .&. 1 : U32), 0)
+
+def FidMap.get.at(fuel: Nat, m: FidMap, done: Bool, +key: U32) -> Maybe<&2, Fid>:
+  match fuel:
+    case 0n:
+      None{}
+    case 1n+f:
+      match m:
+        case FTip{}:
+          None{}
+        case FNode{h, +z, +o}:
+          match done:
+            case True{}:
+              h
+            case False{}:
+              +rest : U32 = (key >> 1n : U32)
+              FidMap.get.at(f, FidMap.side(FidMap.bit(key), z, o), U32.is_zero(rest), rest)
+
+# The fid bound to key (fuel: 33, a key's bits and one).
+def FidMap.get(m: FidMap, +key: U32) -> Maybe<&2, Fid>:
+  FidMap.get.at(33n, m, U32.is_zero(key), key)
+
+# A node with nothing left under it is a tip.
+def FidMap.trim(h: Maybe<&2, Fid>, +z: FidMap, +o: FidMap) -> FidMap:
+  match h z o:
+    case None{} FTip{} FTip{}:
+      FTip{}
+    case h z o:
+      FNode{h, z, o}
+
+# The trie with key bound to v (None: unbound). done: no bits of key are
+# left; bit: its low bit is 1.
+def FidMap.set(fuel: Nat, m: FidMap, done: Bool, bit: Bool, +key: U32, v: Maybe<&2, Fid>) -> FidMap:
+  match fuel:
+    case 0n:
+      m
+    case 1n+f:
+      match m:
+        case FTip{}:
+          match done:
+            case True{}:
+              FidMap.trim(v, FTip{}, FTip{})
+            case False{}:
+              match bit:
+                case False{}:
+                  FidMap.trim(None{}, FidMap.set(f, FTip{}, U32.is_zero((key >> 1n : U32)), FidMap.bit((key >> 1n : U32)), (key >> 1n : U32), v), FTip{})
+                case True{}:
+                  FidMap.trim(None{}, FTip{}, FidMap.set(f, FTip{}, U32.is_zero((key >> 1n : U32)), FidMap.bit((key >> 1n : U32)), (key >> 1n : U32), v))
+        case FNode{h, z, o}:
+          match done:
+            case True{}:
+              FidMap.trim(v, z, o)
+            case False{}:
+              match bit:
+                case False{}:
+                  FidMap.trim(h, FidMap.set(f, z, U32.is_zero((key >> 1n : U32)), FidMap.bit((key >> 1n : U32)), (key >> 1n : U32), v), o)
+                case True{}:
+                  FidMap.trim(h, z, FidMap.set(f, o, U32.is_zero((key >> 1n : U32)), FidMap.bit((key >> 1n : U32)), (key >> 1n : U32), v))
+
+def FidMap.put(m: FidMap, +key: U32, v: Maybe<&2, Fid>) -> FidMap:
+  FidMap.set(33n, m, U32.is_zero(key), FidMap.bit(key), key, v)
+
+# A list of fids as a trie and its count (the first of a fid bound twice
+# wins, as P9.fid_find finds it).
+def FidMap.count(+had: Bool, +n: U32) -> U32:
+  Bool.pick(U32, had, n, (n + 1 : U32))
+
+def FidMap.add(+f: Fid, t: FidTable) -> FidTable:
+  match t:
+    case FidTable{+n, +m}:
+      FidTable{FidMap.count(Maybe.is_some(&2, Fid, FidMap.get(m, Fid.id(f))), n), FidMap.put(m, Fid.id(f), Some{f})}
+
+def FidMap.of_list(fs: +List<Fid>) -> FidTable:
+  match fs:
+    case Nil{}:
+      FidTable{0, FTip{}}
+    case +f <> t:
+      FidMap.add(f, FidMap.of_list(t))
+
+def FidTable.state(+ms: U32, t: FidTable) -> P9State:
+  match t:
+    case FidTable{n, m}:
+      P9Map{ms, n, m}
+
+# The table of a state, as a trie.
+def P9State.table(s: P9State) -> FidTable:
+  match s:
+    case P9State{m, fs}:
+      FidMap.of_list(fs)
+    case P9Map{m, n, fm}:
+      FidTable{n, fm}
+
+def P9State.find(s: P9State, +fid: U32) -> Maybe<&2, Fid>:
+  match s:
+    case P9State{m, fs}:
+      P9.fid_find(fs, fid)
+    case P9Map{m, n, fm}:
+      FidMap.get(fm, fid)
+
+def P9State.count(s: P9State) -> Nat:
+  match s:
+    case P9State{m, fs}:
+      List.length(&2, Fid, fs)
+    case P9Map{m, n, fm}:
+      U32.to_nat(n)
+
+# The table with fid bound to v (None: unbound).
+def FidTable.put(t: FidTable, +fid: U32, +v: Maybe<&2, Fid>) -> FidTable:
+  match t:
+    case FidTable{+n, +m}:
+      +had : Bool = Maybe.is_some(&2, Fid, FidMap.get(m, fid))
+      +now : Bool = Maybe.is_some(&2, Fid, v)
+      +n1 : U32 = Bool.pick(U32, had, (n - 1 : U32), n)
+      FidTable{Bool.pick(U32, now, (n1 + 1 : U32), n1), FidMap.put(m, fid, v)}
 
 def P9.fid_drop.go(hit: Bool, f: Fid, rest: +List<Fid>) -> +List<Fid>:
   match hit:
@@ -161,16 +319,16 @@ def P9.room(bound: Bool, n: Nat) -> Bool:
 def P9.fid_room(+fids: +List<Fid>, +fid: U32) -> Bool:
   P9.room(Maybe.is_some(&2, Fid, P9.fid_find(fids, fid)), List.length(&2, Fid, fids))
 
-# The state with fid bound to f (replacing any earlier binding).
-def P9.bind(s: P9State, +f: Fid) -> P9State:
-  match s:
-    case P9State{m, fs}:
-      P9State{m, f <> P9.fid_drop(fs, Fid.id(f))}
+# Whether fid can be bound in s's table.
+def P9State.room(+s: P9State, +fid: U32) -> Bool:
+  P9.room(Maybe.is_some(&2, Fid, P9State.find(s, fid)), P9State.count(s))
 
-def P9.unbind(s: P9State, +fid: U32) -> P9State:
-  match s:
-    case P9State{m, fs}:
-      P9State{m, P9.fid_drop(fs, fid)}
+# The state with fid bound to f (replacing any earlier binding).
+def P9.bind(+s: P9State, +f: Fid) -> P9State:
+  FidTable.state(P9State.msize(s), FidTable.put(P9State.table(s), Fid.id(f), Some{f}))
+
+def P9.unbind(+s: P9State, +fid: U32) -> P9State:
+  FidTable.state(P9State.msize(s), FidTable.put(P9State.table(s), fid, None{}))
 
 # The rest of s after prefix, if s starts with it.
 def P9.strip(prefix: String, s: String) -> Maybe<&2, String>:
@@ -201,10 +359,8 @@ def P9.move_fids(fids: +List<Fid>, +from: String, +to: String) -> +List<Fid>:
     case Fid{i, +p, o} <> t:
       Fid{i, P9.moved(from, to, p), o} <> P9.move_fids(t, from, to)
 
-def P9.rename_fids(s: P9State, +from: String, +to: String) -> P9State:
-  match s:
-    case P9State{m, fs}:
-      P9State{m, P9.move_fids(fs, from, to)}
+def P9.rename_fids(+s: P9State, +from: String, +to: String) -> P9State:
+  FidTable.state(P9State.msize(s), FidMap.of_list(P9.move_fids(P9State.fids(s), from, to)))
 
 # A name as a host path component.
 def P9.chars(bs: +List<U32>) -> String:
@@ -358,7 +514,7 @@ def P9.with_fid.go(-R: Type, m: Maybe<&2, Fid>, s: P9State, +tag: U32, k: Fid ->
       k(f)
 
 def P9.with_fid(-R: Type, +s: P9State, +tag: U32, +fid: U32, k: Fid -> V.Op<R, P9Answer>) -> V.Op<R, P9Answer>:
-  P9.with_fid.go(R, P9.fid_find(P9State.fids(s), fid), s, tag, k)
+  P9.with_fid.go(R, P9State.find(s, fid), s, tag, k)
 
 # Continues with the path of `name` inside the directory fid names, or
 # answers EBADF (unknown fid) or EINVAL (bad name).
@@ -412,7 +568,7 @@ def P9.with_room.go(-R: Type, room: Bool, s: P9State, +tag: U32, k: P9State -> V
       P9.err(R, s, tag, P9.emfile())
 
 def P9.with_room(-R: Type, +s: P9State, +tag: U32, +fid: U32, k: P9State -> V.Op<R, P9Answer>) -> V.Op<R, P9Answer>:
-  P9.with_room.go(R, P9.fid_room(P9State.fids(s), fid), s, tag, k)
+  P9.with_room.go(R, P9State.room(s, fid), s, tag, k)
 
 def P9.attach.go(-R: Type, +share: U32, s: P9State, +tag: U32, +fid: U32) -> V.Op<R, P9Answer>:
   P9.reply_qid(R, share, P9.bind(s, Fid{fid, "", False{}}), tag, "", q => W.Rattach{q})

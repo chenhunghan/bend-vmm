@@ -41,16 +41,16 @@ law p9.emfile:
   {P.P9.emfile() == 24 : U32}
 
 law p9.max_fids:
-  {P.P9.max_fids() == 4096n : Nat}
+  {P.P9.max_fids() == 65536n : Nat}
 
 law p9.room_full:
-  {P.P9.room(False{}, 4096n) == False{} : Bool}
+  {P.P9.room(False{}, 65536n) == False{} : Bool}
 
 law p9.room_rebind:
-  {P.P9.room(True{}, 4096n) == True{} : Bool}
+  {P.P9.room(True{}, 65536n) == True{} : Bool}
 
 law p9.room_below_max:
-  {P.P9.room(False{}, 4095n) == True{} : Bool}
+  {P.P9.room(False{}, 65535n) == True{} : Bool}
 
 law p9.fid_room_new:
   {P.P9.fid_room([P.Fid{1, "", False{}}], 7) == True{} : Bool}

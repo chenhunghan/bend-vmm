@@ -588,19 +588,19 @@ def bounds() -> IO(Unit):
       Step{readdir(1, 0, 8192), W.Rreaddir{[dirent(0, 3, 1, 8, "hello.txt"), dirent(128, 4, 2, 4, "dir")]}}
     ])
 
-# n fids, numbered from 100 + n - 1 down to 100, each naming the root.
-def fids(n: Nat) -> +List<P.Fid>:
+# A state holding those fids, bound one at a time (the trie form).
+def full(n: Nat, s: P.P9State) -> P.P9State:
   match n:
     case 0n:
-      []
+      s
     case 1n+(+p):
-      P.Fid{(100 + U32.from_nat(p) : U32), "", False{}} <> fids(p)
+      full(p, P.P9.bind(s, P.Fid{(100 + U32.from_nat(p) : U32), "", False{}}))
 
 def run_st(fs: F.SimFs, st: P.P9State, rs: +List<W.P9Req>) -> Maybe<&1, S.Sim & Out>:
   +s = S.Sim.with_fs(S.Sim.new(u64(4096), 0n), fs)
   S.Sim.exec(Out, s, session(rs, Out, 1, st, []))
 
-# 16. The fid table holds at most 4096 fids: a new fid past that is EMFILE
+# 16. The fid table holds at most 65536 fids: a new fid past that is EMFILE
 # (24); rebinding a fid in the table, or one freed by clunk, still works.
 def fid_cap_steps() -> +List<Step>:
   [
@@ -613,10 +613,35 @@ def fid_cap_steps() -> +List<Step>:
   ]
 
 def fid_cap() -> IO(Unit):
-  check_out("p9 fid cap", run_st(share(), P.P9State{65536, fids(4096n)}, reqs(fid_cap_steps())), wants(fid_cap_steps(), 1))
+  check_out("p9 fid cap", run_st(share(), full(65536n, P.P9State{65536, []}), reqs(fid_cap_steps())), wants(fid_cap_steps(), 1))
+
+# The trie: fid 0, a large fid, rebinding (the count stays), unbinding.
+def has(+s: P.P9State, +fid: U32) -> Bool:
+  Maybe.is_some(&2, P.Fid, P.P9State.find(s, fid))
+
+def path_of(+s: P.P9State, +fid: U32) -> String:
+  Maybe.default(&2, String, Maybe.map(&2, P.Fid, String, P.Fid.path, P.P9State.find(s, fid)), "-")
+
+def fid_map() -> IO(Unit):
+  +s0 = {P.P9State.new() : P.P9State}
+  +s1 = P.P9.bind(P.P9.bind(P.P9.bind(s0, P.Fid{0, "a", False{}}), P.Fid{4294967295, "b", False{}}), P.Fid{6, "c", False{}})
+  +s2 = P.P9.bind(s1, P.Fid{6, "d", True{}})
+  +s3 = P.P9.unbind(s2, 0)
+  +s4 = P.P9.unbind(s3, 5)
+  do IO<Unit>:
+    T.eq_str("p9 fid map: fid 0", path_of(s1, 0), "a")
+    T.eq_str("p9 fid map: fid 2^32-1", path_of(s1, 4294967295), "b")
+    T.eq_str("p9 fid map: rebound", path_of(s2, 6), "d")
+    T.eq_u32("p9 fid map: rebinding keeps the count", U32.from_nat(P.P9State.count(s2)), 3)
+    T.ok("p9 fid map: unbound", Bool.not(has(s3, 0)) && has(s3, 6) && has(s3, 4294967295))
+    T.eq_u32("p9 fid map: unbinding an unbound fid keeps the count", U32.from_nat(P.P9State.count(s4)), 2)
+    T.ok("p9 fid map: never bound", Bool.not(has(s1, 2)) && Bool.not(has(s1, 7)))
+    T.eq_u32("p9 fid map: lists every fid", U32.from_nat(List.length(&2, P.Fid, P.P9State.fids(s2))), 3)
+    T.eq_str("p9 fid map: rename moves a path", path_of(P.P9.rename_fids(s2, "d", "e"), 6), "e")
 
 def main() -> IO(Unit):
   do IO<Unit>:
+    fid_map()
     mount()
     file()
     walks()
