@@ -10,7 +10,8 @@ memory (macOS: its physical footprint; Linux: its resident set) falls below
 a quarter and under 100 MiB, the VM stays paused, and the file is gone at
 once (nor are disks copied: the directory holds what it held). resume
 continues it with every byte (a checksum made in the guest). 20 MiB more,
-then hibernate again: only what changed is written (under 2 s), and the
+then hibernate again: only what changed is written where the file system
+clones files (under 2 s on macOS; ext4 writes the whole RAM again), and the
 memory falls again. After that a snapshot still saves and restores, and
 the VM powers off with no file left behind.
 """
@@ -118,7 +119,9 @@ r = ctl("hibernate " + hib)
 took = time.time() - t0
 time.sleep(1)
 low = mem(v.p.pid)
-check("hibernate again writes only what changed (%.2f s)" % took, r == "hibernated" and took < 2 * slow, (r, took))
+# (only what changed where the file system clones files: APFS, btrfs, XFS;
+# elsewhere, ext4 for one, the whole RAM is written again)
+check("hibernate again (%.2f s)" % took, r == "hibernated" and took < (2 if mac else 10) * slow, (r, took))
 check("the VMM's memory goes again (%.0f -> %.0f MiB)" % (mid, low), 0 < low < 100, (mid, low))
 check("resume again, every byte there", ctl("resume") == "running" and sums(v, "S4") == want2 and want2 is not None)
 

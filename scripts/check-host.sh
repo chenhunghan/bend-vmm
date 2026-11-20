@@ -505,7 +505,7 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   t=$(mktemp -d)
   out=$(BEND_GUEST_KERNEL=$GIMG BEND_GUEST_INITRD=$GI BEND_GUEST_CONSOLE=$GCON python3 scripts/hibernate-test.py ./out/bend-vmm "$t" "$SLOW" 2>&1)
   grep -q "^HIBERNATE OK" <<<"$out" \
-    && grn "ok: hibernate ($(grep -a 'memory goes (' <<<"$out" | sed 's/.*(\(.*\))/\1/'), $(grep -a 'hibernate answers' <<<"$out" | sed 's/.*, \(.*\))/\1/'); again in $(grep -a 'only what changed' <<<"$out" | sed 's/.*(\(.*\))/\1/'); resumes intact, no file left, a snapshot after it restores)" \
+    && grn "ok: hibernate ($(grep -a 'memory goes (' <<<"$out" | sed 's/.*(\(.*\))/\1/'), $(grep -a 'hibernate answers' <<<"$out" | sed 's/.*, \(.*\))/\1/'); again in $(grep -a 'hibernate again (' <<<"$out" | sed 's/.*(\(.*\))/\1/'); resumes intact, no file left, a snapshot after it restores)" \
     || { red "failed: hibernate"; grep -a "^FAILED" <<<"$out"; fail=1; }
   rm -rf "$t"
 fi
