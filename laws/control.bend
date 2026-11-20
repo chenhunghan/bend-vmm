@@ -156,3 +156,11 @@ law control.hibernate:
 
 law control.hibernate_bare:
   {C.Ctl.parse("hibernate") == C.CBad{"usage: hibernate PATH"} : C.Cmd}
+
+# Proposed (bend-vk8s, 2026-11-20): status json says whether the VM is
+# hibernated; its state stays "paused".
+law control.with_hibernated:
+  {C.Ctl.with_hibernated("{\"state\":\"paused\"}", True{}) == "{\"state\":\"paused\",\"hibernated\":true}" : String}
+
+law control.with_hibernated_not:
+  {C.Ctl.with_hibernated("{\"state\":\"running\"}", False{}) == "{\"state\":\"running\",\"hibernated\":false}" : String}

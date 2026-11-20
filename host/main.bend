@@ -653,11 +653,17 @@ def nat_dns(+ip: U32) -> IO(U32):
     wait_stopped(10000n)
     return was
 
+# Resumes the vCPUs; a hibernated VM is no longer one (Hvf.hib_mark).
+def resume_vm() -> IO(U32):
+  do IO<U32>:
+    _ : U32 <- H.Hvf.hib_mark(2)
+    H.Hvf.resume()
+
 def resume_if(was_running: Bool) -> IO(Unit):
   match was_running:
     case True{}:
       do IO<Unit>:
-        _ : U32 <- H.Hvf.resume()
+        _ : U32 <- resume_vm()
         return Unit{}
     case False{}:
       IO.pure(Unit, Unit{})
@@ -878,6 +884,7 @@ def hibernate.unlink(ok: Bool, +path: String, +rc: U32) -> IO(U32):
     +m : M.Machine <- take(mc)
     +up : U32 <- H.Hvf.hib_update()
     +rc : U32 <- Bool.pick(IO(U32), U32.is_zero(up), IO.pure(U32, 0), hibernate.write(m, path))
+    _ : U32 <- H.Hvf.hib_mark(Bool.pick(U32, U32.is_zero(rc), 1, 0))
     put(mc, m)
     return rc
 
@@ -930,7 +937,7 @@ def balloon_reply(has: Bool, info: Maybe<&2, Bl.Bal>) -> String:
         return "paused"
     case Ctl.CResume{}:
       do IO<String>:
-        _ : U32 <- H.Hvf.resume()
+        _ : U32 <- resume_vm()
         return "running"
     case Ctl.CSnapshot{path}:
       do IO<String>:
@@ -953,7 +960,9 @@ def balloon_reply(has: Bool, info: Maybe<&2, Bl.Bal>) -> String:
         +res : U32 <- H.Hvf.ram_kib(0)
         +comp : U32 <- H.Hvf.ram_kib(1)
         ex : +List<U32> <- H.Hvf.exit_counts()
-        return Ctl.Ctl.with_exits(Ctl.Ctl.with_ram(status_json(Bool.not(U32.is_zero(H.Host.first(st))), info), res, comp), ex)
+        +paused : Bool = Bool.not(U32.is_zero(H.Host.first(st)))
+        +hib : U32 <- H.Hvf.hib_mark(0)
+        return Ctl.Ctl.with_exits(Ctl.Ctl.with_ram(Ctl.Ctl.with_hibernated(status_json(paused, info), paused && U32.is_ne(hib, 0)), res, comp), ex)
     case Ctl.CBalloon{mib}:
       do IO<String>:
         +m0 : M.Machine <- take(mc)
@@ -1023,7 +1032,7 @@ def balloon_reply(has: Bool, info: Maybe<&2, Bl.Bal>) -> String:
   match is_p is_s paused:
     case True{} _ True{}:
       do IO<Unit>:
-        _ : U32 <- H.Hvf.resume()
+        _ : U32 <- resume_vm()
         log_err("\r\n[bend-vmm] resumed\r")
     case True{} _ False{}:
       do IO<Unit>:

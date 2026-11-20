@@ -138,3 +138,9 @@ def L.control.hibernate():
 
 def L.control.hibernate_bare():
   {==}
+
+def L.control.with_hibernated():
+  {==}
+
+def L.control.with_hibernated_not():
+  {==}

@@ -94,6 +94,11 @@ def Ctl.status_json_kept(paused: Bool, +target: U32, +actual: U32, +kept: U32) -
 def Ctl.ram_json(+resident_kib: U32, +compressed_kib: U32) -> String:
   ",\"ram\":{\"resident_mib\":" ++ U32.show((resident_kib / 1024 : U32)) ++ ",\"compressed_mib\":" ++ U32.show((compressed_kib / 1024 : U32)) ++ "}}"
 
+# status json says whether the VM is hibernated (hibernate PATH, until it
+# resumes): its state stays "paused", for readers that know only that.
+def Ctl.with_hibernated(+json: String, hib: Bool) -> String:
+  String.take(json, Nat.sub(String.length(json), 1n)) ++ ",\"hibernated\":" ++ Bool.pick(String, hib, "true", "false") ++ "}"
+
 def Ctl.with_ram(+json: String, +resident_kib: U32, +compressed_kib: U32) -> String:
   String.take(json, Nat.sub(String.length(json), 1n)) ++ Ctl.ram_json(resident_kib, compressed_kib)
 
