@@ -94,8 +94,8 @@ law balauto.ticks_settle:
 law balauto.ticks_stop:
   {A.Auto.ticks(False{}, 4294967295) == False{} : Bool}
 
-# Proposed (bend-vk8s footprint audit, 2026-11-20): --balloon auto,max=PCT,
-# and the guest's own deflate answered at once.
+# --balloon auto,max=PCT, and the guest's own deflate answered at once
+# (bend-vk8s footprint audit; approved by the owner 2026-11-20).
 # The cap in percent; 50 is Auto.most.
 law balauto.most_of_half:
   {A.Auto.most_of(524289, 50) == A.Auto.most(524289) : U32}

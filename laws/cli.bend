@@ -237,7 +237,8 @@ law cli.shares_inodes_tag:
 law cli.shares_inodes_check:
   {C.Cli.check(["--share", "/c,quota=1G,inodes=100000"]) == "" : String}
 
-# Proposed (bend-vk8s footprint audit, 2026-11-20): --balloon auto,max=PCT.
+# --balloon auto,max=PCT (bend-vk8s footprint audit; approved by the owner
+# 2026-11-20).
 law cli.balloon_max:
   {C.Cli.balloon_max("auto,max=75") == 75 : U32}
 

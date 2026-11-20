@@ -60,8 +60,8 @@ law image.gzip_raw:
 law image.gzip_too_short:
   {I.Image.is_gzip([31, 139]) == False{} : Bool}
 
-# Proposed (bend-vk8s footprint audit, 2026-11-20): an EFI zboot image's
-# gzip payload. The first 28 bytes of Alpine's arm64 vmlinuz-virt:
+# An EFI zboot image's gzip payload (bend-vk8s footprint audit; approved
+# by the owner 2026-11-20). The first 28 bytes of Alpine's arm64 vmlinuz-virt:
 # "MZ", "zimg", payload at 51832, 10349506 bytes long, "gzip".
 law image.zboot:
   {I.Image.zboot([77, 90, 0, 0, 122, 105, 109, 103, 120, 202, 0, 0, 194, 235, 157, 0, 0, 0, 0, 0, 0, 0, 0, 0, 103, 122, 105, 112]) == Some{I.Zboot{51832, 10349506}} : Maybe<&2, I.Zboot>}
