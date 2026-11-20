@@ -592,8 +592,21 @@ def Fwd.all_ok(ss: List<&2, String>) -> Bool:
 # the RAM it frees, and the host can ask for more) is on by default;
 # --balloon off leaves it out. --balloon free-page-reporting is accepted
 # and changes nothing (it was the switch before the default).
+def Cli.balloon_max.of(+pct: Maybe<&2, U32>) -> U32:
+  match pct:
+    case Some{+n}:
+      Bool.pick(U32, Cli.within(Some{n}, 10, 90), n, 0)
+    case None{}:
+      0
+
+# --balloon auto,max=PCT: the automatic balloon holding at most PCT
+# percent of the guest's RAM (10 to 90; src/virtio/balauto.bend's
+# Auto.most_of). PCT, or 0 for any other value.
+def Cli.balloon_max(+v: String) -> U32:
+  Bool.pick(U32, String.starts_with(v, "auto,max="), Cli.balloon_max.of(U32.read(String.drop(v, 9n))), 0)
+
 def Cli.balloon(+v: String) -> Bool:
-  String.eq(v, "free-page-reporting") || String.eq(v, "auto")
+  String.eq(v, "free-page-reporting") || String.eq(v, "auto") || U32.is_ne(Cli.balloon_max(v), 0)
 
 def Cli.balloon_ok(+v: String) -> Bool:
   Cli.balloon(v) || String.eq(v, "off")
@@ -607,7 +620,7 @@ def Cli.balloon_on(+v: String) -> Bool:
 # default, and --balloon auto; --balloon free-page-reporting keeps free page
 # reporting alone.
 def Cli.balloon_auto(+v: String) -> Bool:
-  String.is_empty(v) || String.eq(v, "auto")
+  String.is_empty(v) || String.eq(v, "auto") || U32.is_ne(Cli.balloon_max(v), 0)
 
 def Cli.why(+flag: String, +v: String) -> String:
   Bool.pick(String, Bool.not(Cli.known(flag, Cli.flags())), "unknown option " ++ flag,
@@ -618,7 +631,7 @@ def Cli.why(+flag: String, +v: String) -> String:
   Bool.pick(String, String.eq(flag, "--share") && Bool.not(Cli.share_opt_ok(Cli.share_opt(v))), "--share takes DIR or DIR,quota=SIZE (bytes, or K, M, G) (not " ++ v ++ ")",
   Bool.pick(String, String.eq(flag, "--console-log") && Bool.not(Cli.conlog_ok(Cli.conlog(v))), "--console-log takes PATH,max=SIZE[,keep=N] (N up to 99) (not " ++ v ++ ")",
   Bool.pick(String, String.eq(flag, "--forward") && Bool.not(Fwd.all_ok(Fwd.specs(v))), "--forward takes [ADDR:]HOSTPORT:GUESTPORT[,...] (ports 1 to 65535) (not " ++ v ++ ")",
-  Bool.pick(String, String.eq(flag, "--balloon") && Bool.not(Cli.balloon_ok(v)), "--balloon takes off (or free-page-reporting, the default) (not " ++ v ++ ")",
+  Bool.pick(String, String.eq(flag, "--balloon") && Bool.not(Cli.balloon_ok(v)), "--balloon takes auto (the default), auto,max=PCT (10 to 90), free-page-reporting or off (not " ++ v ++ ")",
   "")))))))))
 
 # One walk over the flags: the first wrong one's message, and every --share

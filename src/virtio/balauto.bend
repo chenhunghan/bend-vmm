@@ -72,6 +72,25 @@ def Auto.floor(+total: U32) -> U32:
 def Auto.most(+total: U32) -> U32:
   (total / 2 : U32)
 
+# The most the balloon holds, as pct percent of the guest's RAM
+# (--balloon auto,max=PCT; 50 is Auto.most). total * pct / 100 without
+# overflowing: a page count is below 2^32 and pct at most 100.
+def Auto.most_of(+total: U32, +pct: U32) -> U32:
+  (((total / 100 : U32) * pct : U32) + (((total % 100 : U32) * pct : U32) / 100 : U32) : U32)
+
+# The percentages --balloon auto,max= takes: 10 to 90 (past 90 the guest's
+# floor and its kernel's own memory no longer fit in some VMs).
+def Auto.pct_ok(+pct: U32) -> Bool:
+  U32.is_le(10, pct) && U32.is_le(pct, 90)
+
+# The guest took pages back on its own (VIRTIO_BALLOON_F_DEFLATE_ON_OOM: a
+# deflate leaves the balloon holding less than its target): the target
+# drops at once to Auto.step() below what the balloon holds, so the guest
+# gets its memory in one go rather than one MiB a time until the next
+# poll. Otherwise the target stays.
+def Auto.oom(+target: U32, +actual: U32) -> U32:
+  Bool.pick(U32, U32.is_lt(actual, target), (actual - U32.min(actual, Auto.step()) : U32), target)
+
 # A byte count in pages, saturated at 2^32 - 1.
 def Auto.pages(+lo: U32, +hi: U32) -> U32:
   Bool.pick(U32, U32.is_le(4096, hi), 4294967295, ((hi << 20n : U32) .|. (lo >> 12n : U32) : U32))
@@ -111,13 +130,17 @@ def Auto.shrink(+free: U32, +floor: U32, +target: U32) -> U32:
 # one: its target, or what it holds when the guest took pages back
 # (DEFLATE_ON_OOM) and it holds less (a guest that reported no total:
 # unchanged).
-def Auto.target(+st: Stats, +target: U32) -> U32:
+def Auto.target_at(+st: Stats, +target: U32, +pct: U32) -> U32:
   match st:
     case Stats{+free, +total, a}:
       +floor = Auto.floor(total)
       Bool.pick(U32, U32.is_zero(total), target,
-      Bool.pick(U32, U32.is_lt(((floor + Auto.slack() : U32) + Auto.band() : U32), free), Auto.grow(free, floor, target, Auto.most(total)),
+      Bool.pick(U32, U32.is_lt(((floor + Auto.slack() : U32) + Auto.band() : U32), free), Auto.grow(free, floor, target, Auto.most_of(total, pct)),
       Bool.pick(U32, U32.is_lt(free, floor), Auto.shrink(free, floor, target), target)))
+
+# With the balloon holding at most half the guest's RAM (the default).
+def Auto.target(+st: Stats, +target: U32) -> U32:
+  Auto.target_at(st, target, 50)
 
 # The clock (host/main.bend: balloon_poll) ticks every Auto.period_ms()
 # from the start. Each tick the host settles the guest RAM it wrote

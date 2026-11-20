@@ -14,7 +14,9 @@ Then inflate and deflate from the control socket: 1 GiB of page cache,
 `balloon 0` (the guest can use that memory again). Then the automatic
 balloon (the default, src/virtio/balauto.bend): an idle guest's free memory
 goes into it, a 1.2 GiB burst still fits with nothing killed, it fills again
-after; `balloon 100` stops it, `balloon auto` starts it again. Last, a
+after; `balloon 100` stops it, `balloon auto` starts it again. With
+--balloon auto,max=75 it fills to three quarters of the RAM, and the
+burst still fits. Last, a
 fragmented guest (bench frag: every other 4 KiB page free): `balloon 200`
 fills within 10 s even so, status json's kept_mib says most of it could not
 be released (16 KiB blocks only part in the balloon). Before it (macOS),
@@ -234,6 +236,19 @@ else:
     check("balloon auto answers", r == "balloon auto", r)
     print("skipped: balloon auto's restart filling the balloon (an emulated CPU, CHECK_SLOW=%g)" % slow)
 vm.end()
+
+if heavy:
+    # --balloon auto,max=75: an idle 2 GiB guest's balloon fills past half
+    # its RAM, to three quarters; a 1.2 GiB burst still fits, nothing killed
+    vm = Vm(["--mem", "2048", "--cpus", "2", "--kernel", K, "--initrd", I,
+             "--control", sock, "--balloon", "auto,max=75", "--cmdline", C])
+    check("boot with --balloon auto,max=75", vm.wait("busybox shell", 60))
+    t = wait_target(lambda t: t >= 1400, 60)
+    check("auto,max=75: the balloon fills to three quarters (target %d MiB)" % t, 1400 <= t <= 1536, t)
+    vm.run("mkdir -p /t; mount -t tmpfs -o size=1900m none /t; dd if=/dev/zero of=/t/x bs=1048576 count=1200 2>/dev/null; echo BURST-$(wc -c < /t/x)", 300)
+    o = vm.out.decode(errors="replace")
+    check("auto,max=75: a 1.2 GiB burst fits, nothing killed", "BURST-1258291200" in o and "Killed" not in o and "Out of memory" not in o, o[-300:])
+    vm.end()
 
 def kept_mib():
     m = re.search(r'"kept_mib":(\d+)', ctl("status json"))

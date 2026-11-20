@@ -501,6 +501,16 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5s. hibernate PATH: a paused VM's RAM moves into a file guest RAM maps"
+  t=$(mktemp -d)
+  out=$(BEND_GUEST_KERNEL=$GIMG BEND_GUEST_INITRD=$GI BEND_GUEST_CONSOLE=$GCON python3 scripts/hibernate-test.py ./out/bend-vmm "$t" "$SLOW" 2>&1)
+  grep -q "^HIBERNATE OK" <<<"$out" \
+    && grn "ok: hibernate ($(grep -a 'memory goes (' <<<"$out" | sed 's/.*(\(.*\))/\1/'), $(grep -a 'hibernate answers' <<<"$out" | sed 's/.*, \(.*\))/\1/'); again in $(grep -a 'only what changed' <<<"$out" | sed 's/.*(\(.*\))/\1/'); resumes intact, no file left, a snapshot after it restores)" \
+    || { red "failed: hibernate"; grep -a "^FAILED" <<<"$out"; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 5j. a shared file the host replaces reads as the new one"
   # The guest reads d/f (the host keeps it open), then the host removes d
   # and makes it again with a new, larger f: the guest's next read is the
@@ -649,6 +659,17 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && arm; then
   grep -q "SET-42" <<<"$out" && [ "$(grep -c 'Welcome to Alpine Linux' <<<"$out")" = 2 ] && grn "ok: UEFI reboot" || { red "failed: UEFI reboot"; grep -a -v sysreg <<<"$out" | tail -15; fail=1; }
   grep -B1 "AFTER-REBOOT" <<<"$out" | grep -q "^bend-ok" && grep -q "bend-ok" "$t/vars.fd" && grn "ok: EFI variable persists (flash, --vars)" || { red "failed: EFI variable"; grep -a -B2 AFTER-REBOOT <<<"$out"; fail=1; }
   grep -q "reboot: Power down" <<<"$out" && grn "ok: UEFI power off" || { red "failed: UEFI power off"; fail=1; }
+  # The ISO's kernel booted directly (--kernel): an EFI zboot image, its gzip
+  # payload inflated (src/boot/image.bend, Image.zboot), with its gzip
+  # initramfs handed to the kernel as it is.
+  if command -v bsdtar >/dev/null && bsdtar -xf out/uefi/alpine.iso -C "$t" boot/vmlinuz-virt boot/initramfs-virt 2>/dev/null; then
+    out=$( (alarm 30 ./out/bend-vmm --mem 1024 --kernel "$t/boot/vmlinuz-virt" --initrd "$t/boot/initramfs-virt" --cmdline "console=ttyAMA0") 2>&1 < /dev/null | tr -d '\r')
+    grep -aq "Run /init as init process" <<<"$out" && grep -aq "Alpine Init" <<<"$out" \
+      && grn "ok: an EFI zboot kernel boots directly (Alpine's vmlinuz-virt, $(stat -f %z "$t/boot/vmlinuz-virt" 2>/dev/null || stat -c %s "$t/boot/vmlinuz-virt") bytes, and its gzip initramfs)" \
+      || { red "failed: EFI zboot kernel"; grep -a -v sysreg <<<"$out" | tail -5; fail=1; }
+  else
+    echo "skipped: an EFI zboot kernel (no bsdtar to take it out of the ISO)"
+  fi
   rm -rf "$t"
 fi
 

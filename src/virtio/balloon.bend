@@ -556,31 +556,47 @@ def Balloon.auto_on(+a: AutoSt) -> Bool:
 
 # The target after a stats buffer: moved only when the host asked for it
 # and no target was set by hand.
-def Balloon.auto_target(+asked: Bool, +manual: Bool, +st: A.Stats, +b: Bal) -> Bal:
-  Bool.pick(Bal, asked && Bool.not(manual), Balloon.set_target(b, A.Auto.target(st, U32.min(Balloon.target(b), Balloon.actual(b)))), b)
+# (the balloon holding at most pct percent of the guest's RAM)
+def Balloon.auto_target(+asked: Bool, +manual: Bool, +st: A.Stats, +b: Bal, +pct: U32) -> Bal:
+  Bool.pick(Bal, asked && Bool.not(manual), Balloon.set_target(b, A.Auto.target_at(st, U32.min(Balloon.target(b), Balloon.actual(b)), pct)), b)
 
 type StatsPass is Data:
   StatsPass{q: Q.Vq, bal: Bal, auto: AutoSt}
 
-def Balloon.stats.serve(-R: Type, +b: Bal, a: AutoSt, q: Q.Vq, c: Q.Chain) -> V.Op<R, StatsPass>:
+def Balloon.stats.serve(-R: Type, +b: Bal, a: AutoSt, q: Q.Vq, c: Q.Chain, +pct: U32) -> V.Op<R, StatsPass>:
   match a c:
     case AutoSt{old, +asked, +manual, +st0} Q.Chain{+h, r, w}:
       do V.Op<R, StatsPass>:
         +bs : +List<U32> <- Q.Vq.read_segs(R, Q.Vq.segs(r, 0, 640))
         +st : A.Stats = A.Auto.stats(bs, st0)
-        return StatsPass{q, Balloon.auto_target(asked, manual, st, b), AutoSt{h, False{}, manual, st}}
+        return StatsPass{q, Balloon.auto_target(asked, manual, st, b, pct), AutoSt{h, False{}, manual, st}}
 
-def Balloon.stats.got(-R: Type, +b: Bal, +a: AutoSt, r: Q.Vq & Maybe<&2, Q.Chain>) -> V.Op<R, StatsPass>:
+def Balloon.stats.got(-R: Type, +b: Bal, +a: AutoSt, r: Q.Vq & Maybe<&2, Q.Chain>, +pct: U32) -> V.Op<R, StatsPass>:
   match r:
     case (q, None{}):
       V.Op.pure(R, StatsPass, StatsPass{q, b, a})
     case (q, Some{c}):
-      Balloon.stats.serve(R, b, a, q, c)
+      Balloon.stats.serve(R, b, a, q, c, pct)
 
 # The stats queue's pass: the buffer the driver posted is read and held
 # (the host returns it when it wants fresh statistics: Balloon.poll).
+def Balloon.stats_pass_at(-R: Type, +b: Bal, +a: AutoSt, q: Q.Vq, +pct: U32) -> V.Op<R, StatsPass>:
+  V.Op.bind(R, Q.Vq & Maybe<&2, Q.Chain>, StatsPass, Q.Vq.pop(R, q), r => Balloon.stats.got(R, b, a, r, pct))
+
+# (at most half the guest's RAM: the default)
 def Balloon.stats_pass(-R: Type, +b: Bal, +a: AutoSt, q: Q.Vq) -> V.Op<R, StatsPass>:
-  V.Op.bind(R, Q.Vq & Maybe<&2, Q.Chain>, StatsPass, Q.Vq.pop(R, q), r => Balloon.stats.got(R, b, a, r))
+  Balloon.stats_pass_at(R, b, a, q, 50)
+
+# After a deflate pass of the automatic balloon (on: its own, not a target
+# set by hand), a guest that took pages back on its own gets the rest of
+# what it needs at once (A.Auto.oom).
+def Balloon.after_deflate(+on: Bool, +b: Bal) -> Bal:
+  Bool.pick(Bal, on, Balloon.set_target(b, A.Auto.oom(Balloon.target(b), Balloon.actual(b))), b)
+
+def Balloon.pass_after(+on: Bool, r: BalPass) -> BalPass:
+  match r:
+    case BalPass{q, b, used}:
+      BalPass{q, Balloon.after_deflate(on, b), used}
 
 # Asking for fresh statistics: the held buffer returned (used length 0);
 # the driver posts it again with new values. Nothing when none is held or

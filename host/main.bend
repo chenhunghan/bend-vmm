@@ -836,6 +836,38 @@ def dsnap.after(ok: Bool, +dst: String, +old: String, +gen: String) -> IO(U32):
     resume_if(U32.is_zero(was))
     return rc
 
+# The hibernate file once RAM maps it (rc 0): removed at once, so none is
+# left behind, a crash included; RAM keeps it open (Hvf.snap_rebase), and
+# its space comes back when the next snapshot or the VM's exit lets it go.
+def hibernate.unlink(ok: Bool, +path: String, +rc: U32) -> IO(U32):
+  match ok:
+    case True{}:
+      do IO<U32>:
+        _ : U32 <- H.Hvf.remove(path)
+        return 0
+    case False{}:
+      IO.pure(U32, rc)
+
+# hibernate PATH: pauses (if running) and stays paused; writes the machine
+# and RAM to PATH as a snapshot is written, without disk copies (the disks
+# go on with the VM: the file is no snapshot to restore), and guest RAM maps
+# it from then on, so the VM's RAM leaves the host's memory. A RAM written
+# since the last snapshot or hibernate is all that is written. resume
+# continues the VM. Answers 0 or an errno.
+@unsafe def hibernate(+mc: Chan(M.Machine), +path: String) -> IO(U32):
+  do IO<U32>:
+    _ : U32 <- pause_vm()
+    +m : M.Machine <- take(mc)
+    +tmp : String = Sf.Snapf.tmp(path)
+    +sizes : +List<U32> <- H.Hvf.snap_save(Snap.Snap.encode(m))
+    +plan : Maybe<&2, +List<Sf.Piece>> = Sf.Snapf.plan_of(Sf.Snapf.sizes(sizes))
+    +wrote : U32 <- snap.commit(tmp, plan)
+    +placed : U32 <- snap.place(U32.is_zero(wrote), wrote, tmp, path)
+    +mapped : U32 <- Bool.pick(IO(U32), U32.is_zero(placed), snap.rebase.at(path, Sf.Snapf.plan_ram(plan)), IO.pure(U32, placed))
+    +rc : U32 <- hibernate.unlink(U32.is_zero(placed), path, mapped)
+    put(mc, m)
+    return Bool.pick(U32, U32.is_zero(placed), mapped, placed)
+
 def reply_rc(+rc: U32, ok: String) -> String:
   Bool.pick(String, U32.is_zero(rc), ok, "error " ++ U32.show(rc))
 
@@ -891,6 +923,10 @@ def balloon_reply(has: Bool, info: Maybe<&2, Bl.Bal>) -> String:
       do IO<String>:
         +rc : U32 <- snapshot(mc, path)
         return reply_rc(rc, "saved")
+    case Ctl.CHibernate{path}:
+      do IO<String>:
+        +rc : U32 <- hibernate(mc, path)
+        return reply_rc(rc, "hibernated")
     case Ctl.CStatus{}:
       do IO<String>:
         +st : +List<U32> <- H.Hvf.pause_state()
@@ -1604,14 +1640,15 @@ def devices.input(none: Bool) -> +List<D.DevKind>:
 
 # The balloon (on unless --balloon off; a restore has it when its snapshot
 # has it): it goes last, so the other devices keep their slots.
-def devices.balloon(on: Bool, +auto: Bool) -> +List<D.DevKind>:
+# (pct: --balloon auto,max=PCT; 0 or 50 is the default cap, half the RAM)
+def devices.balloon(on: Bool, +auto: Bool, +pct: U32) -> +List<D.DevKind>:
   match on:
     case True{}:
-      [D.BalloonKind{auto}]
+      Bool.pick(+List<D.DevKind>, U32.is_zero(pct) || U32.is_eq(pct, 50), [D.BalloonKind{auto}], [D.BalloonMaxKind{pct}])
     case False{}:
       []
 
-@unsafe def devices(o: Op.Opts, +balloon: Bool, +auto: Bool) -> IO(+List<D.DevKind>):
+@unsafe def devices(o: Op.Opts, +balloon: Bool, +auto: Bool, +pct: U32) -> IO(+List<D.DevKind>):
   match o:
     case Op.Opts{k, i, p, c, m, n, +d, +sh, rs, ct, +vk, dp, fw, nv, fd, +ln}:
       do IO<+List<D.DevKind>>:
@@ -1619,7 +1656,7 @@ def devices.balloon(on: Bool, +auto: Bool) -> +List<D.DevKind>:
         +disks : +List<D.DevKind> <- devices.disk(String.is_empty(d), d)
         +shares : +List<D.DevKind> <- devices.share(String.is_empty(sh), sh)
         +socks : +List<D.DevKind> <- devices.vsock(String.is_empty(vk), vk)
-        +bl : +List<D.DevKind> = devices.balloon(balloon, auto)
+        +bl : +List<D.DevKind> = devices.balloon(balloon, auto, pct)
         return List.append(&2, D.DevKind, base_devices(), List.append(&2, D.DevKind, lan, List.append(&2, D.DevKind, disks, List.append(&2, D.DevKind, shares, List.append(&2, D.DevKind, socks, List.append(&2, D.DevKind, devices.input(String.is_empty(dp)), bl))))))
 
 def initrd_of(present: Bool, start: U.U64, end: U.U64) -> Maybe<&2, T.Initrd>:
@@ -1632,7 +1669,7 @@ def initrd_of(present: Bool, start: U.U64, end: U.U64) -> Maybe<&2, T.Initrd>:
 def place_initrd(present: Bool, path: String, at: U.U64) -> IO(U32):
   match present:
     case True{}:
-      H.Host.load(path, at)
+      H.Host.load_raw(path, at)
     case False{}:
       IO.pure(U32, 0)
 
@@ -2061,6 +2098,14 @@ def has_auto_balloon(ks: +List<D.DevKind>) -> Bool:
     case Con{k, rest}:
       D.Dev.auto_kind(k) || has_auto_balloon(rest)
 
+# The automatic balloon's cap in a snapshot's devices (50: the default).
+def balloon_pct(ks: +List<D.DevKind>) -> U32:
+  match ks:
+    case Nil{}:
+      50
+    case Con{+k, rest}:
+      Bool.pick(U32, D.Dev.is_balloon(k), D.Dev.pct_of(k), balloon_pct(rest))
+
 def machine_kinds(m: Maybe<&2, M.Machine>) -> +List<D.DevKind>:
   match m:
     case None{}:
@@ -2151,7 +2196,7 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     +got : Maybe<&2, M.Machine> = Snap.Snap.decode(ws)
     # the balloon as the snapshot has it (snapshots from before it was the
     # default have none)
-    +kinds : +List<D.DevKind> <- devices(o, has_balloon(machine_kinds(got)), has_auto_balloon(machine_kinds(got)))
+    +kinds : +List<D.DevKind> <- devices(o, has_balloon(machine_kinds(got)), has_auto_balloon(machine_kinds(got)), balloon_pct(machine_kinds(got)))
     # the devices as this run opened them (a disk's size, read-only, its
     # format) must be the snapshot's
     die_if(Bool.not(words_eq(kinds_words(machine_kinds(got)), kinds_words(kinds))), "the snapshot's devices differ from the ones opened now (a disk changed size or format?)")
@@ -2396,7 +2441,7 @@ def x86.unsupported(o: Op.Opts) -> String:
     args : List<String> <- H.Hvf.args()
     +prog : U32 <- H.Hvf.prog()
     +bv : String = Cli.Cli.find(List.drop(&1, String, args, U32.to_nat(prog)), "--balloon")
-    +kinds : +List<D.DevKind> <- devices(o, Cli.Cli.balloon_on(bv), Cli.Cli.balloon_auto(bv))
+    +kinds : +List<D.DevKind> <- devices(o, Cli.Cli.balloon_on(bv), Cli.Cli.balloon_auto(bv), Cli.Cli.balloon_max(bv))
     +nslots : U32 = U32.from_nat(List.length(&2, D.DevKind, kinds))
     die_if(U32.is_gt(nslots, X.X86.slots_with_lines()), "too many devices for x86_64 (at most " ++ U32.show(X.X86.slots_with_lines()) ++ ")")
     +su : U32 <- H.Hvf.x86_setup(X.X86.gsi_table(), Xb.Boot.cpuid_rules(), X.X86.kvm_words(), X.X86.pic_words())
@@ -2423,7 +2468,7 @@ def x86.unsupported(o: Op.Opts) -> String:
     args : List<String> <- H.Hvf.args()
     +prog : U32 <- H.Hvf.prog()
     +bv : String = Cli.Cli.find(List.drop(&1, String, args, U32.to_nat(prog)), "--balloon")
-    +kinds : +List<D.DevKind> <- devices(o, Cli.Cli.balloon_on(bv), Cli.Cli.balloon_auto(bv))
+    +kinds : +List<D.DevKind> <- devices(o, Cli.Cli.balloon_on(bv), Cli.Cli.balloon_auto(bv), Cli.Cli.balloon_max(bv))
     entry : U.U64 & U.U64 <- boot(o, List.length(&2, D.DevKind, kinds))
     start(o, kinds, entry)
 
@@ -2483,7 +2528,7 @@ def x86.unsupported(o: Op.Opts) -> String:
     _ : U32 <- H.Hvf.snap_plans(X.X86.vm_plan(), X.X86.cpu_plan())
     ws : +List<U32> <- H.Hvf.snap_machine()
     +got : Maybe<&2, M.Machine> = Snap.Snap.decode(ws)
-    +kinds : +List<D.DevKind> <- devices(o, has_balloon(machine_kinds(got)), has_auto_balloon(machine_kinds(got)))
+    +kinds : +List<D.DevKind> <- devices(o, has_balloon(machine_kinds(got)), has_auto_balloon(machine_kinds(got)), balloon_pct(machine_kinds(got)))
     die_if(Bool.not(words_eq(kinds_words(machine_kinds(got)), kinds_words(kinds))), "the snapshot's devices differ from the ones opened now (a disk changed size or format?)")
     x86.restore.machine(got, o)
 
@@ -2509,7 +2554,7 @@ def usage() -> String:
     "                [--disk IMG[:ro][:nocache],...] [--share DIR] [--vsock PATH] [--control PATH]",
     "                [--display WxH[,headless]] [--forward [ADDR:]HOSTPORT:GUESTPORT,...]",
     "                [--lan DIR,ip=A.B.C.D/N[,mac=xx:xx:xx:xx:xx:xx]] [--share DIR,quota=SIZE,inodes=N]",
-    "                [--console-log PATH,max=SIZE[,keep=N]] [--balloon auto|free-page-reporting|off]",
+    "                [--console-log PATH,max=SIZE[,keep=N]] [--balloon auto|auto,max=PCT|free-page-reporting|off]",
     "       bend-vmm --firmware CODE.fd --vars VARS.fd [--disk IMG] ...   (UEFI)",
     "       bend-vmm --restore SNAPSHOT [--disk, --share, ... as taken] [--control PATH] [--forward ...]",
     "       bend-vmm --payload FILE.bin                                   (bare metal)",

@@ -211,3 +211,12 @@ def L.cli.shares_inodes_tag():
 
 def L.cli.shares_inodes_check():
   {==}
+
+def L.cli.balloon_max():
+  {==}
+
+def L.cli.balloon_max_bad():
+  {==}
+
+def L.cli.balloon_max_ok():
+  {==}

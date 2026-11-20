@@ -21,7 +21,7 @@ def Hvf.init(ram_mb: U32, gicd_hi: U32, gicd_lo: U32, gicr_hi: U32, gicr_lo: U32
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.load(path: String, gpa_hi: U32, gpa_lo: U32, gz: U32) -> IO(U32):
+def Hvf.load(path: String, gpa_hi: U32, gpa_lo: U32, gz: U32, off: U32, len: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
@@ -737,15 +737,29 @@ def Host.head_n(path: String, n: U32) -> IO(+List<U32>):
     r : Result<&1, &1, U32 & String, File> <- File.open(path, "r")
     Host.head_n.opened(r, n)
 
-# Copies a file into RAM at gpa, inflating it when it is gzip-compressed
-# (src/boot/image.bend decides from its first bytes): its size in RAM, or
-# 0xFFFFFFFF.
+# Copies a file into RAM at gpa, inflating it when it is gzip-compressed,
+# or only its gzip payload when it is an EFI zboot image (src/boot/image.bend
+# decides from its first bytes): its size in RAM, or 0xFFFFFFFF.
+def Host.load.go(+path: String, +h: U32, +l: U32, +head: +List<U32>, z: Maybe<&2, I.Zboot>) -> IO(U32):
+  match z:
+    case Some{I.Zboot{off, len}}:
+      Hvf.load(path, h, l, 1, off, len)
+    case None{}:
+      Hvf.load(path, h, l, Bool.to_u32(I.Image.is_gzip(head)), 0, 0)
+
+# Copies a file into RAM at gpa as it is (an initrd: the kernel unpacks a
+# compressed one itself): its size, or 0xFFFFFFFF.
+def Host.load_raw(+path: String, gpa: U.U64) -> IO(U32):
+  match gpa:
+    case U.U64{h, l}:
+      Hvf.load(path, h, l, 0, 0, 0)
+
 def Host.load(+path: String, gpa: U.U64) -> IO(U32):
   match gpa:
     case U.U64{h, l}:
       do IO<U32>:
-        +head : +List<U32> <- Host.head(path)
-        Hvf.load(path, h, l, Bool.to_u32(I.Image.is_gzip(head)))
+        +head : +List<U32> <- Host.head_n(path, 28)
+        Host.load.go(path, h, l, head, I.Image.zboot(head))
 
 def Host.write(gpa: U.U64, bytes: +List<U32>) -> IO(U32):
   match gpa:

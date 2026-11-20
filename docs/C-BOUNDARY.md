@@ -192,7 +192,7 @@ row but the decisions listed as moved above.
 | `snap_args` | `hvf_snap_args_run` (4038) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
 | `snap_machine` | `hvf_snap_machine_run` (4053) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
 | `snap_gic` | `hvf_snap_gic_run` (4058) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
-| `load` | `hvf_load_run` (1249) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |
+| `load` | `hvf_load_run` (1249) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain. Bend decides what is inflated and which bytes: a gzip kernel, an EFI zboot image's gzip payload (Image.zboot), an initrd as it is (2026-11-20) |
 | `write` | `hvf_write_run` (1376) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |
 | `read` | `hvf_read_run` (1391) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |
 | `fw_load` | `hvf_fw_load_run` (4824) | host/memory.bend | packed mappings, direct IO | 3 | check-host boot; model: tests/range.bend | boot | C; blocked: toolchain |

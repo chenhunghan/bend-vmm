@@ -142,6 +142,9 @@ def Enc.kind(k: D.DevKind) -> +List<U32>:
     case D.BalloonKind{auto}:
       # 10: free page reporting only; 11: the automatic balloon too
       Bool.pick(+List<U32>, auto, [11], [10])
+    case D.BalloonMaxKind{pct}:
+      # 12: the automatic balloon holding at most pct percent of RAM
+      [12, pct]
 
 def Enc.fids(fs: +List<F.Fid>) -> +List<U32>:
   match fs:
@@ -496,10 +499,30 @@ def Dec.kind.top3(auto: Bool, +t: U32) -> X.Dec<D.DevKind>:
     case False{}:
       Dec.kind.top2(U32.is_eq(t, 10), t)
 
+# (10 to 90, as --balloon auto,max= takes: another is a malformed file)
+def Dec.kind.max.of(ok: Bool, +pct: U32) -> X.Dec<D.DevKind>:
+  match ok:
+    case True{}:
+      X.Dec.pure(D.DevKind, D.BalloonMaxKind{pct})
+    case False{}:
+      X.Dec.fail(D.DevKind)
+
+def Dec.kind.max() -> X.Dec<D.DevKind>:
+  do X.Dec<D.DevKind>:
+    +pct : U32 <- X.Dec.u32()
+    Dec.kind.max.of(U32.is_le(10, pct) && U32.is_le(pct, 90), pct)
+
+def Dec.kind.top4(max: Bool, +t: U32) -> X.Dec<D.DevKind>:
+  match max:
+    case True{}:
+      Dec.kind.max()
+    case False{}:
+      Dec.kind.top3(U32.is_eq(t, 11), t)
+
 def Dec.kind() -> X.Dec<D.DevKind>:
   do X.Dec<D.DevKind>:
     +t : U32 <- X.Dec.u32()
-    Dec.kind.top3(U32.is_eq(t, 11), t)
+    Dec.kind.top4(U32.is_eq(t, 12), t)
 
 def Dec.fids(n: Nat) -> X.Dec<+List<F.Fid>>:
   match n:
