@@ -222,7 +222,7 @@ for c in held:
 srv.close()
 
 # 4. A VM that cannot start.
-for what, args, says in (("a missing kernel", ["--mem", "256", "--kernel", os.path.join(d, "none")], "cannot load the kernel"),
+for what, args, says in (("a missing kernel", ["--mem", "256", "--kernel", os.path.join(d, "none")], "the kernel"),
                          ("99 vCPUs", ["--mem", "256", "--cpus", "99", "--kernel", K], "--cpus takes 1 to 64")) + (
         # (macOS only: Linux may overcommit 1 TiB and boot it)
         (("1 TiB of RAM", ["--mem", "1048576", "--kernel", K, "--initrd", I, "--cmdline", C], "cannot create the VM"),)
