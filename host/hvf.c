@@ -7051,9 +7051,9 @@ Term hvf_snap_rebase_run(Env e, Term* f, IoWork* w) {
 // Hvf.hib_update() -> U32: with guest RAM mapping a hibernate file
 // (hvf_base_private), the pages the guest or the host wrote since (Linux:
 // /proc/self/pagemap says a page is anonymous, present or swapped: a
-// copy-on-write copy) are written into that file in place, and dropped from
-// RAM (MADV_DONTNEED), so they read back from the file: the cost is the
-// pages that changed, on any file system. Only with the VM paused and the
+// copy-on-write copy) are written into that file in place; then all of RAM
+// leaves the mapping (MADV_DONTNEED) and reads back from the file: the cost
+// is the pages that changed, on any file system. Only with the VM paused and the
 // machine held, as Hvf.snap_rebase. 0, ENOTSUP (macOS: a clone does it),
 // ENOENT (no hibernate file), or an errno (RAM as the guest left it: a page
 // is dropped only once the file holds it).
@@ -7107,14 +7107,17 @@ Term hvf_hib_update_run(Env e, Term* f, IoWork* w) {
           }
           done += (uint64_t)r;
         }
-        if (!err) {
-          madvise(at, left, MADV_DONTNEED);
-        }
         len = 0;
       }
     }
   }
   close(pm);
+  if (!err) {
+    // the file holds all of RAM now: every page leaves the mapping, the
+    // copies and the file's own pages the guest read too (Linux counts
+    // those in the VMM's resident set; the kernel may drop them as cache)
+    madvise(hvf_ram, hvf_ram_size, MADV_DONTNEED);
+  }
   return (Term)(u32)err;
 #endif
 }
