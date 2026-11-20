@@ -508,6 +508,10 @@ def Hvf.hib_update() -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+def Hvf.hib_mark(op: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.lan_open(dir: String, name: String, mode: U32, replace: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"

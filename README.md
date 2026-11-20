@@ -161,7 +161,8 @@ PATH held, and a restored VM may snapshot over the file it came from. TCP
 connections through the NAT do not survive a restore.
 
 `hibernate PATH` is for a VM that sits idle: it pauses the VM and leaves it
-paused, writes its RAM to a file at PATH as a snapshot would (no disk
+paused (`status json` says `"hibernated":true` beside `"state":"paused"`
+until it resumes; `bend-vmm status` says hibernated), writes its RAM to a file at PATH as a snapshot would (no disk
 copies), and maps guest RAM from that file, so the VM's memory leaves the
 host (a 1 GiB guest holding 300 MiB: 400 -> 5 MiB of physical footprint on
 macOS, in 0.25 s). The file is removed at once: RAM keeps it open, its

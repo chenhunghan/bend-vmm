@@ -7,7 +7,8 @@ usage: hibernate-test.py VMM DIR [SLOW]     (DIR: a fresh, empty directory;
 A 1 GiB guest with a writable disk writes 300 MiB into tmpfs. hibernate
 pauses it and moves its RAM into a file that guest RAM then maps: the VMM's
 memory (macOS: its physical footprint; Linux: its resident set) falls below
-a quarter and under 100 MiB, the VM stays paused, and the file is gone at
+a quarter and under 100 MiB, the VM stays paused (status json: hibernated
+until it resumes), and the file is gone at
 once (nor are disks copied: the directory holds what it held). resume
 continues it with every byte (a checksum made in the guest). 20 MiB more,
 then hibernate again: only what changed is written (under 2 s; macOS
@@ -106,10 +107,13 @@ time.sleep(1)
 after = mem(v.p.pid)
 check("hibernate answers (%s, %.2f s)" % (r, took), r == "hibernated", r)
 check("the VM stays paused", ctl("status") == "paused")
+j = ctl("status json")
+check("status json says hibernated", j.startswith('{"state":"paused"') and '"hibernated":true' in j, j[:120])
 check("the hibernate file is removed at once, and no disk is copied", sorted(os.listdir(d)) == files, sorted(os.listdir(d)))
 check("the VMM's memory goes (%.0f -> %.0f MiB)" % (before, after), 0 < after < before / 4 and after < 100, (before, after))
 
 check("resume", ctl("resume") == "running")
+check("status json says not hibernated after resume", '"hibernated":false' in ctl("status json"))
 check("the guest's RAM is intact after resume", sums(v, "S2") == want and want is not None)
 v.run("dd if=/dev/urandom of=/t/b.bin bs=1048576 count=20 2>/dev/null")
 want2 = sums(v, "S3")

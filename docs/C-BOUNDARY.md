@@ -9,7 +9,7 @@ carries out plans that Bend hands it.
 This file is the audit of that boundary. It covered all 113 effects in
 host/hvf.c as of 2026-11-09 and says, for each group, where the
 decisions are made; the migration ledger at the end lists every effect
-(155 as of 2026-11-20) with its target in the C-to-Bend plan. The
+(156 as of 2026-11-20) with its target in the C-to-Bend plan. The
 section before it lists every decision still in C, with the reason it
 stays.
 
@@ -181,6 +181,7 @@ row but the decisions listed as moved above.
 | `snap_commit` | `hvf_snap_commit_run` (3852) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
 | `snap_rebase` | `hvf_snap_rebase_run` | host/main.bend (`snap.rebase`, policy `Snapf.rebase`) | packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save | C remaps RAM where the Bend plan put it (2026-11-15) |
 | `hib_update` | `hvf_hib_update_run` | host/main.bend (`hibernate`: Bend tries it first, then writes a new file) | packed mappings (RAM) | 3 | check-host 5s | none | C writes the pages written since the last hibernate into its file in place and drops them from RAM (Linux, /proc/self/pagemap); Bend decides when (2026-11-20) |
+| `hib_mark` | `hvf_hib_mark_run` | host/main.bend (`hibernate`, `resume_vm`, status json) | none (a global) | 2 | check-host 5s | none | C keeps what Bend chose: whether the VM is hibernated (set by a hibernate, cleared by every resume; Bend has no globals) (2026-11-20) |
 | `disk_zero_keep` | `hvf_disk_zero_keep_run` | host/hvf.bend (`Host.disk_space` op 3; src/virtio/blk.bend WRITE_ZEROES without UNMAP) | OS-call bindings | 1 | check-host 8g | none | C zeroes where Bend says (2026-11-15) |
 | `rename` | `hvf_rename_run` (3888) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C renames; also runs the console log renames |
 | `clone` | `hvf_clone_run` (5199) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C clones; Bend plans disk snapshots (Dsnap, 2026-11-11) |

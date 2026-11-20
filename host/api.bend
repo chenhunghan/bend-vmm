@@ -189,10 +189,16 @@ def Api.conf(+dir: String) -> IO(List<&2, String>):
     +text : String <- Api.read(dir ++ "/vm.conf")
     return Cm.Conf.flags(dir, text)
 
+# A status json reply's state: running, paused, or hibernated (paused with
+# its RAM in a file: hibernate PATH).
+def Api.state_of(+t: String) -> String:
+  Bool.pick(String, String.starts_with(t, "{\"state\":\"paused\""),
+    Bool.pick(String, String.contains(t, "\"hibernated\":true"), "hibernated", "paused"), "running")
+
 def Api.status.of(r: Result<&1, &1, Err, String>, +fw: String) -> Result<&1, &1, Err, Status>:
   match r:
     case Done{+t}:
-      Done{Status{Bool.pick(String, String.ends_with(t, "\"paused\"}"), "paused", "running"), fw}}
+      Done{Status{Api.state_of(t), fw}}
     case Fail{e}:
       match e:
         case ENoSocket{}:

@@ -7048,6 +7048,19 @@ Term hvf_snap_rebase_run(Env e, Term* f, IoWork* w) {
   return (Term)0;
 }
 
+// Hvf.hib_mark(op) -> U32: whether the VM is hibernated, as Bend says (op
+// 1: a hibernate succeeded; 2: the VM resumed; 0: only asked). The flag.
+static int hvf_hibernated;
+Term hvf_hib_mark_run(Env e, Term* f, IoWork* w) {
+  u32 op = (u32)f[0];
+  if (op == 1) {
+    hvf_hibernated = 1;
+  } else if (op == 2) {
+    hvf_hibernated = 0;
+  }
+  return (Term)(u32)hvf_hibernated;
+}
+
 // Hvf.hib_update() -> U32: with guest RAM mapping a hibernate file
 // (hvf_base_private), the pages the guest or the host wrote since (Linux:
 // /proc/self/pagemap says a page is anonymous, present or swapped: a
@@ -7601,6 +7614,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.hib_update)
   io_eff(CID(Hvf.hib_update), hvf_hib_update_run);
+#endif
+#ifdef CID(Hvf.hib_mark)
+  io_eff(CID(Hvf.hib_mark), hvf_hib_mark_run);
 #endif
 #ifdef CID(Hvf.rename)
   io_eff(CID(Hvf.rename), hvf_rename_run);
