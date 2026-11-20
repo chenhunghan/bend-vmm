@@ -169,9 +169,9 @@ space comes back at the next snapshot or hibernate or when the VM exits,
 and a crash leaves nothing behind. `resume` continues the VM where it was
 (its connections, shares and forwards with it); the pages it touches come
 back from the file. The next `hibernate` writes only what changed since
-(0.13 s for 20 MiB) where the file system clones files (APFS, btrfs, XFS);
-on ext4 it writes the guest's RAM again (2.3 s for 320 MiB on a GitHub
-runner). The file is not a snapshot: nothing restores from it.
+(0.13 s for 20 MiB): macOS clones the last file (APFS) and writes the
+changed chunks; Linux writes the pages that changed into the same file in
+place (found in /proc/self/pagemap), on any file system, ext4 included. The file is not a snapshot: nothing restores from it.
 
 Discard (TRIM): a writable disk offers virtio-blk DISCARD, so what the guest
 frees (`fstrim`, `mount -o discard`, `blkdiscard`) goes back to the host: the

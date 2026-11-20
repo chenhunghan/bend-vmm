@@ -684,17 +684,19 @@ def snap.place(ok: Bool, rc: U32, tmp: String, path: String) -> IO(U32):
 # A snapshot in place (ok): guest RAM maps it from now on, where its plan put
 # RAM (Snapf.rebase says why). A refusal leaves RAM as it was: the snapshot
 # stands either way.
-def snap.rebase.at(+path: String, at: Maybe<&2, U.U64>) -> IO(U32):
+# (private: a hibernate file, removed at once and this VM's alone, which
+# the next hibernate may update in place: Hvf.hib_update)
+def snap.rebase.at(+path: String, at: Maybe<&2, U.U64>, +private: Bool) -> IO(U32):
   match at:
     case None{}:
       IO.pure(U32, 0)
     case Some{+o}:
-      H.Hvf.snap_rebase(path, U.U64.hi(o), U.U64.lo(o))
+      H.Hvf.snap_rebase(path, U.U64.hi(o), U.U64.lo(o), Bool.to_u32(private))
 
 def snap.rebase(ok: Bool, +path: String, at: Maybe<&2, U.U64>) -> IO(U32):
   match ok:
     case True{}:
-      snap.rebase.at(path, at)
+      snap.rebase.at(path, at, False{})
     case False{}:
       IO.pure(U32, 0)
 
@@ -848,25 +850,36 @@ def hibernate.unlink(ok: Bool, +path: String, +rc: U32) -> IO(U32):
     case False{}:
       IO.pure(U32, rc)
 
-# hibernate PATH: pauses (if running) and stays paused; writes the machine
-# and RAM to PATH as a snapshot is written, without disk copies (the disks
-# go on with the VM: the file is no snapshot to restore), and guest RAM maps
-# it from then on, so the VM's RAM leaves the host's memory. A RAM written
-# since the last snapshot or hibernate is all that is written. resume
-# continues the VM. Answers 0 or an errno.
-@unsafe def hibernate(+mc: Chan(M.Machine), +path: String) -> IO(U32):
+# A new hibernate file (when the last one could not be updated in place,
+# Hvf.hib_update): the machine and RAM written to path as a snapshot is
+# written, without disk copies (the disks go on with the VM: the file is no
+# snapshot to restore), and guest RAM maps it from then on. Answers 0 or an
+# errno.
+@unsafe def hibernate.write(+m: M.Machine, +path: String) -> IO(U32):
   do IO<U32>:
-    _ : U32 <- pause_vm()
-    +m : M.Machine <- take(mc)
     +tmp : String = Sf.Snapf.tmp(path)
     +sizes : +List<U32> <- H.Hvf.snap_save(Snap.Snap.encode(m))
     +plan : Maybe<&2, +List<Sf.Piece>> = Sf.Snapf.plan_of(Sf.Snapf.sizes(sizes))
     +wrote : U32 <- snap.commit(tmp, plan)
     +placed : U32 <- snap.place(U32.is_zero(wrote), wrote, tmp, path)
-    +mapped : U32 <- Bool.pick(IO(U32), U32.is_zero(placed), snap.rebase.at(path, Sf.Snapf.plan_ram(plan)), IO.pure(U32, placed))
+    +mapped : U32 <- Bool.pick(IO(U32), U32.is_zero(placed), snap.rebase.at(path, Sf.Snapf.plan_ram(plan), True{}), IO.pure(U32, placed))
     +rc : U32 <- hibernate.unlink(U32.is_zero(placed), path, mapped)
-    put(mc, m)
     return Bool.pick(U32, U32.is_zero(placed), mapped, placed)
+
+# hibernate PATH: pauses (if running) and stays paused, and the VM's RAM
+# leaves the host's memory into a file guest RAM maps. When RAM maps the
+# last hibernate's file still, the pages written since go into it in place
+# (Hvf.hib_update: Linux, on any file system); else a new file at PATH
+# (macOS: a clone of the last one with only what changed written). resume
+# continues the VM. Answers 0 or an errno.
+@unsafe def hibernate(+mc: Chan(M.Machine), +path: String) -> IO(U32):
+  do IO<U32>:
+    _ : U32 <- pause_vm()
+    +m : M.Machine <- take(mc)
+    +up : U32 <- H.Hvf.hib_update()
+    +rc : U32 <- Bool.pick(IO(U32), U32.is_zero(up), IO.pure(U32, 0), hibernate.write(m, path))
+    put(mc, m)
+    return rc
 
 def reply_rc(+rc: U32, ok: String) -> String:
   Bool.pick(String, U32.is_zero(rc), ok, "error " ++ U32.show(rc))

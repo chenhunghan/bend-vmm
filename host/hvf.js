@@ -107,6 +107,7 @@ io_eff(CID(Hvf.pause_state), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.snap_save), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.snap_commit), hvf_unavailable);
 io_eff(CID(Hvf.snap_rebase), hvf_unavailable);
+io_eff(CID(Hvf.hib_update), hvf_unavailable);
 io_eff(CID(Hvf.ram_kib), () => 0);
 io_eff(CID(Hvf.ram_settle), () => 4294967295);
 io_eff(CID(Hvf.snap_drop), hvf_unavailable);

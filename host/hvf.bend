@@ -500,7 +500,11 @@ def Hvf.snap_commit(path: String, plan: +List<U32>) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
-def Hvf.snap_rebase(path: String, off_hi: U32, off_lo: U32) -> IO(U32):
+def Hvf.snap_rebase(path: String, off_hi: U32, off_lo: U32, private: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.hib_update() -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
