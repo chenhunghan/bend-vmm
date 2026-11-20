@@ -43,8 +43,9 @@ def Clients.full_retry_ms() -> U32:
 
 # The signals the VMM takes (the host's numbers: SIGHUP 1, SIGINT 2,
 # SIGTERM 15, the same on macOS and Linux), as a mask (bit n: signal n).
-# Each presses the guest's power button (host/main.bend); any other signal
-# keeps its default action.
+# SIGHUP and SIGTERM press the guest's power button; SIGINT stops the VMM
+# at once (host/main.bend, shutdown_ms); any other signal keeps its default
+# action.
 def Clients.signals() -> List<&2, U32>:
   [1, 2, 15]
 

@@ -490,6 +490,17 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
+  echo "== 5r. host faults while a guest runs: a silent control client, a stalled console, few descriptors, signals"
+  # scripts/hostfault-test.py lists the checks.
+  t=$(mktemp -d)
+  out=$(FAULT_KERNEL=$GIMG FAULT_INITRD=$GI FAULT_CONSOLE=$GCON python3 scripts/hostfault-test.py ./out/bend-vmm "$t" "$SLOW" 2>&1)
+  grep -q "^HOSTFAULT OK" <<<"$out" \
+    && grn "ok: host faults ($(grep -c '^ok: ' <<<"$out") checks: a silent control client waits out its 5 s, a stalled console keeps the VMM serving and bounded, the descriptor budget refuses past 33 connections and frees, SIGHUP powers off, SIGINT stops)" \
+    || { red "failed: host faults"; grep -a "^FAILED" <<<"$out"; fail=1; }
+  rm -rf "$t"
+fi
+
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 5j. a shared file the host replaces reads as the new one"
   # The guest reads d/f (the host keeps it open), then the host removes d
   # and makes it again with a new, larger f: the guest's next read is the
