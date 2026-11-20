@@ -137,6 +137,9 @@ static uint8_t* hvf_ram;
 static int      hvf_base_fd = -1;
 static uint64_t hvf_base_off;
 static int      hvf_commit_cloned; // the snapshot being written began as the base's clone
+// The base is a hibernate file (Hvf.snap_rebase's private): unlinked and
+// this VMM's alone, opened for writing, so Hvf.hib_update may write into it.
+static int      hvf_base_private;
 static uint64_t hvf_ram_base;
 static uint64_t hvf_ram_size;
 
@@ -1828,8 +1831,9 @@ Term hvf_init_run(Env e, Term* f, IoWork* w) {
     hvf_ram_size = hvf_snap.ram_size;
     hvf_ram_base = hvf_snap.ram_base;
     hvf_ram = mmap(NULL, hvf_ram_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, hvf_snap.fd, (off_t)hvf_snap.ram_off);
-    hvf_base_fd   = hvf_snap.fd;
-    hvf_base_off  = hvf_snap.ram_off;
+    hvf_base_fd      = hvf_snap.fd;
+    hvf_base_off     = hvf_snap.ram_off;
+    hvf_base_private = 0;
   } else {
     hvf_ram = mmap(NULL, hvf_ram_size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
   }
@@ -6981,19 +6985,22 @@ static int hvf_punch(int fd, off_t off, off_t len) {
 #endif
 }
 
-// Hvf.snap_rebase(path, off_hi, off_lo) -> U32: guest RAM maps the snapshot
+// Hvf.snap_rebase(path, off_hi, off_lo, private) -> U32: guest RAM maps the snapshot
 // just written at path (RAM at the offset), copy-on-write, in place of what
 // it mapped: the pages it holds become the file's (clean: the host may
 // drop them and read them back), and the next snapshot starts as its clone
 // and writes only what changed since (hvf_put_ram). Only with the VM
 // paused and the machine held (src: snapshot in host/main.bend): no vCPU
 // runs and no effect touches RAM meanwhile. 0, or an errno (RAM as it was).
+// private (a hibernate file, which Bend removes at once): opened for
+// writing too, for Hvf.hib_update.
 Term hvf_snap_rebase_run(Env e, Term* f, IoWork* w) {
   u64         n;
   char*       path = io_cstr(e, f[0], &n);
   uint64_t    off  = hvf_u64(f[1], f[2]);
+  int         priv = (u32)f[3] != 0;
   struct stat st;
-  int         fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  int         fd = open(path, (priv ? O_RDWR : O_RDONLY) | O_NOFOLLOW | O_CLOEXEC);
   free(path);
   if (fd < 0) {
     return (Term)(u32)errno;
@@ -7035,9 +7042,81 @@ Term hvf_snap_rebase_run(Env e, Term* f, IoWork* w) {
   if (hvf_base_fd >= 0) {
     close(hvf_base_fd);
   }
-  hvf_base_fd   = fd;
-  hvf_base_off  = off;
+  hvf_base_fd      = fd;
+  hvf_base_off     = off;
+  hvf_base_private = priv;
   return (Term)0;
+}
+
+// Hvf.hib_update() -> U32: with guest RAM mapping a hibernate file
+// (hvf_base_private), the pages the guest or the host wrote since (Linux:
+// /proc/self/pagemap says a page is anonymous, present or swapped: a
+// copy-on-write copy) are written into that file in place, and dropped from
+// RAM (MADV_DONTNEED), so they read back from the file: the cost is the
+// pages that changed, on any file system. Only with the VM paused and the
+// machine held, as Hvf.snap_rebase. 0, ENOTSUP (macOS: a clone does it),
+// ENOENT (no hibernate file), or an errno (RAM as the guest left it: a page
+// is dropped only once the file holds it).
+Term hvf_hib_update_run(Env e, Term* f, IoWork* w) {
+#ifdef __APPLE__
+  return (Term)(u32)ENOTSUP;
+#else
+  if (!hvf_ram || hvf_base_fd < 0 || !hvf_base_private) {
+    return (Term)(u32)ENOENT;
+  }
+  int pm = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+  if (pm < 0) {
+    return (Term)(u32)errno;
+  }
+  uint64_t ps    = (uint64_t)getpagesize();
+  uint64_t pages = hvf_ram_size / ps;
+  uint64_t first = (uint64_t)(uintptr_t)hvf_ram / ps;
+  uint64_t ents[512];
+  uint64_t run   = 0, len = 0; // a run of changed pages: its first page, its length
+  int      err   = 0;
+  for (uint64_t i = 0; i <= pages && !err; i += 512) {
+    uint64_t k = pages - i < 512 ? pages - i : 512;
+    if (k && pread(pm, ents, k * 8, (off_t)((first + i) * 8)) != (ssize_t)(k * 8)) {
+      err = errno ? errno : EIO;
+      break;
+    }
+    for (uint64_t j = 0; j <= k && !err; j++) {
+      // bit 63 present, 62 swapped, 61 a file page (or shared)
+      int changed = j < k && ((((ents[j] >> 63) & 1) && !((ents[j] >> 61) & 1)) || ((ents[j] >> 62) & 1));
+      if (changed) {
+        if (!len) {
+          run = i + j;
+        }
+        len++;
+        continue;
+      }
+      if (j == k && i + k < pages) {
+        break; // the run may go on in the next batch
+      }
+      if (len) {
+        uint8_t* at   = hvf_ram + run * ps;
+        uint64_t left = len * ps, done = 0;
+        while (done < left) {
+          ssize_t r = pwrite(hvf_base_fd, at + done, left - done, (off_t)(hvf_base_off + run * ps + done));
+          if (r < 0 && errno == EINTR) {
+            continue;
+          }
+          if (r <= 0) {
+            err = r < 0 ? errno : EIO;
+            break;
+          }
+          done += (uint64_t)r;
+        }
+        if (!err) {
+          madvise(at, left, MADV_DONTNEED);
+        }
+        len = 0;
+      }
+    }
+  }
+  close(pm);
+  return (Term)(u32)err;
+#endif
 }
 Term hvf_disk_discard_run(Env e, Term* f, IoWork* w) {
   int   fd  = hvf_disk(f[0]);
@@ -7516,6 +7595,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.snap_rebase)
   io_eff(CID(Hvf.snap_rebase), hvf_snap_rebase_run);
+#endif
+#ifdef CID(Hvf.hib_update)
+  io_eff(CID(Hvf.hib_update), hvf_hib_update_run);
 #endif
 #ifdef CID(Hvf.rename)
   io_eff(CID(Hvf.rename), hvf_rename_run);
