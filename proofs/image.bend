@@ -36,3 +36,12 @@ def L.image.gzip_raw():
 
 def L.image.gzip_too_short():
   {==}
+
+def L.image.zboot():
+  {==}
+
+def L.image.zboot_zstd():
+  {==}
+
+def L.image.zboot_not():
+  {==}

@@ -132,3 +132,9 @@ def L.control.with_exits():
 
 def L.control.with_exits_none():
   {==}
+
+def L.control.hibernate():
+  {==}
+
+def L.control.hibernate_bare():
+  {==}

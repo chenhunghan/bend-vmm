@@ -171,6 +171,11 @@ def Vmm.pause(+vm: String) -> IO(Result<&1, &1, Err, String>):
 def Vmm.resume(+vm: String) -> IO(Result<&1, &1, Err, String>):
   Vmm.ctl(vm, "resume")
 
+# The VM paused, its RAM moved into a file at path that guest RAM maps (the
+# file removed at once; no disks kept): resume continues it.
+def Vmm.hibernate(+vm: String, +path: String) -> IO(Result<&1, &1, Err, String>):
+  Vmm.ctl(vm, "hibernate " ++ path)
+
 # stop ends the VM at once (quit); powerdown asks the guest to shut down.
 def Vmm.stop(+vm: String) -> IO(Result<&1, &1, Err, String>):
   Vmm.ctl(vm, "quit")

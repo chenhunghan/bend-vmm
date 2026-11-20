@@ -114,3 +114,28 @@ def Image.layout(ram_base: U.U64, ram_size: U.U64, info: ImageInfo, kernel_len: 
 def Image.is_gzip(+head: +List<U32>) -> Bool:
   Nat.is_le(3n, List.length(&2, U32, head)) && U32.is_eq(Maybe.default(&2, U32, List.get(&2, U32, head, 0n), 0), 31)
     && U32.is_eq(Maybe.default(&2, U32, List.get(&2, U32, head, 1n), 0), 139)
+
+# An EFI zboot image (Linux's CONFIG_EFI_ZBOOT: the arm64 vmlinuz of
+# Alpine, Fedora and Debian): "zimg" at byte 4, the payload's offset and
+# size at bytes 8 and 12 (u32, little-endian), its compression's name at
+# byte 24. A gzip payload is a compressed Image, inflated into RAM as a
+# gzip kernel is.
+type Zboot is Data:
+  Zboot{off: U32, len: U32}
+
+def Image.byte(+head: +List<U32>, +n: Nat) -> U32:
+  Maybe.default(&2, U32, List.get(&2, U32, head, n), 256)
+
+def Image.le32(+head: +List<U32>, +n: Nat) -> U32:
+  (((Image.byte(head, n) .|. (Image.byte(head, Nat.add(n, 1n)) << 8n : U32) : U32) .|. (Image.byte(head, Nat.add(n, 2n)) << 16n : U32) : U32) .|. (Image.byte(head, Nat.add(n, 3n)) << 24n : U32) : U32)
+
+# The four bytes at n spell a, b, c, d.
+def Image.tag(+head: +List<U32>, +n: Nat, a: U32, b: U32, c: U32, d: U32) -> Bool:
+  U32.is_eq(Image.byte(head, n), a) && U32.is_eq(Image.byte(head, Nat.add(n, 1n)), b) && U32.is_eq(Image.byte(head, Nat.add(n, 2n)), c) && U32.is_eq(Image.byte(head, Nat.add(n, 3n)), d)
+
+# From a file's first 28 bytes: a zboot image's gzip payload (offset,
+# size), or none (not one, another compression, or an empty payload).
+def Image.zboot(+head: +List<U32>) -> Maybe<&2, Zboot>:
+  # "zimg" (7a 69 6d 67), "gzip" (67 7a 69 70)
+  +ok = Image.tag(head, 4n, 122, 105, 109, 103) && Image.tag(head, 24n, 103, 122, 105, 112) && U32.is_ne(Image.le32(head, 12n), 0)
+  Bool.pick(Maybe<&2, Zboot>, ok, Some{Zboot{Image.le32(head, 8n), Image.le32(head, 12n)}}, None{})

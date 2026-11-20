@@ -18,8 +18,9 @@ sockets and guest memory where Bend tells it to.
 
 ## What it runs
 
-- Linux kernels as `Image` or gzip-compressed `vmlinuz` (Debian, Ubuntu), with
-  an initramfs, up to 64 vCPUs (one host thread each), GICv3 and the arch timer
+- Linux kernels as `Image`, gzip-compressed `vmlinuz` (Debian, Ubuntu) or an
+  EFI zboot `vmlinuz` with a gzip payload (Alpine's, Fedora's), with an
+  initramfs (compressed or not: the kernel unpacks it), up to 64 vCPUs (one host thread each), GICv3 and the arch timer
   in Hypervisor.framework.
 - Serial console (PL011, `ttyAMA0`) with interactive input; `Ctrl-A x` quits;
   also virtio-console (`hvc0`).
@@ -83,7 +84,7 @@ Options:
 
 | Option | Meaning |
 |---|---|
-| `--kernel FILE` | Linux `Image` or gzip-compressed `vmlinuz` |
+| `--kernel FILE` | Linux `Image`, gzip-compressed `vmlinuz`, or an EFI zboot `vmlinuz` whose payload is gzip |
 | `--initrd FILE` | initramfs |
 | `--cmdline "…"` | kernel command line (default `console=ttyAMA0 earlycon=pl011,0x9000000`) |
 | `--mem MiB` | guest RAM (default 512) |
@@ -148,7 +149,7 @@ in 0.2 s and Alpine its login prompt in about 5 s.
 Management: on the console, `Ctrl-A p` pauses or resumes, `Ctrl-A s` writes
 `./bend-vmm.snap`, `Ctrl-A x` quits, `Ctrl-A h` lists the keys. Over
 `--control`: `echo pause | nc -U SOCK` (also `resume`, `status`,
-`snapshot PATH`, `status json` (`{"state":"running"}`), `balloon MiB|auto`, `net` (the NAT's connections and flow state),
+`snapshot PATH`, `hibernate PATH`, `status json` (`{"state":"running"}`), `balloon MiB|auto`, `net` (the NAT's connections and flow state),
 `powerdown` (presses the guest's power button), `quit`;
 with `--display`, `screendump PATH` writes the
 screen as a PPM, `type TEXT` types on the virtio keyboard (`\n` is Return),
@@ -158,6 +159,17 @@ copy-on-write, so restoring is immediate. A snapshot is written to a file
 of its own next to PATH and renamed over it, so a failed write keeps what
 PATH held, and a restored VM may snapshot over the file it came from. TCP
 connections through the NAT do not survive a restore.
+
+`hibernate PATH` is for a VM that sits idle: it pauses the VM and leaves it
+paused, writes its RAM to a file at PATH as a snapshot would (no disk
+copies), and maps guest RAM from that file, so the VM's memory leaves the
+host (a 1 GiB guest holding 300 MiB: 400 -> 5 MiB of physical footprint on
+macOS, in 0.25 s). The file is removed at once: RAM keeps it open, its
+space comes back at the next snapshot or hibernate or when the VM exits,
+and a crash leaves nothing behind. `resume` continues the VM where it was
+(its connections, shares and forwards with it); the pages it touches come
+back from the file. The next `hibernate` writes only what changed since
+(0.13 s for 20 MiB). The file is not a snapshot: nothing restores from it.
 
 Discard (TRIM): a writable disk offers virtio-blk DISCARD, so what the guest
 frees (`fstrim`, `mount -o discard`, `blkdiscard`) goes back to the host: the
@@ -291,7 +303,12 @@ kept all 2 GiB of its RAM on the host). A burst past what is left
 free takes pages back from the balloon as it goes (a 1.4 GiB write into
 a 2 GiB guest: 1.3 GB/s, against 4.1 GB/s with no balloon; nothing is
 killed). `balloon MiB` sets a target by hand and stops the automatic
-balloon; `balloon auto` starts it again. The policy is
+balloon; `balloon auto` starts it again. `--balloon auto,max=PCT` (10 to
+90) lets the balloon hold up to PCT percent of the RAM instead of half: an
+idle 2 GiB guest's balloon then fills to 1.5 GiB, and the same 1.4 GiB burst
+takes 4.8 s instead of 4.3 s. When the guest takes pages back from the
+balloon on its own (DEFLATE_ON_OOM), the target drops at once to 256 MiB
+below what the balloon holds, rather than at the next poll. The policy is
 src/virtio/balauto.bend.
 
 ## VM folders and snapshots

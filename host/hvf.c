@@ -1919,9 +1919,10 @@ static int64_t hvf_gunzip(uint8_t* src, uint64_t n, uint8_t* dst, uint64_t room)
   return hvf_inflate(src, n, dst, room, 31);
 }
 
-// Hvf.load(path, gpa_hi, gpa_lo, gz) -> U32: copies a file into RAM,
-// inflating it first when gz (src/boot/image.bend, Image.is_gzip, decides);
-// the size in RAM, or 0xFFFFFFFF.
+// Hvf.load(path, gpa_hi, gpa_lo, gz, off, len) -> U32: copies a file into
+// RAM, inflating it first when gz (src/boot/image.bend decides: Image.is_gzip,
+// Image.zboot); len bytes from off only, when len is not 0 (an EFI zboot
+// image's payload). The size in RAM, or 0xFFFFFFFF.
 Term hvf_load_run(Env e, Term* f, IoWork* w) {
   u64   n;
   char* path = io_cstr(e, f[0], &n);
@@ -1942,18 +1943,24 @@ Term hvf_load_run(Env e, Term* f, IoWork* w) {
   }
   uint64_t gpa = hvf_u64(f[1], f[2]);
   int64_t  got = -1;
+  uint64_t off = (u32)f[5] != 0 ? (u32)f[4] : 0;
+  uint64_t len = (u32)f[5] != 0 ? (u32)f[5] : (uint64_t)st.st_size;
+  if (off > (uint64_t)st.st_size || len > (uint64_t)st.st_size - off) {
+    munmap(file, (size_t)st.st_size);
+    return (Term)HVF_ERR;
+  }
   if ((u32)f[3] != 0) {
     uint8_t* dst = hvf_ptr(gpa, 1);
     if (dst) {
-      got = hvf_gunzip(file, (uint64_t)st.st_size, dst, hvf_ram_size - (gpa - hvf_ram_base));
+      got = hvf_gunzip(file + off, len, dst, hvf_ram_size - (gpa - hvf_ram_base));
       hvf_wrote(dst, got > 0 ? (uint64_t)got : 0);
     }
   } else {
-    uint8_t* dst = hvf_ptr(gpa, (uint64_t)st.st_size);
+    uint8_t* dst = hvf_ptr(gpa, len);
     if (dst) {
-      memcpy(dst, file, (size_t)st.st_size);
-      hvf_wrote(dst, (uint64_t)st.st_size);
-      got = st.st_size;
+      memcpy(dst, file + off, (size_t)len);
+      hvf_wrote(dst, len);
+      got = (int64_t)len;
     }
   }
   munmap(file, (size_t)st.st_size);

@@ -25,9 +25,14 @@ type Cmd is Data:
   # balloon auto: the automatic balloon takes over again (the default;
   # balloon MiB sets a target by hand and stops it).
   CBalloonAuto{}
+  # hibernate PATH: the VM pauses and stays paused, and its RAM moves into a
+  # file at PATH that guest RAM then maps; the file is removed at once (its
+  # space comes back when the next snapshot or the VM's exit lets it go).
+  # Disks are not kept: the file is no snapshot to restore.
+  CHibernate{path: String}
 
 def Ctl.usage() -> String:
-  "unknown command (pause, resume, snapshot PATH, screendump PATH, type TEXT, pointer X Y, powerdown, net, status [json], balloon MiB|auto, quit)"
+  "unknown command (pause, resume, snapshot PATH, hibernate PATH, screendump PATH, type TEXT, pointer X Y, powerdown, net, status [json], balloon MiB|auto, quit)"
 
 def Ctl.pointer_usage() -> String:
   "usage: pointer X Y (0..32767)"
@@ -147,11 +152,12 @@ def Ctl.verb(+verb: String, +arg: String) -> Cmd:
   Bool.pick(Cmd, String.eq(verb, "net"), CNet{},
   Bool.pick(Cmd, String.eq(verb, "powerdown"), CPowerdown{},
   Bool.pick(Cmd, String.eq(verb, "snapshot"), Ctl.needs(arg, CSnapshot{arg}, "usage: snapshot PATH"),
+  Bool.pick(Cmd, String.eq(verb, "hibernate"), Ctl.needs(arg, CHibernate{arg}, "usage: hibernate PATH"),
   Bool.pick(Cmd, String.eq(verb, "screendump"), Ctl.needs(arg, CScreendump{arg}, "usage: screendump PATH"),
   Bool.pick(Cmd, String.eq(verb, "type"), Ctl.needs(arg, CType{arg}, "usage: type TEXT"),
   Bool.pick(Cmd, String.eq(verb, "pointer"), Ctl.pointer(String.split(arg, ' ')),
   Bool.pick(Cmd, String.eq(verb, "balloon"), Bool.pick(Cmd, String.eq(arg, "auto"), CBalloonAuto{}, Ctl.balloon(U32.read(arg))),
-  CUnknown{})))))))))))
+  CUnknown{}))))))))))))
 
 # One command line: its first word is the verb, the rest (one space between
 # words) its argument.

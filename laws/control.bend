@@ -148,3 +148,11 @@ law control.with_exits:
 
 law control.with_exits_none:
   {C.Ctl.with_exits("{\"state\":\"running\"}", []) == "{\"state\":\"running\",\"exits\":[]}" : String}
+
+# Proposed: hibernate PATH (bend-vk8s footprint audit, 2026-11-20): the VM
+# pauses and its RAM moves into a file guest RAM maps.
+law control.hibernate:
+  {C.Ctl.parse("hibernate /tmp/vm.ram") == C.CHibernate{"/tmp/vm.ram"} : C.Cmd}
+
+law control.hibernate_bare:
+  {C.Ctl.parse("hibernate") == C.CBad{"usage: hibernate PATH"} : C.Cmd}

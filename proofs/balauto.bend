@@ -69,3 +69,27 @@ def L.balauto.ticks_settle():
 
 def L.balauto.ticks_stop():
   {==}
+
+def L.balauto.most_of_half():
+  {==}
+
+def L.balauto.most_of_75():
+  {==}
+
+def L.balauto.most_of_huge():
+  {==}
+
+def L.balauto.pct_ok():
+  {==}
+
+def L.balauto.grow_75():
+  {==}
+
+def L.balauto.oom():
+  {==}
+
+def L.balauto.oom_all():
+  {==}
+
+def L.balauto.oom_none():
+  {==}
