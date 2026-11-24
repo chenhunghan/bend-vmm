@@ -73,3 +73,4 @@ import ./laws/x86exit.bend as Laws_x86exit
 import ./laws/x86pio.bend as Laws_x86pio
 import ./laws/x86acpi.bend as Laws_x86acpi
 import ./laws/x86boot.bend as Laws_x86boot
+import ./laws/irqroute.bend as Laws_irqroute

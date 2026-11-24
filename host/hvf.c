@@ -83,6 +83,7 @@ static struct {
   __typeof__(&hv_gic_config_set_redistributor_base) gic_set_redist;
   __typeof__(&hv_gic_create) gic_create;
   __typeof__(&hv_gic_set_spi) gic_set_spi;
+  __typeof__(&hv_gic_set_distributor_reg) set_dist_reg;
 } hv;
 
 static int hvf_open(void) {
@@ -120,6 +121,7 @@ static int hvf_open(void) {
   HV_SYM(gic_set_redist, hv_gic_config_set_redistributor_base);
   HV_SYM(gic_create, hv_gic_create);
   HV_SYM(gic_set_spi, hv_gic_set_spi);
+  HV_SYM(set_dist_reg, hv_gic_set_distributor_reg);
 #undef HV_SYM
   return hv.vm_create && hv.gic_create ? 0 : -1;
 }
@@ -318,6 +320,8 @@ static unsigned hvf_exit_bucket(const uint32_t* o) {
 //   vmb_get(c, r), vmb_set(c, r, v), vmb_advance_pc(c)
 //   vmb_exit(c)                     runs the guest, encodes the exit (hvf_run)
 //   vmb_vtimer_mask(c, on), vmb_spi(intid, level), vmb_kick(c)
+//   vmb_dist_write(reg, value)      a vGIC distributor register, at its offset
+//                                   (-1 where the hypervisor cannot while vCPUs run)
 
 enum { VMB_R = 1, VMB_W = 2, VMB_X = 4 };
 
@@ -389,6 +393,10 @@ static int vmb_vtimer_mask(HvfCpu* c, int on) {
 
 static int vmb_spi(uint32_t intid, int level) {
   return hv.gic_set_spi(intid, level) == HV_SUCCESS ? 0 : -1;
+}
+
+static int vmb_dist_write(uint32_t reg, uint64_t v) {
+  return hv.set_dist_reg && hv.set_dist_reg((hv_gic_distributor_reg_t)reg, v) == HV_SUCCESS ? 0 : -1;
 }
 
 static int vmb_kick(HvfCpu* c) {
@@ -575,6 +583,14 @@ static int vmb_spi(uint32_t intid, int level) {
   l.irq   = (KVM_ARM_IRQ_TYPE_SPI << KVM_ARM_IRQ_TYPE_SHIFT) | intid;
   l.level = level ? 1 : 0;
   return ioctl(kvm_vm, KVM_IRQ_LINE, &l) == 0 ? 0 : -1;
+}
+
+// KVM writes its vGIC's registers only while no vCPU runs (it takes every
+// vCPU's lock): not while the guest works.
+static int vmb_dist_write(uint32_t reg, uint64_t v) {
+  (void)reg;
+  (void)v;
+  return -1;
 }
 
 static int vmb_kick(HvfCpu* c) {
@@ -825,6 +841,13 @@ static int vmb_spi(uint32_t intid, int level) {
   l.irq   = kvm_gsi[intid];
   l.level = level ? 1 : 0;
   return ioctl(kvm_vm, KVM_IRQ_LINE, &l) == 0 ? 0 : -1;
+}
+
+// No GIC here: the IOAPIC's pins route as the guest programs them.
+static int vmb_dist_write(uint32_t reg, uint64_t v) {
+  (void)reg;
+  (void)v;
+  return -1;
 }
 
 static int vmb_kick(HvfCpu* c) {
@@ -2333,6 +2356,17 @@ Term hvf_x86_boot_run(Env e, Term* f, IoWork* w) {
   (void)f;
   return (Term)HVF_ERR;
 #endif
+}
+
+// Hvf.gic_route(reg, hi, lo) -> U32: writes the vGIC distributor register
+// at offset reg (src/arm64/irqroute.bend: an SPI's GICD_IROUTER before it is
+// raised). 0, or HVF_ERR where the hypervisor cannot (KVM).
+Term hvf_gic_route_run(Env e, Term* f, IoWork* w) {
+  int r = vmb_dist_write((u32)f[0], hvf_u64(f[1], f[2]));
+  if (hvf_trace & 2) {
+    fprintf(stderr, "[trace] gic %#x <- %#llx (%d)\n", (u32)f[0], (unsigned long long)hvf_u64(f[1], f[2]), r);
+  }
+  return (Term)(r == 0 ? 0 : HVF_ERR);
 }
 
 // Hvf.irq(intid, level) -> U32: sets an SPI's level (0 low, else high).
@@ -7692,6 +7726,9 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.irq)
   io_eff(CID(Hvf.irq), hvf_irq_run);
+#endif
+#ifdef CID(Hvf.gic_route)
+  io_eff(CID(Hvf.gic_route), hvf_gic_route_run);
 #endif
 #ifdef CID(Hvf.x86_pio_put)
   io_eff(CID(Hvf.x86_pio_put), hvf_x86_pio_put_run);

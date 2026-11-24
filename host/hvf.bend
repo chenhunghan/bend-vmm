@@ -45,6 +45,12 @@ def Hvf.irq(intid: U32, level: U32) -> IO(U32):
   import "./hvf.c"
   import "./hvf.js"
 
+# Writes the vGIC distributor register at offset reg (an SPI's routing:
+# src/arm64/irqroute.bend); HVF_ERR where the hypervisor cannot (KVM).
+def Hvf.gic_route(reg: U32, hi: U32, lo: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 # 0 arm64 guests (Hypervisor.framework, KVM on arm64), 1 x86_64 (KVM on x86_64).
 def Hvf.arch() -> IO(U32):
   import "./hvf.c"

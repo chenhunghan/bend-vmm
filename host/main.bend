@@ -27,6 +27,7 @@ import ../src/net/flush.bend as Fl
 import ../src/net/udpflow.bend as Uf
 import ../src/net/nat.bend as Nt
 import ../src/arm64/psci.bend as Ps
+import ../src/arm64/irqroute.bend as Rt
 import ../src/virtio/device.bend as D
 import ../src/virtio/input.bend as In
 import ../src/dev/keymap.bend as Km
@@ -168,7 +169,18 @@ def vkey(+conn: U32) -> U32:
         names : List<String> <- H.Hvf.lan_names()
         lan_send.each(Hf.Files.lan_peers(names), ws)
 
-# Runs the Vm program of an exit of vCPU cpu. VmCpuOn starts that vCPU's loop,
+# Routes an SPI before it is raised, when src/arm64/irqroute.bend says to
+# (an SPI raised from a vCPU's exit goes to that vCPU).
+def irq_route(m: Maybe<&2, U32>, +intid: U32) -> IO(U32):
+  match m:
+    case None{}:
+      IO.pure(U32, 0)
+    case Some{c}:
+      +v = Rt.Route.irouter(c)
+      H.Hvf.gic_route(Rt.Route.reg(intid), U.U64.hi(v), U.U64.lo(v))
+
+# Runs the Vm program of an exit of vCPU cpu (Rt.Route.none(): of the
+# host's own events, outside any vCPU exit). VmCpuOn starts that vCPU's loop,
 # which is defined below (hence @unsafe: the two recurse into each other).
 @unsafe def interp(+cpu: U32, +mc: Chan(M.Machine), +done: Chan(U32), -A: Type, m: V.Vm<A>) -> IO(A):
   match m:
@@ -194,8 +206,9 @@ def vkey(+conn: U32) -> U32:
       do IO<A>:
         _ : U32 <- H.Hvf.out(bs)
         interp(cpu, mc, done, A, next)
-    case V.VmIrq{i, l, next}:
+    case V.VmIrq{+i, +l, next}:
       do IO<A>:
+        _ : U32 <- irq_route(Rt.Route.target(cpu, i, l), i)
         _ : U32 <- H.Hvf.irq(i, Bool.to_u32(l))
         interp(cpu, mc, done, A, next)
     case V.VmPower{op, next}:
@@ -314,7 +327,7 @@ def vkey(+conn: U32) -> U32:
 @unsafe def net_deliver(+mc: Chan(M.Machine), +done: Chan(U32), ev: V.NetEvent) -> IO(Unit):
   do IO<Unit>:
     m0 : M.Machine <- take(mc)
-    m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.net_event(m0, ev))
+    m1 : M.Machine <- interp(Rt.Route.none(), mc, done, M.Machine, M.Machine.net_event(m0, ev))
     put(mc, m1)
 
 def net_slirp(m: M.Machine) -> Nt.Slirp:
@@ -895,7 +908,7 @@ def reply_rc(+rc: U32, ok: String) -> String:
 @unsafe def display.hid(+mc: Chan(M.Machine), +done: Chan(U32), ev: In.Hid) -> IO(Unit):
   do IO<Unit>:
     m0 : M.Machine <- take(mc)
-    m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.hid(m0, ev))
+    m1 : M.Machine <- interp(Rt.Route.none(), mc, done, M.Machine, M.Machine.hid(m0, ev))
     put(mc, m1)
 
 @unsafe def type_keys(+mc: Chan(M.Machine), +done: Chan(U32), evs: +List<In.Hid>) -> IO(Unit):
@@ -967,7 +980,7 @@ def balloon_reply(has: Bool, info: Maybe<&2, Bl.Bal>) -> String:
       do IO<String>:
         +m0 : M.Machine <- take(mc)
         +has : Bool = Maybe.is_some(&2, Bl.Bal, M.Machine.balloon_info(m0))
-        +m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.balloon(m0, Ctl.Ctl.mib_pages(mib)))
+        +m1 : M.Machine <- interp(Rt.Route.none(), mc, done, M.Machine, M.Machine.balloon(m0, Ctl.Ctl.mib_pages(mib)))
         +info : Maybe<&2, Bl.Bal> = M.Machine.balloon_info(m1)
         put(mc, m1)
         return balloon_reply(has, info)
@@ -1054,14 +1067,14 @@ def balloon_reply(has: Bool, info: Maybe<&2, Bl.Bal>) -> String:
   do IO<Unit>:
     len : U32 <- H.Hvf.lan_recv()
     m0 : M.Machine <- take(mc)
-    m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.lan(m0, len))
+    m1 : M.Machine <- interp(Rt.Route.none(), mc, done, M.Machine, M.Machine.lan(m0, len))
     put(mc, m1)
     lan_loop(mc, done)
 
 @unsafe def vs_deliver(+mc: Chan(M.Machine), +done: Chan(U32), ev: V.VsockEvent) -> IO(Unit):
   do IO<Unit>:
     m0 : M.Machine <- take(mc)
-    m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.vsock_event(m0, ev))
+    m1 : M.Machine <- interp(Rt.Route.none(), mc, done, M.Machine, M.Machine.vsock_event(m0, ev))
     put(mc, m1)
 
 # A vsock connection's reader: the host holds what the program sent (up to
@@ -1349,7 +1362,7 @@ def display.map(d: Maybe<&2, T.Display>) -> IO(Unit):
       do IO<Unit>:
         +m0 : M.Machine <- take(mc)
         +room : Nat = Bool.pick(Nat, U32.is_zero(tries), 4096n, M.Machine.uart_room(m0))
-        m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.input(m0, List.take(&2, U32, all, room)))
+        m1 : M.Machine <- interp(Rt.Route.none(), mc, done, M.Machine, M.Machine.input(m0, List.take(&2, U32, all, room)))
         put(mc, m1)
         IO.sleep(Bool.pick(U32, List.is_empty(&2, U32, List.drop(&2, U32, all, room)), 0, 2))
         input_feed(mc, done, List.drop(&2, U32, all, room), Bool.pick(U32, Nat.is_eq(room, 0n), (tries - 1 : U32), 250))
@@ -1939,7 +1952,7 @@ def shutdown_ms() -> U32:
     case True{}:
       do IO<Unit>:
         +m0 : M.Machine <- take(mc)
-        +m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.balloon_poll(m0))
+        +m1 : M.Machine <- interp(Rt.Route.none(), mc, done, M.Machine, M.Machine.balloon_poll(m0))
         put(mc, m1)
 
 @unsafe def balloon_poll.on(go: Bool, +auto: Bool, +elapsed: U32, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(Unit):
@@ -2333,11 +2346,11 @@ def x86.keep(same: Bool, +p: Xp.Pio) -> IO(Unit):
         +p0 : Xp.Pio <- x86.take(pc)
         +room : Nat = Bool.pick(Nat, U32.is_zero(tries), 4096n, Xp.Pio.room(p0))
         +now : +List<U32> = List.take(&2, U32, all, room)
-        +p1 : Xp.Pio <- interp(0, mc, done, Xp.Pio, Xp.Pio.input(p0, now))
+        +p1 : Xp.Pio <- interp(Rt.Route.none(), mc, done, Xp.Pio, Xp.Pio.input(p0, now))
         x86.keep(False{}, p1)
         x86.put(pc, p1)
         m0 : M.Machine <- take(mc)
-        m1 : M.Machine <- interp(0, mc, done, M.Machine, M.Machine.input(m0, now))
+        m1 : M.Machine <- interp(Rt.Route.none(), mc, done, M.Machine, M.Machine.input(m0, now))
         put(mc, m1)
         IO.sleep(Bool.pick(U32, List.is_empty(&2, U32, List.drop(&2, U32, all, room)), 0, 2))
         x86.feed(mc, pc, done, List.drop(&2, U32, all, room), Bool.pick(U32, Nat.is_eq(room, 0n), (tries - 1 : U32), 250))
@@ -2387,7 +2400,7 @@ def x86.keep(same: Bool, +p: Xp.Pio) -> IO(Unit):
     +pc : Chan(Xp.Pio) <- Chan.new(Xp.Pio, 1)
     # (the line as the state says: a restored UART may have an interrupt
     # pending)
-    p1 : Xp.Pio <- interp(0, mc, done, Xp.Pio, Xp.Pio.input(p0, []))
+    p1 : Xp.Pio <- interp(Rt.Route.none(), mc, done, Xp.Pio, Xp.Pio.input(p0, []))
     x86.put(pc, p1)
     resolver()
     forwards(0, Cli.Fwd.specs(fwd), mc, done)

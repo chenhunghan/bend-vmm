@@ -489,6 +489,23 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   rm -rf "$t"
 fi
 
+if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && [ "$host" = Darwin-arm64 ]; then
+  echo "== 5t. a device's interrupt goes to the vCPU that issued the request (src/arm64/irqroute.bend)"
+  # A 9p read pinned to vCPU 1 (4 KiB a request): its completions are taken
+  # on CPU 1, not sent to vCPU 0 and passed on by IPI (about 85 us each on
+  # Hypervisor.framework). KVM keeps the guest's routing (no check there).
+  t=$(mktemp -d); mkdir -p "$t/sh"; head -c 4194304 /dev/urandom > "$t/sh/f"
+  sum=$( (md5sum "$t/sh/f" 2>/dev/null || md5 -r "$t/sh/f") | cut -d' ' -f1)
+  cmd='mkdir -p /mnt/s; mount -t 9p -o trans=virtio,version=9p2000.L,msize=524288 sh /mnt/s; d=$(basename $(dirname $(grep -l . /sys/bus/virtio/drivers/9pnet_virtio/*/mount_tag))); set -- $(grep " $d$" /proc/interrupts); a=$3; /bin/bench on 1 /bin/md5sum /mnt/s/f; set -- $(grep " $d$" /proc/interrupts); echo CPU1-IRQS-$(($3 - a)); echo RT-""DONE\n'
+  out=$(drive 60 "busybox shell" "$cmd" "RT-DONE" 'poweroff -f\n' -- \
+    ./out/bend-vmm --mem 256 --cpus 2 --kernel $GIMG --initrd $GI --share "$t/sh,tag=sh" --cmdline "$GCON quiet" 2>&1 | tr -d '\r')
+  n=$(grep -ao "^CPU1-IRQS-[0-9]*" <<<"$out" | cut -d- -f3)
+  grep -aq "^$sum " <<<"$out" && [ "${n:-0}" -ge 900 ] \
+    && grn "ok: a 4 MiB 9p read on vCPU 1 reads back intact and takes its $n interrupts on CPU 1" \
+    || { red "failed: interrupt routing (CPU 1 took ${n:-no} interrupts; want 900 or more)"; grep -a "CPU1-\|md5\|/mnt/s" <<<"$out" | tail -4; fail=1; }
+  rm -rf "$t"
+fi
+
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
   echo "== 5r. host faults while a guest runs: a silent control client, a stalled console, few descriptors, signals"
   # scripts/hostfault-test.py lists the checks.

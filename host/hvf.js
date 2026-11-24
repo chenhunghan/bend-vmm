@@ -11,6 +11,7 @@ io_eff(CID(Hvf.write), hvf_unavailable);
 io_eff(CID(Hvf.read), () => ({ $: CID(Nil) }));
 io_eff(CID(Hvf.vcpu), () => ({ $: CID(Con), head: 4294967295, tail: { $: CID(Nil) } }));
 io_eff(CID(Hvf.irq), hvf_unavailable);
+io_eff(CID(Hvf.gic_route), hvf_unavailable);
 io_eff(CID(Hvf.arch), () => 0);
 io_eff(CID(Hvf.x86_setup), hvf_unavailable);
 io_eff(CID(Hvf.x86_boot), hvf_unavailable);

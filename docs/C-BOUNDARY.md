@@ -9,7 +9,7 @@ carries out plans that Bend hands it.
 This file is the audit of that boundary. It covered all 113 effects in
 host/hvf.c as of 2026-11-09 and says, for each group, where the
 decisions are made; the migration ledger at the end lists every effect
-(156 as of 2026-11-20) with its target in the C-to-Bend plan. The
+(157 as of 2026-11-24) with its target in the C-to-Bend plan. The
 section before it lists every decision still in C, with the reason it
 stays.
 
@@ -17,7 +17,7 @@ stays.
 
 | Group | Effects | C does | Bend decides (src/) |
 |---|---|---|---|
-| Hypervisor | `init` `vcpu` `vcpu_queue` `irq` `pause` `resume` `pause_state` `exit_counts` `arch` `x86_setup` `x86_boot` `x86_pio_put` `x86_pio_get` | creates the VM and vCPUs, runs them, reports exits as facts (KVM's raw, kind 2000 + reason); on x86_64 applies the machine Bend describes (interrupt pins, CPUID rules, the boot registers) | everything about the machine; KVM exits become the machine's terms in `arm64/kvmexit.bend` and `x86/xexit.bend`; the x86_64 machine (memory map, boot structures, ACPI, port IO, CPUID, interrupt pins) in `src/x86/` |
+| Hypervisor | `init` `vcpu` `vcpu_queue` `irq` `gic_route` `pause` `resume` `pause_state` `exit_counts` `arch` `x86_setup` `x86_boot` `x86_pio_put` `x86_pio_get` | creates the VM and vCPUs, runs them, reports exits as facts (KVM's raw, kind 2000 + reason); on x86_64 applies the machine Bend describes (interrupt pins, CPUID rules, the boot registers) | everything about the machine, including which vCPU a device's SPI goes to (`arm64/irqroute.bend`; C writes the GICD_IROUTER value Bend computes); KVM exits become the machine's terms in `arm64/kvmexit.bend` and `x86/xexit.bend`; the x86_64 machine (memory map, boot structures, ACPI, port IO, CPUID, interrupt pins) in `src/x86/` |
 | Snapshots | `snap_save` `snap_commit` `snap_rebase` `snap_drop` `snap_open` `snap_peek` `snap_load` `snap_info` `snap_args` `snap_machine` `snap_gic` `snap_plans` `rename` | reads and writes the registers and the vGIC that a plan names, and moves byte ranges | file layout, placement and format version (`vmm/snapfile.bend`), vGIC replay order (`arm64/gicplan.bend`), registers kept (`arm64/regplan.bend`), file mode (`vmm/hostfiles.bend`) |
 | Memory and images | `load` `read` `write` `file_size` `zero_ram` `inflate_ram` `inflate_disk` `flash` `fw_load` | copies files into guest RAM; inflates gzip and deflate | whether to inflate (`boot/image.bend`), where things go (`vmm/layout.bend`), whether firmware fits (`Layout.flash_fits`) |
 | Disks | `disk_open_with` `disk_err` `disk_read` `disk_write` `disk_copy` `disk_short` `disk_mark` `disk_xcopy` `disk_alloc` `disk_flush` `disk_size` `disk_status` | moves bytes between images and guest memory; opens and locks images | how each use opens and locks (`disk/access.bend`), read-only fallback, qcow2 (`src/disk`) |
@@ -176,6 +176,7 @@ row but the decisions listed as moved above.
 | `resume` | `hvf_resume_run` (3657) | host/vcpu.bend, host/platform/{hvf,kvm}.bend | dedicated workers, ABI bindings | 1, 5 | check-host boot and SMP; model: tests/handoff.bend | exit, guest mmio-exit | C; blocked: toolchain |
 | `pause_state` | `hvf_pause_state_run` (3673) | host/vcpu.bend, host/platform/{hvf,kvm}.bend | dedicated workers, ABI bindings | 1, 5 | check-host boot and SMP; model: tests/handoff.bend | exit, guest mmio-exit | C; blocked: toolchain |
 | `irq` | `hvf_irq_run` (1481) | host/vcpu.bend, host/platform/{hvf,kvm}.bend | dedicated workers, ABI bindings | 1, 5 | check-host boot and SMP; model: tests/handoff.bend | exit, guest mmio-exit | C; blocked: toolchain |
+| `gic_route` | `hvf_gic_route_run` (2364) | host/main.bend (`interp`, `irq_route`) | ABI bindings | 1, 5 | check-host 5t | 9p and disk reads from vCPU 1 | C writes the distributor register Bend names (an SPI's GICD_IROUTER: the vCPU whose exit raised it, `Rt.Route.target`); a no-op on KVM, which writes vGIC registers only while no vCPU runs (2026-11-24) |
 | `snap_plans` | `hvf_snap_plans_run` (2221) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
 | `snap_save` | `hvf_snap_save_run` (3758) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
 | `snap_commit` | `hvf_snap_commit_run` (3852) | host/snapshot.bend | dedicated workers (registers), packed mappings (RAM) | 3 | check-host snapshot and restore | bench.sh snapshot-save, boot-restore | C runs the Bend plans; blocked: workers |
