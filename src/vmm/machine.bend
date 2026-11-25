@@ -1054,7 +1054,7 @@ def Machine.pack_of(devs: +List<D.Dev>) -> Maybe<&2, Pk.Pack>:
     case d <> t:
       Machine.pack.first(D.Dev.pack_of(d), Machine.pack_of(t))
 
-# The machine's pack (--disk NAME:pack), if it has one.
+# The machine's pack (--pack NAME), if it has one.
 def Machine.pack(m: Machine) -> Maybe<&2, Pk.Pack>:
   match m:
     case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:

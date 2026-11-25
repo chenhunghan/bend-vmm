@@ -87,7 +87,7 @@ type DevKind is Data:
   # (--balloon auto,max=PCT; BalloonKind{True{}} holds at most half).
   BalloonMaxKind{pct: U32}
   # A pack (src/disk/pack.bend): a read-only disk of host files that grows
-  # while the VM runs (--disk NAME:pack; pack add, pack drop).
+  # while the VM runs (--pack NAME; pack add, pack drop).
   PackKind{pack: Pk.Pack}
 
 # The per-kind state of a device.

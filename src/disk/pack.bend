@@ -508,7 +508,7 @@ def Pack.json(p: Pack) -> String:
 
 # Control replies (pack add, pack drop).
 def Pack.no_pack() -> String:
-  "error: no pack (start the VM with --disk NAME:pack)"
+  "error: no pack (start the VM with --pack NAME)"
 
 def Pack.added(+off: U.U64, +len: U.U64) -> String:
   Pack.dec(off) ++ " " ++ Pack.dec(len)
