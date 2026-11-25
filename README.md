@@ -151,7 +151,7 @@ Management: on the console, `Ctrl-A p` pauses or resumes, `Ctrl-A s` writes
 `./bend-vmm.snap`, `Ctrl-A x` quits, `Ctrl-A h` lists the keys. Over
 `--control`: `echo pause | nc -U SOCK` (also `resume`, `status`,
 `snapshot PATH`, `hibernate PATH`, `status json` (`{"state":"running"}`), `balloon MiB|auto`, `net` (the NAT's connections and flow state),
-`pack add PATH` and `pack drop OFFSET` (with `--pack`, below),
+`pack add PATH`, `pack drop OFFSET` and `pack list` (with `--pack`, below),
 `powerdown` (presses the guest's power button), `quit`;
 with `--display`, `screendump PATH` writes the
 screen as a PPM, `type TEXT` types on the virtio keyboard (`\n` is Return),
@@ -261,7 +261,7 @@ the disk can never show one file's bytes for another; the disk never
 shrinks. Files are opened on demand into 32 host descriptors (entry n in
 slot n mod 32), and a file opened again must be the one added (device,
 inode, size, modification time): one changed since reads as an I/O error.
-`status json` lists the pack (`"pack":{"name":…,"size":…,"entries":[{"offset":…,"length":…,"path":…,"live":…}]}`).
+`status json` lists the pack (`"pack":{"name":…,"size":…,"entries":[{"offset":…,"length":…,"path":…,"live":…}]}`), and `pack list` answers that object alone, on one line, at a fraction of status json's cost.
 A snapshot or hibernate keeps the table; a restore opens every live file
 again and fails, naming it, when one is missing or changed. Reading all of
 a 96 MiB squashfs layer's files (337 MB) cold, the reader on vCPU 1:
@@ -396,8 +396,8 @@ comments); `bend-vmm --help` lists the commands.
 ## As a library
 
 `main.bend` at the repository's root is a BendHub package (MIT):
-`import 0x2bd5a34a6e8be8eb2ccde942133379fd/main.bend as V` (bend-vmm as of
-9b7dda8, x86_64 guests on KVM, per-vCPU exit counts in status json, host file calls (Fs), tagged read-only and meta shares with inode caps, LAN TSO, hibernate (in place on Linux; status json says hibernated), --balloon auto,max=PCT, EFI zboot kernels, device interrupts on the vCPU that issued the request (macOS), --pack disks, a guest reset after hibernate and resume; each publish of a change has a new hash), then `V.Vmm.run(prog, flags)` runs the VMM inside another Bend
+`import 0x2324e729258ea5021b37b97947af4c3f/main.bend as V` (bend-vmm as of
+f2a7986, x86_64 guests on KVM, per-vCPU exit counts in status json, host file calls (Fs), tagged read-only and meta shares with inode caps, LAN TSO, hibernate (in place on Linux; status json says hibernated), --balloon auto,max=PCT, EFI zboot kernels, device interrupts on the vCPU that issued the request (macOS), --pack disks, a guest reset after hibernate and resume, pack list; each publish of a change has a new hash), then `V.Vmm.run(prog, flags)` runs the VMM inside another Bend
 program: `prog` is how that program starts the VMM again (on a guest reset,
 and in a snapshot's saved command line), e.g. `["vk8s", "vmm"]`, and `flags`
 are the options above. One VM per process (the host layer's state is the
