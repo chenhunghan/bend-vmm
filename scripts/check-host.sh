@@ -717,8 +717,9 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
     [ "$(head -2 <<<"$sums" | grep -c "^$want ")" = 2 ] && grn "ok: qcow2 reads (a raw backing file; compressed clusters)" || { red "failed: qcow2 reads"; grep -a -v sysreg <<<"$out" | tail -8; fail=1; }
     after=$(tail -3 <<<"$sums")
     ok=1
-    for d in a b c; do
-      f=$(case $d in a) echo over ;; b) echo comp ;; c) echo fresh ;; esac)
+    # (pairs, not a case in $(...): macOS's bash 3.2 cannot parse that)
+    for df in a:over b:comp c:fresh; do
+      d=${df%%:*}; f=${df#*:}
       qemu-img check -q "$t/$f.qcow2" || ok=0
       qemu-img convert -O raw "$t/$f.qcow2" "$t/$f.raw"
       got=$(python3 -c 'import hashlib, sys; print(hashlib.md5(open(sys.argv[1], "rb").read()).hexdigest())' "$t/$f.raw")

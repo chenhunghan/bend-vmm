@@ -20,6 +20,11 @@ provision:
     #!/bin/bash
     set -eux -o pipefail
     dpkg -s libx11-dev >/dev/null 2>&1 || { apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y clang lld zlib1g-dev libx11-dev make git curl python3 zstd binutils rsync; }
+    # a udev rule, not only a chmod: udev sets /dev/kvm back to 0660 root:kvm
+    # after a boot's provisioning has run
+    echo 'KERNEL=="kvm", MODE="0666"' > /etc/udev/rules.d/99-bend-kvm.rules
+    udevadm control --reload || true
+    udevadm trigger --name-match=kvm || true
     chmod 666 /dev/kvm || true
 - mode: user
   script: |
