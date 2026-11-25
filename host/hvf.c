@@ -34,6 +34,7 @@
 #include <mach/mach_vm.h>
 #include <mach-o/dyld.h>
 #include <sys/clonefile.h>
+#include <libproc.h>
 #else
 #include <linux/kvm.h>
 #include <linux/fs.h>
@@ -2044,6 +2045,8 @@ Term hvf_exe_path_run(Env e, Term* f, IoWork* w) {
 // What a reset runs (Hvf.set_exec: Bend picks it, Files.exec_path).
 static char* hvf_exec;
 
+static void hvf_reexec_release(void);
+
 // Hvf.set_exec(path) -> U32: the program Hvf.reexec runs. 0.
 Term hvf_set_exec_run(Env e, Term* f, IoWork* w) {
   u64 n;
@@ -2067,6 +2070,7 @@ Term hvf_reexec_run(Env e, Term* f, IoWork* w) {
   argv[argc] = NULL;
   int ok = argc > 0 && hvf_exec && hvf_exec[0];
   if (ok) {
+    hvf_reexec_release();
     execv(hvf_exec, argv);
   }
   int err = ok ? errno : ENOENT;
@@ -5936,7 +5940,8 @@ Term hvf_lan_release_run(Env e, Term* f, IoWork* w) {
 
 #include <sys/un.h>
 
-static int hvf_ctl_fd = -1;
+static int  hvf_ctl_fd = -1;
+static char hvf_ctl_path[1024]; // its socket's path (hvf_reexec_release removes it)
 static int hvf_ctl_client = -1;
 
 // Hvf.ctl_listen(path, mode) -> U32: listens on path, which Bend found
@@ -5966,6 +5971,7 @@ Term hvf_ctl_listen_run(Env e, Term* f, IoWork* w) {
   }
   chmod(a.sun_path, (mode_t)(u32)f[1]); // Files.private: this user alone
   fcntl(fd, F_SETFL, O_NONBLOCK);
+  snprintf(hvf_ctl_path, sizeof hvf_ctl_path, "%s", a.sun_path);
   hvf_ctl_fd = fd;
   return (Term)0;
 }
@@ -6363,6 +6369,43 @@ Term hvf_fwd_accept_run(Env e, Term* f, IoWork* w) {
   }
   w->made = idx;
   return hvf_fwd_accept_more(e, w);
+}
+
+// Before a reset's exec, every descriptor past stderr is closed here, the
+// Unix sockets' files removed first (as an exit removes them). Close-on-exec
+// alone is not enough on macOS: the old image's threads end after the new
+// image starts, and one still parked on a descriptor (a LAN read, a disk
+// read) keeps its file open meanwhile, so the new image found its own LAN
+// socket alive (EADDRINUSE) and its writable disk locked. A long teardown
+// makes that window wide (bend-vk8s: a 2 GiB guest after a hibernate, its
+// RAM a file mapping). close() waits for such a thread to let go.
+static void hvf_reexec_release(void) {
+  if (hvf_lan.fd >= 0) {
+    hvf_lan_leave();
+  }
+  if (hvf_ctl_fd >= 0) {
+    unlink(hvf_ctl_path);
+  }
+  if (hvf_vs_fd >= 0) {
+    unlink(hvf_vs_base);
+  }
+  struct rlimit r;
+  int           top = getrlimit(RLIMIT_NOFILE, &r) == 0 && r.rlim_cur < 65536 ? (int)r.rlim_cur : 65536;
+#ifdef __APPLE__
+  struct proc_fdinfo fds[4096];
+  int                k = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, sizeof fds);
+  if (k > 0 && k < (int)sizeof fds) {
+    for (int i = 0; i < k / (int)PROC_PIDLISTFD_SIZE; i++) {
+      if (fds[i].proc_fd > 2) {
+        close(fds[i].proc_fd);
+      }
+    }
+    return;
+  }
+#endif
+  for (int fd = 3; fd < top; fd++) {
+    close(fd);
+  }
 }
 
 // UEFI flash

@@ -14,7 +14,9 @@ continues it with every byte (a checksum made in the guest). 20 MiB more,
 then hibernate again: only what changed is written (under 2 s; macOS
 clones the last file, Linux updates it in place), and the
 memory falls again. After that a snapshot still saves and restores, and
-the VM powers off with no file left behind.
+the VM powers off with no file left behind. Last, a guest on a LAN with most
+of its RAM written (2 GiB on macOS) is hibernated, resumed and reset: it
+boots again in the same VMM.
 """
 import os, re, socket, subprocess, sys, time
 
@@ -152,6 +154,41 @@ try:
     v.p.wait(30 * slow)
 except subprocess.TimeoutExpired:
     v.p.kill()
+
+# A guest reset after a hibernate and a resume (bend-vk8s: a cluster that
+# slept, then rebooted): the reset starts the VMM again (exec) while the old
+# image, its RAM a file mapping, is still being torn down; the new one must
+# get the LAN socket, the control socket, the forward's port and the
+# writable disk's lock back (they came back held: "cannot join the LAN").
+# Most of RAM is dirtied first, which makes that teardown long (macOS; a
+# Linux exec ends the old threads first, and CI's emulated host is small).
+big = 2048 if mac else 1024
+v = Vm(["--mem", str(big), "--cpus", "2", "--kernel", K, "--initrd", I, "--disk", disk, "--control", sock,
+        "--lan", os.path.join(d, "lan") + ",ip=10.10.0.2/24", "--forward", "127.0.0.1:%d:22" % (20000 + os.getpid() % 20000),
+        "--cmdline", C])
+check("boot (%d MiB, --lan)" % big, v.wait("busybox shell", 90 if slow < 4 else 60))
+v.run("mkdir -p /t; mount -t tmpfs -o size=%dm none /t; dd if=/dev/urandom of=/t/a.bin bs=1048576 count=%d 2>/dev/null" % (big * 4 // 5, 1400 if mac else 200), 300)
+check("hibernate, resume", ctl("hibernate " + hib) == "hibernated" and ctl("resume") == "running")
+v.out = b""
+v.p.stdin.write(b"reboot -f\n")
+v.p.stdin.flush()
+back = v.wait("busybox shell", 90 if slow < 4 else 60)
+tail = v.out.decode(errors="replace")[-400:]
+check("a guest reset after hibernate and resume boots again", back and b"bend-vmm: reset" in v.out, tail)
+try:
+    st = ctl("status", 10) if v.p.poll() is None else "exited %s" % v.p.poll()
+except OSError as e:
+    st = str(e)
+check("the VMM is still there, answering on its control socket", st == "running", (st, tail))
+try:
+    v.p.stdin.write(b"poweroff -f\n")
+    v.p.stdin.flush()
+    v.p.wait(30 * slow)
+except BrokenPipeError:
+    pass
+except subprocess.TimeoutExpired:
+    v.p.kill()
+    v.p.wait()
 
 print("HIBERNATE %s" % ("OK" if not fails else "FAILED: " + ", ".join(fails)), flush=True)
 sys.exit(1 if fails else 0)
