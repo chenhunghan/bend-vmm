@@ -59,10 +59,19 @@ class Vm:
         return None
     def end(self):
         self.type("poweroff -f\n")
+        self.gone()
+    # Waits for the VMM to exit (after quit or poweroff), so the next one
+    # finds the disk and the control socket free; a fixed pause was not
+    # always enough on an emulated host (CI 45494539407: the last restore
+    # read nothing).
+    def gone(self):
         try:
             self.p.wait(30 * slow)
         except subprocess.TimeoutExpired:
             self.p.kill()
+            self.p.wait()
+    def tail(self):
+        return self.out.decode(errors="replace").replace("\r", "")[-300:]
 
 fails = []
 def check(name, ok, why=""):
@@ -76,7 +85,7 @@ vm = Vm(kernel + ["--disk", disk, "--control", sock, "--cmdline", os.environ.get
 check("boot", vm.wait("busybox shell", 60))
 vm.mark("A"); r1 = ctl("snapshot " + os.path.join(d, "s1.snap"))
 vm.mark("B"); r2 = ctl("snapshot " + os.path.join(d, "s2.snap"))
-vm.mark("C"); ctl("quit"); time.sleep(1 * slow)
+vm.mark("C"); ctl("quit"); vm.gone()
 check("snapshots saved", r1 == "saved" and r2 == "saved", "%s %s" % (r1, r2))
 s1copies = sorted(glob.glob(os.path.join(d, "s1.snap.*.disk0")))
 check("each snapshot keeps a copy of the disk", len(s1copies) == 1 and len(glob.glob(os.path.join(d, "s2.snap.*.disk0"))) == 1, str(os.listdir(d)))
@@ -85,7 +94,7 @@ for snap, want in (("s1", "MARK-A"), ("s2", "MARK-B"), ("s1", "MARK-A")):
     ok = vm.wait("restored", 30)
     vm.type("\n")
     got = vm.read(snap)
-    check("restore %s reads %s" % (snap, want), ok and got == want, "got %r" % got)
+    check("restore %s reads %s" % (snap, want), ok and got == want, "got %r, restored %s: %s" % (got, ok, vm.tail()))
     if snap == "s2":
         vm.end()
     elif snap == "s1" and want == "MARK-A" and not getattr(check, "again", False):
@@ -95,12 +104,12 @@ for snap, want in (("s1", "MARK-A"), ("s2", "MARK-B"), ("s1", "MARK-A")):
         # the last: snapshot over s1, which replaces s1's copies
         vm.mark("D")
         r = ctl("snapshot " + os.path.join(d, "s1.snap"))
-        ctl("quit"); time.sleep(1 * slow)
+        ctl("quit"); vm.gone()
         now = sorted(glob.glob(os.path.join(d, "s1.snap.*.disk0")))
         check("a snapshot over s1 replaces its copies", r == "saved" and len(now) == 1 and now != s1copies, "%s %s -> %s" % (r, s1copies, now))
 vm = Vm(["--restore", os.path.join(d, "s1.snap"), "--disk", disk, "--control", sock])
-vm.wait("restored", 30); vm.type("\n")
+ok = vm.wait("restored", 30); vm.type("\n")
 got = vm.read("s1b"); vm.end()
-check("restore of the new s1 reads MARK-D", got == "MARK-D", "got %r" % got)
+check("restore of the new s1 reads MARK-D", ok and got == "MARK-D", "got %r, restored %s: %s" % (got, ok, vm.tail()))
 check("no temporary files left", not glob.glob(os.path.join(d, "*bend-vmm-tmp")), str(os.listdir(d)))
 sys.exit(1 if fails else 0)

@@ -67,7 +67,9 @@ for m in netfs 9pnet 9pnet_virtio 9p rtc-pl031; do mods="$mods out/guest/modules
 python3 scripts/mkinitramfs.py "$l1/root" "$l1/initrd.cpio" out/guest/busybox:bin/busybox $mods
 
 log=$l1/console.log
-timeout "${L1_TIMEOUT:-8400}" qemu-system-aarch64 \
+# 200 min: green runs took 101-135 min in November 2026, and the old 140
+# (8400 s) cut the last sections off twice (qcow2, UEFI) in slow runs
+timeout "${L1_TIMEOUT:-12000}" qemu-system-aarch64 \
   -machine virt,virtualization=on,gic-version=3 -accel tcg,thread=multi,tb-size=1024 \
   -cpu max,pauth-impdef=on -smp "$cpus" -m "$mem" -nographic -no-reboot \
   -kernel out/guest/Image -initrd "$l1/initrd.cpio" -append "console=ttyAMA0 rdinit=/init quiet" \

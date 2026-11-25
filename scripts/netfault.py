@@ -27,7 +27,12 @@ def listen(port):
 def main(argv):
     mode, port, n, out = argv[0], int(argv[1]), int(argv[2]), argv[3]
     s = listen(port)
-    s.settimeout(120)
+    # no accept timeout: check-host starts these before the VM boots and
+    # kills them when its drive ends. A fixed one (it was 120 s) expired
+    # under emulated EL2, where the boot and the slow reader before the drop
+    # took longer: the helper died unaccepted, and 5d failed with "connection
+    # reset ()" (CI 44704715794, 44723305677: 145 s and 148 s into 5d).
+    s.settimeout(None)
     if mode == "slow":
         c, _ = s.accept()
         open(out + ".start", "w").close()  # (check-host takes the VMM's memory now)

@@ -70,12 +70,13 @@ jobs:
   host-linux:
     # The host layer (KVM backend) builds on Linux arm64 and boots guests on
     # KVM. Hosted runners have no /dev/kvm, so scripts/ci/emulated-kvm.sh
-    # runs the guest check on a QEMU-emulated arm64 CPU with EL2 (slow, about
-    # an hour). With a KVM runner (host-linux-kvm) pushes to main use that
-    # instead; pull requests still come here.
+    # runs the guest check on a QEMU-emulated arm64 CPU with EL2 (slow: 100
+    # to 135 minutes as of 2026-11; the emulated host is stopped at 200, see
+    # scripts/ci/emulated-kvm.sh). With a KVM runner (host-linux-kvm) pushes
+    # to main use that instead; pull requests still come here.
     if: vars.KVM_RUNNER != 'true' || github.event_name == 'pull_request'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 150
+    timeout-minutes: 215
     env:
       BEND_VERSION: 2.0.40
       BEND_SHA_LINUX_ARM64: 2f42a6fa34ecdaa71ae105e5fa734f9a07e129d333e45448ab6d2ff03a837570
