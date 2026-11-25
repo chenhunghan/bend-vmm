@@ -2643,6 +2643,8 @@ def x86.unsupported(o: Op.Opts) -> String:
     +got : Maybe<&2, M.Machine> = Snap.Snap.decode(ws)
     +kinds : +List<D.DevKind> <- devices(o, has_balloon(machine_kinds(got)), has_auto_balloon(machine_kinds(got)), balloon_pct(machine_kinds(got)), pack_kinds(machine_kinds(got)))
     die_if(Bool.not(words_eq(kinds_words(machine_kinds(got)), kinds_words(kinds))), "the snapshot's devices differ from the ones opened now (a disk changed size or format?)")
+    +bad : String <- pack_check(got)
+    die_if(Bool.not(String.is_empty(bad)), bad)
     x86.restore.machine(got, o)
 
 @unsafe def restore.arch(x86: Bool, +o: Op.Opts) -> IO(Unit):
