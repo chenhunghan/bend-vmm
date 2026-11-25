@@ -164,3 +164,12 @@ law control.with_hibernated:
 
 law control.with_hibernated_not:
   {C.Ctl.with_hibernated("{\"state\":\"running\"}", False{}) == "{\"state\":\"running\",\"hibernated\":false}" : String}
+
+# Proposed: pack list (bend-vk8s: the layer filler reads the pack's table
+# without status json's cost): the table as one line of JSON; anything after
+# list gets the pack's usage.
+law control.pack_list:
+  {C.Ctl.parse("pack list") == C.CPackList{} : C.Cmd}
+
+law control.pack_list_extra:
+  {C.Ctl.parse("pack list all") == C.CBad{"usage: pack add PATH, pack drop OFFSET, or pack list"} : C.Cmd}

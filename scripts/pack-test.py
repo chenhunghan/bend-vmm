@@ -4,7 +4,8 @@ with --pack NAME finds the device by its serial, empty; files added over the
 control socket appear at 1 MiB-aligned offsets and read back byte for byte
 (zeros past a file's end inside its slot, a read across two entries split
 right), one is added while another is held open, a dropped entry's slot
-fails to read and is never handed out again, and a snapshot restores the
+fails to read and is never handed out again, pack list answers the table
+(status json's "pack") with dead entries marked, and a snapshot restores the
 table (a file changed since fails the restore).
 
 usage: pack-test.py VMM DIR [SLOW]      (DIR: a fresh, empty directory)
@@ -133,6 +134,8 @@ try:
 except Exception as e:
     ok, st = False, "%s: %s" % (e, st)
 check("status json lists the pack", ok, st)
+pl = ctl("pack list")
+check("pack list answers the same table on one line", pl == json.dumps(json.loads(st)["pack"], separators=(",", ":")) if ok else False, pl)
 
 check("pack add of a missing file is an error", ctl("pack add " + os.path.join(d, "none.img")).startswith("error: cannot open"))
 check("pack add of a directory is an error", ctl("pack add " + d).startswith("error: cannot open"))
@@ -144,6 +147,12 @@ check("the other entry still reads", guest_md5(4 * MIB, MIB) == md5(files["b.img
 check("a second drop is an error", ctl("pack drop 0").startswith("error: no live entry"))
 check("a drop inside an entry is an error", ctl("pack drop 4096").startswith("error: no live entry"))
 check("a malformed command gets the usage", ctl("pack drop x").startswith("usage: pack"))
+try:
+    live = [(e["offset"], e["live"]) for e in json.loads(ctl("pack list"))["entries"]]
+except Exception as e:
+    live = str(e)
+check("pack list marks a dropped entry dead", live == [(0, False), (4 * MIB, True)], live)
+check("pack list with more words gets the usage", ctl("pack list all").startswith("usage: pack"))
 r = ctl("pack add " + C)
 check("a new file never takes a dropped slot", r == "%d 100" % (5 * MIB), r)
 check("the capacity never shrinks", size_is(6 * MIB // 512))

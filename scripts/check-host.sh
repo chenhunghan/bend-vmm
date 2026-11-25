@@ -507,11 +507,11 @@ if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ] && [ "$host" = Darwin-ar
 fi
 
 if [ -f host/main.bend ] && [ "${SKIP_GUEST:-0}" != 1 ]; then
-  echo "== 5u. a pack disk (--pack NAME; pack add, pack drop): host files as one read-only disk that grows"
+  echo "== 5u. a pack disk (--pack NAME; pack add, pack drop, pack list): host files as one read-only disk that grows"
   # scripts/pack-test.py lists the checks (src/disk/pack.bend)
   t=$(mktemp -d)
   out=$(BEND_GUEST_KERNEL=$GIMG BEND_GUEST_INITRD=$GI BEND_GUEST_CONSOLE=$GCON python3 scripts/pack-test.py ./out/bend-vmm "$t" "$SLOW" 2>&1)
-  if [ $? = 0 ]; then grn "ok: a pack disk ($(grep -c '^ok: ' <<<"$out") checks: found by serial, adds read back byte for byte, zeros past a file, a read across entries, drop fails and is never reused, snapshot and restore, a changed file fails the restore)"; else red "failed: pack disk"; grep -v '^ok:' <<<"$out" | tail -6; fail=1; fi
+  if [ $? = 0 ]; then grn "ok: a pack disk ($(grep -c '^ok: ' <<<"$out") checks: found by serial, adds read back byte for byte, zeros past a file, a read across entries, drop fails and is never reused, pack list, snapshot and restore, a changed file fails the restore)"; else red "failed: pack disk"; grep -v '^ok:' <<<"$out" | tail -6; fail=1; fi
   rm -rf "$t"
 fi
 

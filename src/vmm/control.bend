@@ -37,9 +37,12 @@ type Cmd is Data:
   # there is dead (src/disk/pack.bend).
   CPackAdd{path: String}
   CPackDrop{off: U.U64}
+  # pack list: the pack's table as one line of JSON, the object status json
+  # carries as "pack" (bend-vk8s: its filler asks without status json's cost).
+  CPackList{}
 
 def Ctl.usage() -> String:
-  "unknown command (pause, resume, snapshot PATH, hibernate PATH, screendump PATH, type TEXT, pointer X Y, powerdown, net, status [json], balloon MiB|auto, pack add PATH|drop OFFSET, quit)"
+  "unknown command (pause, resume, snapshot PATH, hibernate PATH, screendump PATH, type TEXT, pointer X Y, powerdown, net, status [json], balloon MiB|auto, pack add PATH|drop OFFSET|list, quit)"
 
 def Ctl.pointer_usage() -> String:
   "usage: pointer X Y (0..32767)"
@@ -157,7 +160,7 @@ def Ctl.status_json(paused: Bool) -> String:
   "{\"state\":\"" ++ Bool.pick(String, paused, "paused", "running") ++ "\"}"
 
 def Ctl.pack_usage() -> String:
-  "usage: pack add PATH, or pack drop OFFSET"
+  "usage: pack add PATH, pack drop OFFSET, or pack list"
 
 def Ctl.pack_drop(m: Maybe<&2, U.U64>) -> Cmd:
   match m:
@@ -166,13 +169,14 @@ def Ctl.pack_drop(m: Maybe<&2, U.U64>) -> Cmd:
     case None{}:
       CBad{Ctl.pack_usage()}
 
-# pack add PATH, pack drop OFFSET (decimal bytes).
+# pack add PATH, pack drop OFFSET (decimal bytes), pack list.
 def Ctl.pack(+arg: String) -> Cmd:
   +parts = String.split(arg, ' ')
   +sub = Maybe.default(&2, String, List.head(&2, String, parts), "")
   +rest = String.join(List.drop(&2, String, parts, 1n), " ")
   Bool.pick(Cmd, String.eq(sub, "add") && Bool.not(String.is_empty(rest)), CPackAdd{rest},
-    Bool.pick(Cmd, String.eq(sub, "drop"), Ctl.pack_drop(Pk.Pack.parse(rest)), CBad{Ctl.pack_usage()}))
+    Bool.pick(Cmd, String.eq(sub, "drop"), Ctl.pack_drop(Pk.Pack.parse(rest)),
+      Bool.pick(Cmd, String.eq(sub, "list") && String.is_empty(rest), CPackList{}, CBad{Ctl.pack_usage()})))
 
 # status json with the pack's table ("pack":{...}) before the closing
 # brace, when the VM has one (pj empty: it has none).

@@ -1043,6 +1043,12 @@ def pack_json(m: Maybe<&2, Pk.Pack>) -> String:
       command.pack(mc, done, m => M.Machine.pack_add(m, path))
     case Ctl.CPackDrop{off}:
       command.pack(mc, done, m => M.Machine.pack_drop(m, off))
+    case Ctl.CPackList{}:
+      do IO<String>:
+        +m : M.Machine <- take(mc)
+        +pj : String = pack_json(M.Machine.pack(m))
+        put(mc, m)
+        return Bool.pick(String, String.is_empty(pj), Pk.Pack.no_pack(), pj)
     case Ctl.CBalloonAuto{}:
       do IO<String>:
         +m0 : M.Machine <- take(mc)
