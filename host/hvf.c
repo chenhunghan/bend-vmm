@@ -2735,6 +2735,7 @@ Term hvf_disk_open_with_run(Env e, Term* f, IoWork* w) {
   return hvf_disk_open_as(e, f[0], (u32)f[1]);
 }
 
+
 // A failed host read or write of each image since the guest's device last
 // asked (Hvf.disk_status): virtio-blk answers that request with IOERR, so a
 // full host disk or an I/O error never passes for success.
@@ -2905,6 +2906,96 @@ static int64_t hvf_iov_io(int fd, int out, off_t off, uint8_t** hva, u64* len, i
     }
   }
   return done;
+}
+
+// A pack's files (src/disk/pack.bend): descriptor slots, each holding one
+// entry's file under the key Bend gave it (0: none). Bend picks the slot,
+// decides whether a reopened file is the one it added, and splits reads;
+// C opens, reports what fstat says, and moves bytes.
+#define HVF_PACK_SLOTS 64
+static struct {
+  uint32_t key;
+  int      fd;
+} hvf_pack[HVF_PACK_SLOTS];
+
+static void hvf_pack_drop(u32 slot) {
+  if (hvf_pack[slot].key != 0) {
+    close(hvf_pack[slot].fd);
+    hvf_pack[slot].key = 0;
+  }
+}
+
+// Hvf.pack_open(slot, key, path, flags) -> List<U32>: opens path read-only
+// into slot as key (the slot's last file closed first): [0, dev hi, lo, ino
+// hi, lo, size hi, lo, mtime hi, lo, mtime ns], or [errno]. As --disk :ro
+// (src/disk/access.bend's flags): a shared lock that a writer's refuses, and
+// with flag 4 a regular file only (never blocks on a FIFO: O_NONBLOCK).
+Term hvf_pack_open_run(Env e, Term* f, IoWork* w) {
+  u32   slot = (u32)f[0], key = (u32)f[1], flags = (u32)f[3];
+  u64   n;
+  char* path = io_cstr(e, f[2], &n);
+  int   err  = 0;
+  struct stat st;
+  int   fd = slot < HVF_PACK_SLOTS && key != 0 ? open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK) : (errno = EINVAL, -1);
+  free(path);
+  if (slot < HVF_PACK_SLOTS) {
+    hvf_pack_drop(slot);
+  }
+  if (fd < 0) {
+    err = errno;
+  } else if (fstat(fd, &st) != 0) {
+    err = errno;
+  } else if ((flags & 4) && !S_ISREG(st.st_mode)) {
+    err = EINVAL;
+  } else if (flock(fd, LOCK_SH | LOCK_NB) != 0 && errno == EWOULDBLOCK) {
+    err = EBUSY;
+  }
+  if (err) {
+    if (fd >= 0) {
+      close(fd);
+    }
+    uint32_t ws[1] = {(uint32_t)err};
+    return hvf_words(e, ws, 1);
+  }
+  hvf_pack[slot].key = key;
+  hvf_pack[slot].fd  = fd;
+#ifdef __APPLE__
+  uint64_t ms = (uint64_t)st.st_mtimespec.tv_sec, mn = (uint64_t)st.st_mtimespec.tv_nsec;
+#else
+  uint64_t ms = (uint64_t)st.st_mtim.tv_sec, mn = (uint64_t)st.st_mtim.tv_nsec;
+#endif
+  uint64_t dev = (uint64_t)st.st_dev, ino = (uint64_t)st.st_ino, size = (uint64_t)st.st_size;
+  uint32_t ws[10] = {0, (uint32_t)(dev >> 32), (uint32_t)dev, (uint32_t)(ino >> 32), (uint32_t)ino,
+                     (uint32_t)(size >> 32), (uint32_t)size, (uint32_t)(ms >> 32), (uint32_t)ms, (uint32_t)mn};
+  return hvf_words(e, ws, 10);
+}
+
+// Hvf.pack_read(slot, key, off_hi, off_lo, iovs) -> U32: reads the file slot
+// holds into the pieces of guest memory iovs (as Hvf.disk_copy takes them)
+// from the offset, stopping at its end: the bytes moved; 0xFFFFFFFF when the
+// slot does not hold key, 0xFFFFFFFE when the read failed.
+Term hvf_pack_read_run(Env e, Term* f, IoWork* w) {
+  static uint8_t* hva[HVF_MAX_IOVS];
+  static u64      len[HVF_MAX_IOVS];
+  u32             slot = (u32)f[0], key = (u32)f[1];
+  if (slot >= HVF_PACK_SLOTS || key == 0 || hvf_pack[slot].key != key) {
+    return (Term)0xFFFFFFFFu;
+  }
+  u64   nb;
+  char* b = io_cbuf(e, f[4], &nb, CID(Con));
+  int   n = hvf_iovs(b, nb, hva, len, HVF_MAX_IOVS);
+  free(b);
+  int64_t k = n < 0 ? -1 : hvf_iov_io(hvf_pack[slot].fd, 0, (off_t)hvf_u64(f[2], f[3]), hva, len, n, 0);
+  return (Term)(k < 0 || k >= 0xFFFFFFFEll ? 0xFFFFFFFEu : (uint32_t)k);
+}
+
+// Hvf.pack_close(slot, key) -> U32: closes the file slot holds when it holds key.
+Term hvf_pack_close_run(Env e, Term* f, IoWork* w) {
+  u32 slot = (u32)f[0], key = (u32)f[1];
+  if (slot < HVF_PACK_SLOTS && key != 0 && hvf_pack[slot].key == key) {
+    hvf_pack_drop(slot);
+  }
+  return (Term)0;
 }
 
 // Hvf.disk_copy(disk, dir, off_hi, off_lo, iovs) -> U32: moves bytes between
@@ -7726,6 +7817,15 @@ static void __attribute__((constructor)) hvf_use(void) {
 #endif
 #ifdef CID(Hvf.irq)
   io_eff(CID(Hvf.irq), hvf_irq_run);
+#endif
+#ifdef CID(Hvf.pack_open)
+  io_eff(CID(Hvf.pack_open), hvf_pack_open_run);
+#endif
+#ifdef CID(Hvf.pack_read)
+  io_eff(CID(Hvf.pack_read), hvf_pack_read_run);
+#endif
+#ifdef CID(Hvf.pack_close)
+  io_eff(CID(Hvf.pack_close), hvf_pack_close_run);
 #endif
 #ifdef CID(Hvf.gic_route)
   io_eff(CID(Hvf.gic_route), hvf_gic_route_run);

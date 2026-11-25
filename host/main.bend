@@ -232,6 +232,18 @@ def irq_route(m: Maybe<&2, U32>, +intid: U32) -> IO(U32):
       do IO<A>:
         _ : U32 <- H.Host.disk_write(d, off, bs)
         interp(cpu, mc, done, A, next)
+    case V.VmPackOpen{slot, key, path, k}:
+      do IO<A>:
+        ws : +List<U32> <- H.Hvf.pack_open(slot, key, path, Acc.Access.flags(Acc.Backing{}))
+        interp(cpu, mc, done, A, k(ws))
+    case V.VmPackRead{slot, key, +off, iovs, k}:
+      do IO<A>:
+        got : U32 <- H.Hvf.pack_read(slot, key, U.U64.hi(off), U.U64.lo(off), H.Host.iovs(iovs))
+        interp(cpu, mc, done, A, k(got))
+    case V.VmPackClose{slot, key, next}:
+      do IO<A>:
+        _ : U32 <- H.Hvf.pack_close(slot, key)
+        interp(cpu, mc, done, A, next)
     case V.VmDiskToRam{d, off, iovs, next}:
       do IO<A>:
         _ : U32 <- H.Host.disk_copy(d, 0, off, iovs)

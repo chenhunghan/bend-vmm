@@ -75,3 +75,4 @@ import ./proofs/x86pio.bend as Proofs_x86pio
 import ./proofs/x86acpi.bend as Proofs_x86acpi
 import ./proofs/x86boot.bend as Proofs_x86boot
 import ./proofs/irqroute.bend as Proofs_irqroute
+import ./proofs/pack.bend as Proofs_pack

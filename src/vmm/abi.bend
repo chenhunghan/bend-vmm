@@ -305,6 +305,17 @@ type Vm<-A: Type> is Type:
   # (1) or not (0); the ask clears it. The disk ops above answer nothing, so
   # a device asks once its request is done.
   VmDiskStatus{disk: U32, k: U32 -> Vm<A>}
+  # A pack's files (src/disk/pack.bend), in a cache of host descriptor slots
+  # where each holds one entry, named by its key (0: none). Opens path
+  # read-only into slot (a regular file; the slot's last file is closed
+  # first) and keeps it there as key: [0, dev hi, lo, ino hi, lo, size hi,
+  # lo, mtime hi, lo, mtime ns], or [errno].
+  VmPackOpen{slot: U32, key: U32, path: String, k: +List<U32> -> Vm<A>}
+  # Reads the file slot holds into the memory iovs from offset: the bytes it
+  # moved, or 4294967295 when the slot does not hold key.
+  VmPackRead{slot: U32, key: U32, offset: U.U64, iovs: +List<Iov>, k: U32 -> Vm<A>}
+  # Closes the file slot holds when it holds key.
+  VmPackClose{slot: U32, key: U32, next: Vm<A>}
 
 # Device code is written in Op, a continuation monad over Vm: its bind needs
 # no recursion, so `do Op<R, A>:` blocks pass Bend's termination check. R is
@@ -398,6 +409,15 @@ def Op.inflate_to_disk(-R: Type, disk: U32, off: U.U64, clen: U32, dst: U32, dof
 
 def Op.disk_status(-R: Type, disk: U32) -> Op<R, U32>:
   Op{k => VmDiskStatus{disk, k}}
+
+def Op.pack_open(-R: Type, slot: U32, key: U32, path: String) -> Op<R, +List<U32>>:
+  Op{k => VmPackOpen{slot, key, path, k}}
+
+def Op.pack_read(-R: Type, slot: U32, key: U32, offset: U.U64, iovs: +List<Iov>) -> Op<R, U32>:
+  Op{k => VmPackRead{slot, key, offset, iovs, k}}
+
+def Op.pack_close(-R: Type, slot: U32, key: U32) -> Op<R, Unit>:
+  Op{k => VmPackClose{slot, key, k(Unit{})}}
 
 def Op.random(-R: Type, len: U32) -> Op<R, +List<U32>>:
   Op{k => VmRandom{len, k}}

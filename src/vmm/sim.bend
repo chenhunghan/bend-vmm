@@ -303,6 +303,15 @@ def Sim.fs_next(s: Sim, sh: U32, op: V.FsOp) -> Sim:
 def Sim.fs_answer(s: Sim, sh: U32, op: V.FsOp) -> V.FsResult:
   Sim.fs_snd(Sim.fs_op(s, sh, op))
 
+# A pack file's bytes as the simulator's host holds them: byte i of the file
+# of key k is (k * 16 + i) mod 256, so a test can predict every one.
+def Sim.pack_bytes(n: Nat, +k: U32, +at: U32) -> +List<U32>:
+  match n:
+    case 0n:
+      []
+    case 1n+m:
+      ((((k * 16 : U32) + at : U32)) .&. 255 : U32) <> Sim.pack_bytes(m, k, (at + 1 : U32))
+
 # Runs a Vm program for at most fuel steps. None when the fuel runs out.
 def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
   match fuel:
@@ -380,6 +389,15 @@ def Sim.run(fuel: Nat, -A: Type, s: Sim, m: V.Vm<A>) -> Maybe<&1, Sim & A>:
         case V.VmDiskCopy{sd, so, dd, doff, +len, next}:
           +s = s
           Sim.run(f, A, Sim.disk_write(s, dd, doff, Sim.fill(Sim.disk_read(s, sd, so, len), len)), next)
+        case V.VmPackOpen{slot, key, path, k}:
+          # the simulator's host has no pack files (ENOENT): a read always
+          # finds its entry's file (Sim.pack_bytes)
+          Sim.run(f, A, s, k([2]))
+        case V.VmPackRead{slot, +key, off, +iovs, k}:
+          +n = V.Iov.total(iovs)
+          Sim.run(f, A, Sim.scatter(iovs, s, Sim.pack_bytes(U32.to_nat(n), key, U.U64.lo(off))), k(n))
+        case V.VmPackClose{slot, key, next}:
+          Sim.run(f, A, s, next)
         case V.VmDiskStatus{+dk, k}:
           # disk 0 never fails; any other has no image, so its ops failed
           Sim.run(f, A, s, k(Bool.pick(U32, U32.is_zero(dk), 0, 1)))

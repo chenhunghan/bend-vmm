@@ -278,6 +278,22 @@ def Hvf.disk_copy(disk: U32, dir: U32, off_hi: U32, off_lo: U32, iovs: +List<U32
   import "./hvf.c"
   import "./hvf.js"
 
+# A pack's files (src/disk/pack.bend): opens path read-only into descriptor
+# slot as key ([0, dev, ino, size, mtime as hi/lo pairs, mtime ns] or
+# [errno]), reads the file slot holds into guest memory (bytes moved;
+# 0xFFFFFFFF: the slot holds another key), closes the slot's file.
+def Hvf.pack_open(slot: U32, key: U32, path: String, flags: U32) -> IO(+List<U32>):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.pack_read(slot: U32, key: U32, off_hi: U32, off_lo: U32, iovs: +List<U32>) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
+def Hvf.pack_close(slot: U32, key: U32) -> IO(U32):
+  import "./hvf.c"
+  import "./hvf.js"
+
 def Hvf.disk_short(disk: U32) -> IO(+List<U32>):
   import "./hvf.c"
   import "./hvf.js"
