@@ -10,6 +10,7 @@ import ../net/nat.bend as Nt
 import ../virtio/device.bend as D
 import ../virtio/input.bend as In
 import ../virtio/balloon.bend as Bl
+import ../disk/pack.bend as Pk
 import ./layout.bend as L
 import ./abi.bend as V
 
@@ -1031,3 +1032,134 @@ def Machine.lan.go(-R: Type, m: Machine, len: U32) -> V.Op<R, Machine>:
 # lines are updated as after a device access.
 def Machine.lan(m: Machine, len: U32) -> V.Vm<Machine>:
   V.Op.finish(Machine, Machine.lan.go(Machine, m, len))
+
+# Packs (src/disk/pack.bend)
+# ==========================
+
+# A control command's machine and its reply.
+type PackDone is Data:
+  PackDone{machine: Machine, reply: String}
+
+def Machine.pack.first(m: Maybe<&2, Pk.Pack>, rest: Maybe<&2, Pk.Pack>) -> Maybe<&2, Pk.Pack>:
+  match m:
+    case None{}:
+      rest
+    case Some{p}:
+      Some{p}
+
+def Machine.pack_of(devs: +List<D.Dev>) -> Maybe<&2, Pk.Pack>:
+  match devs:
+    case Nil{}:
+      None{}
+    case d <> t:
+      Machine.pack.first(D.Dev.pack_of(d), Machine.pack_of(t))
+
+# The machine's pack (--disk NAME:pack), if it has one.
+def Machine.pack(m: Machine) -> Maybe<&2, Pk.Pack>:
+  match m:
+    case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+      Machine.pack_of(devs)
+
+def Machine.devs_pack_add(devs: +List<D.Dev>, +path: String, +id: Pk.PackId) -> +List<D.Dev>:
+  match devs:
+    case Nil{}:
+      []
+    case d <> t:
+      D.Dev.pack_add(d, path, id) <> Machine.devs_pack_add(t, path, id)
+
+def Machine.devs_pack_drop(devs: +List<D.Dev>, +off: U.U64) -> +List<D.Dev>:
+  match devs:
+    case Nil{}:
+      []
+    case d <> t:
+      D.Dev.pack_drop(d, off) <> Machine.devs_pack_drop(t, off)
+
+# After the open: the file is added at off (its slot at the pack's end) and
+# the driver told (config change, then the interrupt lines as after a device
+# access); an open that failed changes nothing.
+def Machine.pack_add.opened(-R: Type, mid: Maybe<&2, Pk.PackId>, m: Machine, +path: String, +errno: U32, +off: U.U64) -> V.Op<R, PackDone>:
+  match mid:
+    case None{}:
+      V.Op.pure(R, PackDone, PackDone{m, Pk.Pack.cannot_open(path, errno)})
+    case Some{+id}:
+      match m:
+        case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+          do V.Op<R, PackDone>:
+            m2 : Machine <- Machine.irqs(R, Machine{p, u, ui, Machine.devs_pack_add(devs, path, id), lines, rt, ri, nt, fl})
+            return PackDone{m2, Pk.Pack.added(off, Pk.PackId.size(id))}
+
+def Machine.pack_add.go(-R: Type, mp: Maybe<&2, Pk.Pack>, m: Machine, +path: String) -> V.Op<R, PackDone>:
+  match mp:
+    case None{}:
+      V.Op.pure(R, PackDone, PackDone{m, Pk.Pack.no_pack()})
+    case Some{+pk}:
+      +n = Pk.Pack.count(pk)
+      do V.Op<R, PackDone>:
+        +ws : +List<U32> <- V.Op.pack_open(R, Pk.Pack.slot_of(n), Pk.Pack.key_of(n), path)
+        Machine.pack_add.opened(R, Pk.Pack.facts(ws), m, path, Pk.Pack.errno(ws), Pk.Pack.next(pk))
+
+# `pack add PATH`: the host opens the file into the new entry's descriptor
+# slot and says what it is; the pack takes it at its end. Reply: "OFFSET
+# LENGTH" in bytes, or an error.
+def Machine.pack_add(+m: Machine, path: String) -> V.Vm<PackDone>:
+  V.Op.finish(PackDone, Machine.pack_add.go(PackDone, Machine.pack(m), m, path))
+
+def Machine.pack_drop.can(-R: Type, can: Bool, m: Machine, +pk: Pk.Pack, +off: U.U64) -> V.Op<R, PackDone>:
+  match can:
+    case False{}:
+      V.Op.pure(R, PackDone, PackDone{m, Pk.Pack.no_entry(off)})
+    case True{}:
+      match m:
+        case Machine{p, u, ui, devs, lines, rt, ri, nt, fl}:
+          +n = Pk.Pack.n_at(pk, off)
+          do V.Op<R, PackDone>:
+            V.Op.pack_close(R, Pk.Pack.slot_of(n), Pk.Pack.key_of(n))
+            return PackDone{Machine{p, u, ui, Machine.devs_pack_drop(devs, off), lines, rt, ri, nt, fl}, "dropped"}
+
+def Machine.pack_drop.go(-R: Type, mp: Maybe<&2, Pk.Pack>, m: Machine, +off: U.U64) -> V.Op<R, PackDone>:
+  match mp:
+    case None{}:
+      V.Op.pure(R, PackDone, PackDone{m, Pk.Pack.no_pack()})
+    case Some{+pk}:
+      Machine.pack_drop.can(R, Pk.Pack.can_drop(pk, off), m, pk, off)
+
+# `pack drop OFFSET`: the live entry at OFFSET is dead from now on (reads of
+# its slot fail; the slot is never given again) and its file is closed.
+def Machine.pack_drop(+m: Machine, +off: U.U64) -> V.Vm<PackDone>:
+  V.Op.finish(PackDone, Machine.pack_drop.go(PackDone, Machine.pack(m), m, off))
+
+# After a restore: each live entry's file, opened again, must be the one
+# that was added; the first that is missing or changed is named (the restore
+# fails, as a missing --disk image fails it); "" when all are.
+def Machine.pack_check.got(-R: Type, same: Bool, +path: String, more: V.Op<R, String>) -> V.Op<R, String>:
+  match same:
+    case True{}:
+      more
+    case False{}:
+      V.Op.pure(R, String, "the pack's file " ++ path ++ " is missing or changed")
+
+def Machine.pack_check.one(-R: Type, live: Bool, +n: U32, +path: String, +id: Pk.PackId, more: V.Op<R, String>) -> V.Op<R, String>:
+  match live:
+    case False{}:
+      more
+    case True{}:
+      do V.Op<R, String>:
+        ws : +List<U32> <- V.Op.pack_open(R, Pk.Pack.slot_of(n), Pk.Pack.key_of(n), path)
+        Machine.pack_check.got(R, Pk.Pack.same(id, Pk.Pack.facts(ws)), path, more)
+
+def Machine.pack_check.go(-R: Type, es: +List<Pk.PackEntry>) -> V.Op<R, String>:
+  match es:
+    case Nil{}:
+      V.Op.pure(R, String, "")
+    case Pk.PackEntry{n, off, len, path, id, live} <> t:
+      Machine.pack_check.one(R, live, n, path, id, Machine.pack_check.go(R, t))
+
+def Machine.pack_check.of(-R: Type, mp: Maybe<&2, Pk.Pack>) -> V.Op<R, String>:
+  match mp:
+    case None{}:
+      V.Op.pure(R, String, "")
+    case Some{pk}:
+      Machine.pack_check.go(R, Pk.Pack.entries(pk))
+
+def Machine.pack_check(m: Machine) -> V.Vm<String>:
+  V.Op.finish(String, Machine.pack_check.of(String, Machine.pack(m)))

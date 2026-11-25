@@ -4,6 +4,7 @@ import ../lib/bytes.bend as B
 import ../vmm/abi.bend as V
 import ./queue.bend as Q
 import ../disk/store.bend as S
+import ../disk/pack.bend as Pk
 
 # virtio-blk (Virtio 1.2 section 5.2), device id 2, one request queue. The
 # backing store is a host disk image. Request data moves between it and the
@@ -505,3 +506,87 @@ def Blk.serve(-R: Type, disk: U32, sectors: U.U64, ro: Bool, q: Q.Vq) -> V.Op<R,
 # Blk.serve on a read-write disk.
 def Blk.process(-R: Type, disk: U32, sectors: U.U64, q: Q.Vq) -> V.Op<R, Q.Vq & Bool>:
   Blk.serve(R, disk, sectors, False{}, q)
+
+# A pack (src/disk/pack.bend): a read-only disk of host files, which grows
+# while the VM runs. Offered as a read-only disk (Blk.offered(True{}),
+# Blk.config_limits with the pack's sectors); its id string is the pack's
+# name, so the guest finds it by /sys/block/vdX/serial.
+#   IN:     the pack's bytes (Pk.Pack.read: a dead slot or past the end IOERR)
+#   OUT:    IOERR (read-only)
+#   FLUSH:  OK (nothing is written)
+#   GET_ID: the name, NUL-padded to 20 bytes
+#   other:  UNSUPP
+
+def Blk.pack.id_bytes(name: String) -> +List<U32>:
+  List.take(&2, U32, List.append(&2, U32, B.Bytes.of_string(name), B.Bytes.zeros(20n)), 20n)
+
+def Blk.pack.in(-R: Type, ok: Bool, +p: Pk.Pack, +sector: U.U64, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
+  match ok:
+    case False{}:
+      Blk.reply(R, w, room, (Blk.s_ioerr(), []))
+    case True{}:
+      +last = (room - 1 : U32)
+      do V.Op<R, U32>:
+        s : U32 <- Pk.Pack.read(R, p, Blk.offset(sector), Q.Vq.segs(w, 0, last))
+        Blk.put(R, w, last, s)
+        return room
+
+def Blk.pack.kind(-R: Type, k: Nat, +p: Pk.Pack, +sector: U.U64, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
+  match k:
+    case 0n:
+      +len = (room - 1 : U32)
+      Blk.pack.in(R, Blk.len_ok(len) && Blk.fits(Pk.Pack.sectors(p), sector, len), p, sector, w, room)
+    case 1n:
+      Blk.reply(R, w, room, (Blk.s_ioerr(), []))
+    case 2n:
+      Blk.reply(R, w, room, (Blk.s_ok(), Blk.pack.id_bytes(Pk.Pack.name(p))))
+    case 3n:
+      Blk.reply(R, w, room, (Blk.s_ok(), []))
+    case _:
+      Blk.reply(R, w, room, (Blk.s_unsupp(), []))
+
+def Blk.pack.exec(-R: Type, short: Bool, +hdr: +List<U32>, +p: Pk.Pack, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
+  match short:
+    case True{}:
+      Blk.reply(R, w, room, (Blk.s_ioerr(), []))
+    case False{}:
+      Blk.pack.kind(R, Blk.kind(B.Bytes.read_le32(hdr)), p, B.Bytes.read_le64(List.drop(&2, U32, hdr, 8n)), w, room)
+
+def Blk.pack.answer(-R: Type, empty: Bool, +p: Pk.Pack, +r: +List<Q.Desc>, +w: +List<Q.Desc>, +room: U32) -> V.Op<R, U32>:
+  match empty:
+    case True{}:
+      V.Op.pure(R, U32, 0)
+    case False{}:
+      do V.Op<R, U32>:
+        +hdr : +List<U32> <- Q.Vq.read_segs(R, Q.Vq.segs(r, 0, 16))
+        Blk.pack.exec(R, Nat.is_lt(List.length(&2, U32, hdr), 16n), hdr, p, w, room)
+
+def Blk.pack.chain(-R: Type, +p: Pk.Pack, q: Q.Vq, c: Q.Chain) -> V.Op<R, Q.Vq>:
+  match c:
+    case Q.Chain{+h, r, +w}:
+      +room = Blk.room(w)
+      do V.Op<R, Q.Vq>:
+        n : U32 <- Blk.pack.answer(R, U32.is_zero(room), p, r, w, room)
+        Q.Vq.push(R, q, h, n)
+
+def Blk.pack.step(-R: Type, +p: Pk.Pack, r: Q.Vq & Maybe<&2, Q.Chain>, used: Bool, k: Q.Vq -> V.Op<R, Q.Vq & Bool>) -> V.Op<R, Q.Vq & Bool>:
+  match r:
+    case (q, None{}):
+      V.Op.pure(R, Q.Vq & Bool, (q, used))
+    case (q, Some{c}):
+      V.Op.bind(R, Q.Vq, Q.Vq & Bool, Blk.pack.chain(R, p, q, c), k)
+
+def Blk.pack.go(fuel: Nat, -R: Type, +p: Pk.Pack, q: Q.Vq, used: Bool) -> V.Op<R, Q.Vq & Bool>:
+  match fuel:
+    case 0n:
+      V.Op.pure(R, Q.Vq & Bool, (q, used))
+    case 1n+f:
+      do V.Op<R, Q.Vq & Bool>:
+        r : Q.Vq & Maybe<&2, Q.Chain> <- Q.Vq.pop(R, q)
+        Blk.pack.step(R, p, r, used, q2 => Blk.pack.go(f, R, p, q2, True{}))
+
+# Serves every available request of a pack's queue (at most num per call).
+def Blk.serve_pack(-R: Type, p: Pk.Pack, q: Q.Vq) -> V.Op<R, Q.Vq & Bool>:
+  match q:
+    case Q.Vq{+num, d, dr, dv, na, nu}:
+      Blk.pack.go(U32.to_nat(num), R, p, Q.Vq{num, d, dr, dv, na, nu}, False{})

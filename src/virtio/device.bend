@@ -7,6 +7,7 @@ import ./queue.bend as Q
 import ./rng.bend as Rng
 import ./blk.bend as Blk
 import ../disk/store.bend as St
+import ../disk/pack.bend as Pk
 import ./console.bend as Con
 import ./net.bend as N
 import ../fs/p9.bend as P
@@ -85,6 +86,9 @@ type DevKind is Data:
   # The automatic balloon holding at most pct percent of the guest's RAM
   # (--balloon auto,max=PCT; BalloonKind{True{}} holds at most half).
   BalloonMaxKind{pct: U32}
+  # A pack (src/disk/pack.bend): a read-only disk of host files that grows
+  # while the VM runs (--disk NAME:pack; pack add, pack drop).
+  PackKind{pack: Pk.Pack}
 
 # The per-kind state of a device.
 type DevState is Data:
@@ -144,6 +148,8 @@ def Dev.mmio(kind: DevKind) -> M.VirtioMmio:
         M.VirtioMmio.new(5, Bl.Balloon.offered(), Bl.Balloon.queues(), 256, Bl.Balloon.config()))
     case BalloonMaxKind{pct}:
       M.VirtioMmio.new(5, Bl.Balloon.offered_auto(), Bl.Balloon.queues_auto(), 256, Bl.Balloon.config())
+    case PackKind{p}:
+      M.VirtioMmio.new(2, Blk.Blk.offered(True{}), 1n, 256, Blk.Blk.config_limits(Pk.Pack.sectors(p)))
 
 # The state of a fresh device of the given kind.
 def Dev.state(kind: DevKind) -> DevState:
@@ -172,6 +178,8 @@ def Dev.state(kind: DevKind) -> DevState:
       BalDev{Bl.Balloon.new(), Bl.Balloon.auto_new()}
     case BalloonMaxKind{pct}:
       BalDev{Bl.Balloon.new(), Bl.Balloon.auto_new()}
+    case PackKind{p}:
+      NoState{}
 
 def Dev.new(kind: DevKind) -> Dev:
   +kind = kind
@@ -253,6 +261,8 @@ def Dev.process(-R: Type, k: DevKind, q: Q.Vq) -> V.Op<R, Q.Vq & Bool>:
       V.Op.pure(R, Q.Vq & Bool, (q, False{}))
     case BalloonMaxKind{pct}:
       V.Op.pure(R, Q.Vq & Bool, (q, False{}))
+    case PackKind{p}:
+      Blk.Blk.serve_pack(R, p, q)
 
 # The pending console input of a state (none for other kinds).
 def Dev.input_of(st: DevState) -> +List<U32>:
@@ -561,6 +571,10 @@ def Dev.pass(-R: Type, k: DevKind, st: DevState, +sel: U32, q: Q.Vq) -> V.Op<R, 
       do V.Op<R, Pass>:
         r : Q.Vq & Bool <- Dev.process(R, BlkStoreKind{store, sectors, ro}, q)
         return Dev.pass.plain(st, r)
+    case PackKind{p}:
+      do V.Op<R, Pass>:
+        r : Q.Vq & Bool <- Dev.process(R, PackKind{p}, q)
+        return Dev.pass.plain(st, r)
 
 # A device with nothing for the host.
 def Dev.out(d: Dev) -> DevOut:
@@ -727,6 +741,8 @@ def Dev.is_console(k: DevKind) -> Bool:
       False{}
     case BalloonMaxKind{pct}:
       False{}
+    case PackKind{p}:
+      False{}
 
 def Dev.is_net(k: DevKind) -> Bool:
   match k:
@@ -753,6 +769,8 @@ def Dev.is_net(k: DevKind) -> Bool:
     case BalloonKind{auto}:
       False{}
     case BalloonMaxKind{pct}:
+      False{}
+    case PackKind{p}:
       False{}
 
 def Dev.input.go(-R: Type, console: Bool, k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState, bytes: +List<U32>) -> V.Op<R, Dev>:
@@ -977,3 +995,48 @@ def Dev.balloon_info(d: Dev) -> Maybe<&2, Bl.Bal>:
   match d:
     case Dev{+k, m, qs, st}:
       Bool.pick(Maybe<&2, Bl.Bal>, Dev.is_balloon(k), Some{Dev.bal_of(st)}, None{})
+
+# Packs (src/disk/pack.bend)
+# ==========================
+
+# `pack add`: a pack takes the file (id: what the host's open said) and tells
+# the driver its new capacity (config change interrupt); other kinds are
+# unchanged.
+def Dev.pack_add.go(k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState, path: String, +id: Pk.PackId) -> Dev:
+  match k:
+    case PackKind{p}:
+      +p2 = Pk.Pack.add(p, path, id)
+      Dev{PackKind{p2}, M.VirtioMmio.config_changed(m, Blk.Blk.config_limits(Pk.Pack.sectors(p2))), qs, st}
+    case other:
+      Dev{other, m, qs, st}
+
+def Dev.pack_add(d: Dev, path: String, +id: Pk.PackId) -> Dev:
+  match d:
+    case Dev{k, m, qs, st}:
+      Dev.pack_add.go(k, m, qs, st, path, id)
+
+# `pack drop`: the entry at off is dead (its slot stays; the capacity too).
+def Dev.pack_drop.go(k: DevKind, m: M.VirtioMmio, qs: +List<Q.Vq>, st: DevState, +off: U.U64) -> Dev:
+  match k:
+    case PackKind{p}:
+      Dev{PackKind{Pk.Pack.drop(p, off)}, m, qs, st}
+    case other:
+      Dev{other, m, qs, st}
+
+def Dev.pack_drop(d: Dev, +off: U.U64) -> Dev:
+  match d:
+    case Dev{k, m, qs, st}:
+      Dev.pack_drop.go(k, m, qs, st, off)
+
+def Dev.pack_of.kind(k: DevKind) -> Maybe<&2, Pk.Pack>:
+  match k:
+    case PackKind{p}:
+      Some{p}
+    case _:
+      None{}
+
+# The pack a device is, if it is one.
+def Dev.pack_of(d: Dev) -> Maybe<&2, Pk.Pack>:
+  match d:
+    case Dev{k, m, qs, st}:
+      Dev.pack_of.kind(k)

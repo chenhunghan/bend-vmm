@@ -101,6 +101,7 @@ Options:
 | `--display WxH` | a window showing the guest's framebuffer, with a virtio keyboard and tablet (`WxH,headless`: no window, for `screendump`) |
 | `--version`, `--help` | the release, the options |
 | `--control SOCK` | a Unix socket for management commands (below) |
+| `--pack NAME` | a pack: one read-only virtio-blk disk, empty at start, that host files join while the VM runs (`pack add PATH` below); the guest finds it by its serial, NAME (1 to 20 of `A-Z a-z 0-9 . _ -`, at `/sys/block/vdX/serial`) |
 | `--restore FILE` | start from a snapshot; pass the same `--disk`, `--share`, `--vsock`, `--firmware` and `--vars` it was taken with (a snapshot cannot choose host files by itself); `--forward` comes from this command line, not the snapshot |
 
 Linux (KVM): the same binary builds on Linux arm64 (clang, `libx11-dev`)
@@ -150,6 +151,7 @@ Management: on the console, `Ctrl-A p` pauses or resumes, `Ctrl-A s` writes
 `./bend-vmm.snap`, `Ctrl-A x` quits, `Ctrl-A h` lists the keys. Over
 `--control`: `echo pause | nc -U SOCK` (also `resume`, `status`,
 `snapshot PATH`, `hibernate PATH`, `status json` (`{"state":"running"}`), `balloon MiB|auto`, `net` (the NAT's connections and flow state),
+`pack add PATH` and `pack drop OFFSET` (with `--pack`, below),
 `powerdown` (presses the guest's power button), `quit`;
 with `--display`, `screendump PATH` writes the
 screen as a PPM, `type TEXT` types on the virtio keyboard (`\n` is Return),
@@ -236,6 +238,35 @@ transmit data, `=8` shared-folder reads and writes (bits add up).
 Releases: a tag `v*` builds `bend-vmm` for macOS (signed with a Developer ID
 and notarized) and Linux arm64 and publishes both on a GitHub release
 (`.github/workflows/release.yml`; the signing secrets are listed there).
+
+## Packs: host files as one growing disk
+
+`--pack NAME` gives the guest a read-only virtio-blk disk that starts empty
+(bend-vk8s keeps its container image layers there: one squashfs image per
+layer, loop-mounted, a large virtio-blk read where a 9p share's are 4 KiB
+pages). `pack add PATH` on the control socket opens the file read-only (as
+`--disk PATH:ro` would), places it at the disk's end on a 1 MiB boundary,
+grows the disk (the guest sees the new size at once: a config change) and
+answers `OFFSET LENGTH` in bytes. In the guest, with busybox:
+
+```sh
+dev=$(for b in /sys/block/vd*; do [ "$(cat $b/serial)" = NAME ] && echo /dev/${b##*/}; done)
+losetup -r -o OFFSET /dev/loop0 $dev && mount -t squashfs -o ro /dev/loop0 /mnt/layer
+```
+
+Past a file's end its slot reads as zeros. `pack drop OFFSET` (once the
+guest has unmounted it) ends the entry: its slot then fails to read, its file
+is closed, and the slot is never handed out again, so the guest's cache of
+the disk can never show one file's bytes for another; the disk never
+shrinks. Files are opened on demand into 32 host descriptors (entry n in
+slot n mod 32), and a file opened again must be the one added (device,
+inode, size, modification time): one changed since reads as an I/O error.
+`status json` lists the pack (`"pack":{"name":…,"size":…,"entries":[{"offset":…,"length":…,"path":…,"live":…}]}`).
+A snapshot or hibernate keeps the table; a restore opens every live file
+again and fails, naming it, when one is missing or changed. Reading all of
+a 96 MiB squashfs layer's files (337 MB) cold, the reader on vCPU 1:
+1.55-1.83 s from the pack and 1.95-2.03 s over a 9p share on macOS;
+1.5-2.7 s from the pack and 8.6-9.0 s over 9p on nested arm64 KVM.
 
 ## Memory give-back
 

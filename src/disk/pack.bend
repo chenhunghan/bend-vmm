@@ -62,9 +62,11 @@ def Pack.align_bits() -> Nat:
 def Pack.align() -> U.U64:
   U.U64{0, 1048576}
 
-# The host's descriptor slots (src/net/fds.bend keeps a spare for them).
+# The host's descriptor slots: 32 of the 128 descriptors src/net/fds.bend
+# keeps beside the guest's flows (macOS caps the process at 1024), which also
+# hold the disks, the shares' open files, the vCPUs' pipes and the sockets.
 def Pack.slots() -> U32:
-  64
+  32
 
 # A host read's answer: the slot holds another entry (or none).
 def Pack.miss() -> U32:
@@ -182,6 +184,18 @@ def Pack.has_live(es: +List<PackEntry>, +off: U.U64) -> Bool:
 
 def Pack.can_drop(p: Pack, off: U.U64) -> Bool:
   Pack.has_live(Pack.entries(p), off)
+
+# The number of the entry at offset off (0 when none: Pack.can_drop first).
+def Pack.n_at.go(es: +List<PackEntry>, +off: U.U64) -> U32:
+  match es:
+    case Nil{}:
+      0
+    case PackEntry{n, o, len, path, id, live} <> t:
+      Bool.pick(U32, U.U64.is_eq(o, off), n, Pack.n_at.go(t, off))
+
+def Pack.n_at(p: Pack, off: U.U64) -> U32:
+  Pack.n_at.go(Pack.entries(p), off)
+
 
 # The end of the last slot (at when there is none).
 def Pack.ends(es: +List<PackEntry>, at: U.U64) -> U.U64:
@@ -491,3 +505,16 @@ def Pack.json(p: Pack) -> String:
   match p:
     case Pack{nm, es, nx, c}:
       "{\"name\":" ++ Pack.json_str(nm) ++ ",\"size\":" ++ Pack.dec(nx) ++ ",\"entries\":[" ++ Pack.json_entries(es, True{}) ++ "]}"
+
+# Control replies (pack add, pack drop).
+def Pack.no_pack() -> String:
+  "error: no pack (start the VM with --disk NAME:pack)"
+
+def Pack.added(+off: U.U64, +len: U.U64) -> String:
+  Pack.dec(off) ++ " " ++ Pack.dec(len)
+
+def Pack.cannot_open(+path: String, +errno: U32) -> String:
+  "error: cannot open " ++ path ++ " (errno " ++ U32.show(errno) ++ ")"
+
+def Pack.no_entry(+off: U.U64) -> String:
+  "error: no live entry at " ++ Pack.dec(off)

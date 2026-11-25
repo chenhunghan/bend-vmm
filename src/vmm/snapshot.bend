@@ -18,6 +18,7 @@ import ../disk/qcow2.bend as Qc
 import ../virtio/lan.bend as Ln
 import ../virtio/balloon.bend as Bl
 import ../virtio/balauto.bend as Au
+import ../disk/pack.bend as Pk
 
 # The machine's device state as a stream of 32-bit words, for snapshots.
 # Snap.encode and Snap.decode are inverses (laws/snapshot.bend). The stream
@@ -117,6 +118,32 @@ def Enc.store(st: St.Store) -> +List<U32>:
     case St.QcowStore{d, q, below}:
       List.append(&2, U32, [2, d], List.append(&2, U32, Enc.qcow(q), Enc.store(below)))
 
+# A pack (tag 13): name, end, entries added, then each entry: number,
+# offset, length, path, identity (device, inode, size, mtime, its ns), live.
+def Enc.pack_id(i: Pk.PackId) -> +List<U32>:
+  match i:
+    case Pk.PackId{dv, ino, sz, mt, ns}:
+      List.append(&2, U32, X.Enc.u64(dv), List.append(&2, U32, X.Enc.u64(ino), List.append(&2, U32, X.Enc.u64(sz), List.append(&2, U32, X.Enc.u64(mt), [ns]))))
+
+def Enc.pack_entry(e: Pk.PackEntry) -> +List<U32>:
+  match e:
+    case Pk.PackEntry{n, off, len, path, id, live}:
+      +a = {n <> List.append(&2, U32, X.Enc.u64(off), X.Enc.u64(len)) : +List<U32>}
+      +b = List.append(&2, U32, X.Enc.string(path), Enc.pack_id(id))
+      List.append(&2, U32, a, List.append(&2, U32, b, [Bool.to_u32(live)]))
+
+def Enc.pack_entries(es: +List<Pk.PackEntry>) -> +List<U32>:
+  match es:
+    case Nil{}:
+      []
+    case e <> t:
+      List.append(&2, U32, Enc.pack_entry(e), Enc.pack_entries(t))
+
+def Enc.pack(p: Pk.Pack) -> +List<U32>:
+  match p:
+    case Pk.Pack{nm, +es, nx, c}:
+      List.append(&2, U32, 13 <> X.Enc.string(nm), List.append(&2, U32, X.Enc.u64(nx), List.append(&2, U32, [c, U32.from_nat(List.length(&2, Pk.PackEntry, es))], Enc.pack_entries(es))))
+
 def Enc.kind(k: D.DevKind) -> +List<U32>:
   match k:
     case D.RngKind{}:
@@ -145,6 +172,8 @@ def Enc.kind(k: D.DevKind) -> +List<U32>:
     case D.BalloonMaxKind{pct}:
       # 12: the automatic balloon holding at most pct percent of RAM
       [12, pct]
+    case D.PackKind{pk}:
+      Enc.pack(pk)
 
 def Enc.fids(fs: +List<F.Fid>) -> +List<U32>:
   match fs:
@@ -519,10 +548,49 @@ def Dec.kind.top4(max: Bool, +t: U32) -> X.Dec<D.DevKind>:
     case False{}:
       Dec.kind.top3(U32.is_eq(t, 11), t)
 
+def Dec.pack_entries(n: Nat) -> X.Dec<+List<Pk.PackEntry>>:
+  match n:
+    case 0n:
+      X.Dec.pure(+List<Pk.PackEntry>, [])
+    case 1n+k:
+      do X.Dec<+List<Pk.PackEntry>>:
+        en : U32 <- X.Dec.u32()
+        off : U.U64 <- X.Dec.u64()
+        len : U.U64 <- X.Dec.u64()
+        path : String <- X.Dec.string()
+        dv : U.U64 <- X.Dec.u64()
+        ino : U.U64 <- X.Dec.u64()
+        sz : U.U64 <- X.Dec.u64()
+        mt : U.U64 <- X.Dec.u64()
+        ns : U32 <- X.Dec.u32()
+        live : Bool <- X.Dec.bool()
+        rest : +List<Pk.PackEntry> <- Dec.pack_entries(k)
+        return Pk.PackEntry{en, off, len, path, Pk.PackId{dv, ino, sz, mt, ns}, live} <> rest
+
+# (a pack whose slots do not tile is a malformed file)
+def Dec.kind.pack.of(+p: Pk.Pack) -> X.Dec<D.DevKind>:
+  Bool.pick(X.Dec<D.DevKind>, Pk.Pack.tiles(p), X.Dec.pure(D.DevKind, D.PackKind{p}), X.Dec.fail(D.DevKind))
+
+def Dec.kind.pack() -> X.Dec<D.DevKind>:
+  do X.Dec<D.DevKind>:
+    nm : String <- X.Dec.string()
+    nx : U.U64 <- X.Dec.u64()
+    c : U32 <- X.Dec.u32()
+    n : Nat <- Dec.count()
+    es : +List<Pk.PackEntry> <- Dec.pack_entries(n)
+    Dec.kind.pack.of(Pk.Pack{nm, es, nx, c})
+
+def Dec.kind.top5(pack: Bool, +t: U32) -> X.Dec<D.DevKind>:
+  match pack:
+    case True{}:
+      Dec.kind.pack()
+    case False{}:
+      Dec.kind.top4(U32.is_eq(t, 12), t)
+
 def Dec.kind() -> X.Dec<D.DevKind>:
   do X.Dec<D.DevKind>:
     +t : U32 <- X.Dec.u32()
-    Dec.kind.top4(U32.is_eq(t, 12), t)
+    Dec.kind.top5(U32.is_eq(t, 13), t)
 
 def Dec.fids(n: Nat) -> X.Dec<+List<F.Fid>>:
   match n:

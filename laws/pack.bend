@@ -113,7 +113,7 @@ law pack.split_empty_pack:
 law pack.split_none:
   {P.Pack.split(pk.c(), U.U64{0, 0}, 0) == [] : List<&2, P.Piece>}
 
-# The descriptor cache: entry n in slot n mod 64, as key n + 1.
+# The descriptor cache: entry n in slot n mod 32, as key n + 1.
 law pack.slot_of:
   {P.Pack.slot_of(65) == 1 : U32}
 

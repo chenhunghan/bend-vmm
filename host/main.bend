@@ -28,6 +28,7 @@ import ../src/net/udpflow.bend as Uf
 import ../src/net/nat.bend as Nt
 import ../src/arm64/psci.bend as Ps
 import ../src/arm64/irqroute.bend as Rt
+import ../src/disk/pack.bend as Pk
 import ../src/virtio/device.bend as D
 import ../src/virtio/input.bend as In
 import ../src/dev/keymap.bend as Km
@@ -953,6 +954,47 @@ def balloon_reply(has: Bool, info: Maybe<&2, Bl.Bal>) -> String:
     case Some{+b}:
       Ctl.Ctl.balloon_reply(Bl.Balloon.target(b), Bl.Balloon.actual(b))
 
+# A pack's restore check (Machine.pack_check): it opens files and nothing
+# else, so this runs it before the machine exists.
+@unsafe def pack_check.run(m: V.Vm<String>) -> IO(String):
+  match m:
+    case V.VmRet{x}:
+      IO.pure(String, x)
+    case V.VmPackOpen{slot, key, path, k}:
+      do IO<String>:
+        ws : +List<U32> <- H.Hvf.pack_open(slot, key, path, Acc.Access.flags(Acc.Backing{}))
+        pack_check.run(k(ws))
+    case _:
+      IO.pure(String, "the pack's check asked for something else")
+
+@unsafe def pack_check(m: Maybe<&2, M.Machine>) -> IO(String):
+  match m:
+    case None{}:
+      IO.pure(String, "")
+    case Some{mc}:
+      pack_check.run(M.Machine.pack_check(mc))
+
+# pack add, pack drop (src/vmm/machine.bend decides; the reply is its).
+@unsafe def command.pack(+mc: Chan(M.Machine), +done: Chan(U32), prog: M.Machine -> V.Vm<M.PackDone>) -> IO(String):
+  do IO<String>:
+    m0 : M.Machine <- take(mc)
+    r : M.PackDone <- interp(Rt.Route.none(), mc, done, M.PackDone, prog(m0))
+    command.pack.fin(mc, r)
+
+@unsafe def command.pack.fin(+mc: Chan(M.Machine), r: M.PackDone) -> IO(String):
+  match r:
+    case M.PackDone{m1, reply}:
+      do IO<String>:
+        put(mc, m1)
+        return reply
+
+def pack_json(m: Maybe<&2, Pk.Pack>) -> String:
+  match m:
+    case None{}:
+      ""
+    case Some{pk}:
+      Pk.Pack.json(pk)
+
 # A control command (src/vmm/control.bend says which a line is), carried out.
 @unsafe def command.run(c: Ctl.Cmd, +mc: Chan(M.Machine), +done: Chan(U32)) -> IO(String):
   match c:
@@ -981,13 +1023,14 @@ def balloon_reply(has: Bool, info: Maybe<&2, Bl.Bal>) -> String:
         +st : +List<U32> <- H.Hvf.pause_state()
         +m : M.Machine <- take(mc)
         +info : Maybe<&2, Bl.Bal> = M.Machine.balloon_info(m)
+        +pj : String = pack_json(M.Machine.pack(m))
         put(mc, m)
         +res : U32 <- H.Hvf.ram_kib(0)
         +comp : U32 <- H.Hvf.ram_kib(1)
         ex : +List<U32> <- H.Hvf.exit_counts()
         +paused : Bool = Bool.not(U32.is_zero(H.Host.first(st)))
         +hib : U32 <- H.Hvf.hib_mark(0)
-        return Ctl.Ctl.with_exits(Ctl.Ctl.with_ram(Ctl.Ctl.with_hibernated(status_json(paused, info), paused && U32.is_ne(hib, 0)), res, comp), ex)
+        return Ctl.Ctl.with_exits(Ctl.Ctl.with_pack(Ctl.Ctl.with_ram(Ctl.Ctl.with_hibernated(status_json(paused, info), paused && U32.is_ne(hib, 0)), res, comp), pj), ex)
     case Ctl.CBalloon{mib}:
       do IO<String>:
         +m0 : M.Machine <- take(mc)
@@ -996,6 +1039,10 @@ def balloon_reply(has: Bool, info: Maybe<&2, Bl.Bal>) -> String:
         +info : Maybe<&2, Bl.Bal> = M.Machine.balloon_info(m1)
         put(mc, m1)
         return balloon_reply(has, info)
+    case Ctl.CPackAdd{path}:
+      command.pack(mc, done, m => M.Machine.pack_add(m, path))
+    case Ctl.CPackDrop{off}:
+      command.pack(mc, done, m => M.Machine.pack_drop(m, off))
     case Ctl.CBalloonAuto{}:
       do IO<String>:
         +m0 : M.Machine <- take(mc)
@@ -1695,7 +1742,22 @@ def devices.balloon(on: Bool, +auto: Bool, +pct: U32) -> +List<D.DevKind>:
     case False{}:
       []
 
-@unsafe def devices(o: Op.Opts, +balloon: Bool, +auto: Bool, +pct: U32) -> IO(+List<D.DevKind>):
+# --pack NAME: a pack, empty at boot (src/disk/pack.bend); none without it.
+def devices.pack(+name: String) -> +List<D.DevKind>:
+  Bool.pick(+List<D.DevKind>, String.is_empty(name), [], [D.PackKind{Pk.Pack.new(name)}])
+
+# A restored machine's pack: the snapshot's, its table included.
+def pack_kinds(ks: +List<D.DevKind>) -> +List<D.DevKind>:
+  match ks:
+    case Nil{}:
+      []
+    case D.PackKind{pk} <> t:
+      D.PackKind{pk} <> pack_kinds(t)
+    case k <> t:
+      pack_kinds(t)
+
+# The devices: the pack (packs: none or one) after the disks.
+@unsafe def devices(o: Op.Opts, +balloon: Bool, +auto: Bool, +pct: U32, +packs: +List<D.DevKind>) -> IO(+List<D.DevKind>):
   match o:
     case Op.Opts{k, i, p, c, m, n, +d, +sh, rs, ct, +vk, dp, fw, nv, fd, +ln}:
       do IO<+List<D.DevKind>>:
@@ -1704,7 +1766,7 @@ def devices.balloon(on: Bool, +auto: Bool, +pct: U32) -> +List<D.DevKind>:
         +shares : +List<D.DevKind> <- devices.share(String.is_empty(sh), sh)
         +socks : +List<D.DevKind> <- devices.vsock(String.is_empty(vk), vk)
         +bl : +List<D.DevKind> = devices.balloon(balloon, auto, pct)
-        return List.append(&2, D.DevKind, base_devices(), List.append(&2, D.DevKind, lan, List.append(&2, D.DevKind, disks, List.append(&2, D.DevKind, shares, List.append(&2, D.DevKind, socks, List.append(&2, D.DevKind, devices.input(String.is_empty(dp)), bl))))))
+        return List.append(&2, D.DevKind, base_devices(), List.append(&2, D.DevKind, lan, List.append(&2, D.DevKind, List.append(&2, D.DevKind, disks, packs), List.append(&2, D.DevKind, shares, List.append(&2, D.DevKind, socks, List.append(&2, D.DevKind, devices.input(String.is_empty(dp)), bl))))))
 
 def initrd_of(present: Bool, start: U.U64, end: U.U64) -> Maybe<&2, T.Initrd>:
   match present:
@@ -2243,11 +2305,13 @@ def snap.start(h: Maybe<&2, Sf.Head>, +size: U.U64) -> IO(Sf.Layout):
     +got : Maybe<&2, M.Machine> = Snap.Snap.decode(ws)
     # the balloon as the snapshot has it (snapshots from before it was the
     # default have none)
-    +kinds : +List<D.DevKind> <- devices(o, has_balloon(machine_kinds(got)), has_auto_balloon(machine_kinds(got)), balloon_pct(machine_kinds(got)))
+    +kinds : +List<D.DevKind> <- devices(o, has_balloon(machine_kinds(got)), has_auto_balloon(machine_kinds(got)), balloon_pct(machine_kinds(got)), pack_kinds(machine_kinds(got)))
     # the devices as this run opened them (a disk's size, read-only, its
     # format) must be the snapshot's
     die_if(Bool.not(words_eq(kinds_words(machine_kinds(got)), kinds_words(kinds))), "the snapshot's devices differ from the ones opened now (a disk changed size or format?)")
     _ : U32 <- restore.flash_mode(got)
+    +bad : String <- pack_check(got)
+    die_if(Bool.not(String.is_empty(bad)), bad)
     restore.machine(got, o, kinds)
 
 # x86_64 guests (KVM on a Linux x86_64 host)
@@ -2487,8 +2551,9 @@ def x86.unsupported(o: Op.Opts) -> String:
     die_if(Bool.not(String.is_empty(no)), no ++ " is not supported on x86_64 yet")
     args : List<String> <- H.Hvf.args()
     +prog : U32 <- H.Hvf.prog()
-    +bv : String = Cli.Cli.find(List.drop(&1, String, args, U32.to_nat(prog)), "--balloon")
-    +kinds : +List<D.DevKind> <- devices(o, Cli.Cli.balloon_on(bv), Cli.Cli.balloon_auto(bv), Cli.Cli.balloon_max(bv))
+    +given : List<String> = List.drop(&1, String, args, U32.to_nat(prog))
+    +bv : String = Cli.Cli.find(given, "--balloon")
+    +kinds : +List<D.DevKind> <- devices(o, Cli.Cli.balloon_on(bv), Cli.Cli.balloon_auto(bv), Cli.Cli.balloon_max(bv), devices.pack(Cli.Cli.find(given, "--pack")))
     +nslots : U32 = U32.from_nat(List.length(&2, D.DevKind, kinds))
     die_if(U32.is_gt(nslots, X.X86.slots_with_lines()), "too many devices for x86_64 (at most " ++ U32.show(X.X86.slots_with_lines()) ++ ")")
     +su : U32 <- H.Hvf.x86_setup(X.X86.gsi_table(), Xb.Boot.cpuid_rules(), X.X86.kvm_words(), X.X86.pic_words())
@@ -2514,8 +2579,9 @@ def x86.unsupported(o: Op.Opts) -> String:
     display.map(display_of(Op.Opts.display(o)))
     args : List<String> <- H.Hvf.args()
     +prog : U32 <- H.Hvf.prog()
-    +bv : String = Cli.Cli.find(List.drop(&1, String, args, U32.to_nat(prog)), "--balloon")
-    +kinds : +List<D.DevKind> <- devices(o, Cli.Cli.balloon_on(bv), Cli.Cli.balloon_auto(bv), Cli.Cli.balloon_max(bv))
+    +given : List<String> = List.drop(&1, String, args, U32.to_nat(prog))
+    +bv : String = Cli.Cli.find(given, "--balloon")
+    +kinds : +List<D.DevKind> <- devices(o, Cli.Cli.balloon_on(bv), Cli.Cli.balloon_auto(bv), Cli.Cli.balloon_max(bv), devices.pack(Cli.Cli.find(given, "--pack")))
     entry : U.U64 & U.U64 <- boot(o, List.length(&2, D.DevKind, kinds))
     start(o, kinds, entry)
 
@@ -2575,7 +2641,7 @@ def x86.unsupported(o: Op.Opts) -> String:
     _ : U32 <- H.Hvf.snap_plans(X.X86.vm_plan(), X.X86.cpu_plan())
     ws : +List<U32> <- H.Hvf.snap_machine()
     +got : Maybe<&2, M.Machine> = Snap.Snap.decode(ws)
-    +kinds : +List<D.DevKind> <- devices(o, has_balloon(machine_kinds(got)), has_auto_balloon(machine_kinds(got)), balloon_pct(machine_kinds(got)))
+    +kinds : +List<D.DevKind> <- devices(o, has_balloon(machine_kinds(got)), has_auto_balloon(machine_kinds(got)), balloon_pct(machine_kinds(got)), pack_kinds(machine_kinds(got)))
     die_if(Bool.not(words_eq(kinds_words(machine_kinds(got)), kinds_words(kinds))), "the snapshot's devices differ from the ones opened now (a disk changed size or format?)")
     x86.restore.machine(got, o)
 

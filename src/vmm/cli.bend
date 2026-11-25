@@ -3,6 +3,7 @@ import ../boot/dtb.bend as T
 import ../net/addr.bend as Ad
 import ../lib/u64.bend as U
 import ./layout.bend as Ly
+import ../disk/pack.bend as Pk
 
 # The command line (laws/cli.bend): which arguments are valid, and the
 # --display spec. host/main.bend fills its options from flag and value pairs
@@ -10,7 +11,7 @@ import ./layout.bend as Ly
 
 def Cli.flags() -> +List<String>:
   ["--kernel", "--initrd", "--payload", "--cmdline", "--mem", "--cpus", "--disk", "--share", "--restore",
-   "--control", "--vsock", "--display", "--firmware", "--vars", "--forward", "--lan", "--console-log", "--balloon"]
+   "--control", "--vsock", "--display", "--firmware", "--vars", "--forward", "--lan", "--console-log", "--balloon", "--pack"]
 
 def Cli.known(+flag: String, fs: +List<String>) -> Bool:
   match fs:
@@ -632,7 +633,8 @@ def Cli.why(+flag: String, +v: String) -> String:
   Bool.pick(String, String.eq(flag, "--console-log") && Bool.not(Cli.conlog_ok(Cli.conlog(v))), "--console-log takes PATH,max=SIZE[,keep=N] (N up to 99) (not " ++ v ++ ")",
   Bool.pick(String, String.eq(flag, "--forward") && Bool.not(Fwd.all_ok(Fwd.specs(v))), "--forward takes [ADDR:]HOSTPORT:GUESTPORT[,...] (ports 1 to 65535) (not " ++ v ++ ")",
   Bool.pick(String, String.eq(flag, "--balloon") && Bool.not(Cli.balloon_ok(v)), "--balloon takes auto (the default), auto,max=PCT (10 to 90), free-page-reporting or off (not " ++ v ++ ")",
-  "")))))))))
+  Bool.pick(String, String.eq(flag, "--pack") && Bool.not(Pk.Pack.name_ok(v)), "--pack takes NAME, 1 to 20 of A-Z a-z 0-9 . _ - (not " ++ v ++ ")",
+  ""))))))))))
 
 # One walk over the flags: the first wrong one's message, and every --share
 # value, one a line (as src/vmm/opts.bend keeps them).

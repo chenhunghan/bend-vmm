@@ -1,4 +1,6 @@
 import Base
+import ../lib/u64.bend as U
+import ../disk/pack.bend as Pk
 
 # The management protocol (--control): one line per client, a verb and an
 # optional argument, answered with one line. The host reads the line and
@@ -30,9 +32,14 @@ type Cmd is Data:
   # space comes back when the next snapshot or the VM's exit lets it go).
   # Disks are not kept: the file is no snapshot to restore.
   CHibernate{path: String}
+  # pack add PATH: the file joins the pack (--pack NAME) at its end; the
+  # reply is its OFFSET and LENGTH in bytes. pack drop OFFSET: the entry
+  # there is dead (src/disk/pack.bend).
+  CPackAdd{path: String}
+  CPackDrop{off: U.U64}
 
 def Ctl.usage() -> String:
-  "unknown command (pause, resume, snapshot PATH, hibernate PATH, screendump PATH, type TEXT, pointer X Y, powerdown, net, status [json], balloon MiB|auto, quit)"
+  "unknown command (pause, resume, snapshot PATH, hibernate PATH, screendump PATH, type TEXT, pointer X Y, powerdown, net, status [json], balloon MiB|auto, pack add PATH|drop OFFSET, quit)"
 
 def Ctl.pointer_usage() -> String:
   "usage: pointer X Y (0..32767)"
@@ -149,6 +156,29 @@ def Ctl.needs(+arg: String, c: Cmd, why: String) -> Cmd:
 def Ctl.status_json(paused: Bool) -> String:
   "{\"state\":\"" ++ Bool.pick(String, paused, "paused", "running") ++ "\"}"
 
+def Ctl.pack_usage() -> String:
+  "usage: pack add PATH, or pack drop OFFSET"
+
+def Ctl.pack_drop(m: Maybe<&2, U.U64>) -> Cmd:
+  match m:
+    case Some{off}:
+      CPackDrop{off}
+    case None{}:
+      CBad{Ctl.pack_usage()}
+
+# pack add PATH, pack drop OFFSET (decimal bytes).
+def Ctl.pack(+arg: String) -> Cmd:
+  +parts = String.split(arg, ' ')
+  +sub = Maybe.default(&2, String, List.head(&2, String, parts), "")
+  +rest = String.join(List.drop(&2, String, parts, 1n), " ")
+  Bool.pick(Cmd, String.eq(sub, "add") && Bool.not(String.is_empty(rest)), CPackAdd{rest},
+    Bool.pick(Cmd, String.eq(sub, "drop"), Ctl.pack_drop(Pk.Pack.parse(rest)), CBad{Ctl.pack_usage()}))
+
+# status json with the pack's table ("pack":{...}) before the closing
+# brace, when the VM has one (pj empty: it has none).
+def Ctl.with_pack(+json: String, +pj: String) -> String:
+  Bool.pick(String, String.is_empty(pj), json, String.take(json, Nat.sub(String.length(json), 1n)) ++ ",\"pack\":" ++ pj ++ "}")
+
 def Ctl.verb(+verb: String, +arg: String) -> Cmd:
   Bool.pick(Cmd, String.eq(verb, "pause"), CPause{},
   Bool.pick(Cmd, String.eq(verb, "resume"), CResume{},
@@ -162,7 +192,8 @@ def Ctl.verb(+verb: String, +arg: String) -> Cmd:
   Bool.pick(Cmd, String.eq(verb, "type"), Ctl.needs(arg, CType{arg}, "usage: type TEXT"),
   Bool.pick(Cmd, String.eq(verb, "pointer"), Ctl.pointer(String.split(arg, ' ')),
   Bool.pick(Cmd, String.eq(verb, "balloon"), Bool.pick(Cmd, String.eq(arg, "auto"), CBalloonAuto{}, Ctl.balloon(U32.read(arg))),
-  CUnknown{}))))))))))))
+  Bool.pick(Cmd, String.eq(verb, "pack"), Ctl.pack(arg),
+  CUnknown{})))))))))))))
 
 # One command line: its first word is the verb, the rest (one space between
 # words) its argument.
