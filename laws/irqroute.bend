@@ -2,9 +2,9 @@ import Base
 import ../src/arm64/irqroute.bend as R
 import ../src/lib/u64.bend as U
 
-# Proposed (2026-11-24, bend-vk8s: 9p reads from a vCPU other than 0 waited
-# for an IPI per request): a device's SPI goes to the vCPU whose exit raised
-# it (src/arm64/irqroute.bend).
+# A device's SPI goes to the vCPU whose exit raised it
+# (src/arm64/irqroute.bend; bend-vk8s: 9p reads from a vCPU other than 0
+# waited for an IPI per request; approved by the owner 2026-11-25).
 
 # An SPI raised high from vCPU 1's exit goes to vCPU 1.
 law irqroute.to_vcpu:

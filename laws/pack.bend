@@ -2,8 +2,8 @@ import Base
 import ../src/disk/pack.bend as P
 import ../src/lib/u64.bend as U
 
-# Proposed (2026-11-25, bend-vk8s: a pack disk for image layers; the owner
-# approved the feature): src/disk/pack.bend.
+# A pack disk for image layers (src/disk/pack.bend; bend-vk8s; approved by
+# the owner 2026-11-25).
 #
 # The fixture: a pack "layers"; a (5 MiB + 3 bytes) at 0, its slot 6 MiB;
 # b (empty) at 6 MiB, its slot 1 MiB; a dropped; c (1 MiB) at 7 MiB.
