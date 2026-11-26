@@ -165,9 +165,9 @@ law control.with_hibernated:
 law control.with_hibernated_not:
   {C.Ctl.with_hibernated("{\"state\":\"running\"}", False{}) == "{\"state\":\"running\",\"hibernated\":false}" : String}
 
-# Proposed: pack list (bend-vk8s: the layer filler reads the pack's table
-# without status json's cost): the table as one line of JSON; anything after
-# list gets the pack's usage.
+# pack list (bend-vk8s: the layer filler reads the pack's table without
+# status json's cost; approved by the owner 2026-11-26): the table as one line
+# of JSON; anything after list gets the pack's usage.
 law control.pack_list:
   {C.Ctl.parse("pack list") == C.CPackList{} : C.Cmd}
 
